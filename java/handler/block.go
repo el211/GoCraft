@@ -12,8 +12,10 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"GoCraft/core/player"
+	"GoCraft/core/spatial"
 	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
@@ -21,22 +23,37 @@ import (
 	javaworld "GoCraft/java/world"
 )
 
-// digBreaksBlock reports whether the given Player Action status should break
-// the targeted block for a player in the given game mode.
-//
-// Creative mode breaks on START_DIGGING (status 0) because the client does
-// not run a mining animation — the block disappears immediately.
-// Survival mode (and adventure) breaks on FINISH_DIGGING (status 2) after the
-// full mining animation completes.
-//
-// In both cases CANCEL_DIGGING (status 1) is left to the caller; no world
-// change is made.
-func digBreaksBlock(status int32, mode player.GameMode) bool {
+// digBreaksBlock reports whether a Player Action should mutate the world.
+// Creative breaks immediately on START_DIGGING. Survival normally waits for
+// FINISH_DIGGING, but zero-hardness vegetation completes on START_DIGGING.
+// Adventure and spectator cannot mutate blocks.
+func digBreaksBlock(status int32, mode player.GameMode, blockName string) bool {
 	switch mode {
 	case player.GameModeCreative:
 		return status == actionStatusStartDigging
-	default: // survival, adventure
-		return status == actionStatusFinishDigging
+	case player.GameModeSurvival:
+		return status == actionStatusFinishDigging ||
+			(status == actionStatusStartDigging && survivalInstantBreakBlock(blockName))
+	default:
+		return false
+	}
+}
+
+func survivalInstantBreakBlock(blockName string) bool {
+	switch blockName {
+	case "minecraft:short_grass", "minecraft:grass", "minecraft:fern",
+		"minecraft:tall_grass", "minecraft:large_fern", "minecraft:dead_bush",
+		"minecraft:dandelion", "minecraft:poppy", "minecraft:allium",
+		"minecraft:azure_bluet", "minecraft:red_tulip", "minecraft:orange_tulip",
+		"minecraft:white_tulip", "minecraft:pink_tulip", "minecraft:oxeye_daisy",
+		"minecraft:cornflower", "minecraft:lily_of_the_valley", "minecraft:blue_orchid",
+		"minecraft:sunflower", "minecraft:lilac", "minecraft:rose_bush", "minecraft:peony",
+		"minecraft:wither_rose", "minecraft:torchflower", "minecraft:brown_mushroom",
+		"minecraft:red_mushroom", "minecraft:wheat", "minecraft:carrots",
+		"minecraft:potatoes", "minecraft:beetroots", "minecraft:nether_wart":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -97,13 +114,16 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 		return nil
 	}
 
-	if digBreaksBlock(status, p.GameMode) {
-		broken := w.GetBlock(int(bx), int(by), int(bz))
+	broken := w.GetBlock(int(bx), int(by), int(bz))
+	if !broken.IsAir() && digBreaksBlock(status, p.GameMode, broken.ResourceLocation()) {
 		slog.Info("block break", "player", p.Username,
 			"x", bx, "y", by, "z", bz,
 			"block", broken.ResourceLocation(),
 			"mode", p.GameMode, "status", status)
 		applyBlockChange(int(bx), int(by), int(bz), coreworld.Air, w, mgr)
+		breakLinkedPlantHalf(int(bx), int(by), int(bz), broken, w, mgr)
+		broadcastSoundAt(mgr, blockBreakSound(broken.ResourceLocation()), soundCategoryBlocks,
+			float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 0.8)
 
 		// Give drop to player in survival/adventure mode.
 		if p.GameMode != player.GameModeCreative && p.GameMode != player.GameModeSpectator {
@@ -115,14 +135,45 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 					if ok {
 						_ = sendSetContainerContent(sess.Conn, p, 1)
 					}
+					// GoCraft does not yet spawn experience-orb entities, but
+					// experience-bearing ores still provide vanilla pickup feedback.
+					if rewardsExperience(broken.ResourceLocation()) {
+						broadcastSoundAt(mgr, "minecraft:entity.experience_orb.pickup", soundCategoryPlayers,
+							float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 0.2, 1)
+					}
 				}
 			}
 		}
+	}
+	if status == actionStatusStartDigging || status == actionStatusCancelDigging {
+		slog.Debug("block digging", "player", p.Username, "x", bx, "y", by, "z", bz,
+			"mode", p.GameMode, "status", status)
 	}
 
 	// Always acknowledge so the client does not roll back its optimistic update.
 	sendAcknowledgeBlockChange(mgr, p, seq)
 	return nil
+}
+
+func breakLinkedPlantHalf(x, y, z int, broken coreworld.Block, w *coreworld.World, mgr *session.Manager) {
+	switch broken.ResourceLocation() {
+	case "minecraft:tall_grass", "minecraft:large_fern", "minecraft:sunflower",
+		"minecraft:lilac", "minecraft:rose_bush", "minecraft:peony", "minecraft:pitcher_plant":
+	default:
+		return
+	}
+	half := broken.Properties["half"]
+	otherY := y + 1
+	wantHalf := "upper"
+	if half == "upper" {
+		otherY, wantHalf = y-1, "lower"
+	} else if half != "lower" {
+		return
+	}
+	other := w.GetBlock(x, otherY, z)
+	if other.ResourceLocation() == broken.ResourceLocation() && other.Properties["half"] == wantHalf {
+		applyBlockChange(x, otherY, z, coreworld.Air, w, mgr)
+	}
 }
 
 // faceOffset maps a Use Item On face index to the (dx, dy, dz) offset of the
@@ -282,16 +333,22 @@ func blockDropItem(blockName string) (string, int) {
 		"minecraft:mangrove_leaves":
 		return "", 0
 
-	// Short/tall plants — drop nothing
+	// Grass simplification: always yields one seed (vanilla uses a chance).
 	case "minecraft:short_grass", "minecraft:grass", "minecraft:fern",
-		"minecraft:tall_grass", "minecraft:large_fern",
-		"minecraft:dead_bush", "minecraft:seagrass", "minecraft:tall_seagrass",
-		"minecraft:dandelion", "minecraft:poppy", "minecraft:allium",
+		"minecraft:tall_grass", "minecraft:large_fern":
+		return "minecraft:wheat_seeds", 1
+
+	// Flowers drop themselves.
+	case "minecraft:dandelion", "minecraft:poppy", "minecraft:allium",
 		"minecraft:azure_bluet", "minecraft:red_tulip", "minecraft:orange_tulip",
 		"minecraft:white_tulip", "minecraft:pink_tulip", "minecraft:oxeye_daisy",
 		"minecraft:cornflower", "minecraft:lily_of_the_valley", "minecraft:blue_orchid",
 		"minecraft:sunflower", "minecraft:lilac", "minecraft:rose_bush", "minecraft:peony",
-		"minecraft:wither_rose", "minecraft:torchflower",
+		"minecraft:wither_rose", "minecraft:torchflower":
+		return blockName, 1
+
+	// Plants that currently have no survival drop implementation.
+	case "minecraft:dead_bush", "minecraft:seagrass", "minecraft:tall_seagrass",
 		"minecraft:vine", "minecraft:moss_carpet",
 		"minecraft:brown_mushroom", "minecraft:red_mushroom":
 		return "", 0
@@ -321,7 +378,8 @@ func blockDropItem(blockName string) (string, int) {
 func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn) error {
 	r := pkt.Reader()
 
-	if _, err := protocol.ReadVarInt(r); err != nil { // hand
+	hand, err := protocol.ReadVarInt(r)
+	if err != nil {
 		return fmt.Errorf("use item on: reading hand: %w", err)
 	}
 	bx, by, bz, err := protocol.ReadPosition(r)
@@ -352,50 +410,220 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 		return fmt.Errorf("use item on: reading sequence: %w", err)
 	}
 
+	// Tool and seed interactions run before generic block/container handling.
+	targetBlock := w.GetBlock(int(bx), int(by), int(bz))
+	if hand == 0 && useHoeOrPlant(int(bx), int(by), int(bz), face, targetBlock, p, w, mgr) {
+		sendAcknowledgeBlockChange(mgr, p, seq)
+		p.ContainerStateID++
+		if sess, ok := mgr.Get(p.UUID); ok {
+			_ = sendSetContainerContent(sess.Conn, p, p.ContainerStateID)
+		}
+		return nil
+	}
+
 	// Container blocks: right-clicking opens a UI instead of placing a block.
 	// (Sneaking to bypass is not yet tracked; always open the container.)
-	targetBlock := w.GetBlock(int(bx), int(by), int(bz))
+	if toggleDoor(int(bx), int(by), int(bz), targetBlock, w, mgr) {
+		sound := "minecraft:block.wooden_door.open"
+		if targetBlock.Properties["open"] == "true" {
+			sound = "minecraft:block.wooden_door.close"
+		}
+		broadcastSoundAt(mgr, sound, soundCategoryBlocks,
+			float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 1)
+		slog.Info("door toggled", "player", p.Username,
+			"x", bx, "y", by, "z", bz, "block", targetBlock.ResourceLocation())
+		sendAcknowledgeBlockChange(mgr, p, seq)
+		return nil
+	}
 	if menuType := containerMenuType(targetBlock.ResourceLocation()); menuType >= 0 {
 		title := containerTitle(targetBlock.ResourceLocation())
 		slog.Info("container opened", "player", p.Username, "block", targetBlock.ResourceLocation())
 		sendAcknowledgeBlockChange(mgr, p, seq)
+		if targetBlock.ResourceLocation() == "minecraft:crafting_table" {
+			return openCraftingTable(p, conn)
+		}
+		if targetBlock.ResourceLocation() == "minecraft:chest" {
+			return openChest(p, conn, w, spatial.BlockPos{X: bx, Y: by, Z: bz})
+		}
 		return sendOpenScreen(conn, 1, menuType, title)
 	}
 
-	// Resolve placement position: target block + face offset.
-	if face < 0 || int(face) >= len(faceOffset) {
+	// Resolve the held block before choosing whether a replaceable target is
+	// overwritten or the adjacent face receives the placement.
+	held := p.HeldItem()
+	if held.IsEmpty() || !javaworld.IsPlaceableAsBlock(held.ItemID) ||
+		p.GameMode == player.GameModeAdventure || p.GameMode == player.GameModeSpectator {
 		sendAcknowledgeBlockChange(mgr, p, seq)
 		return nil
 	}
-	off := faceOffset[face]
-	px, py, pz := int(bx+off[0]), int(by+off[1]), int(bz+off[2])
 
-	// Bounds-check the placement Y.
+	px, py, pz := int(bx), int(by), int(bz)
+	if !placementReplaceable(targetBlock.ResourceLocation()) {
+		if face < 0 || int(face) >= len(faceOffset) {
+			sendAcknowledgeBlockChange(mgr, p, seq)
+			return nil
+		}
+		off := faceOffset[face]
+		px, py, pz = int(bx+off[0]), int(by+off[1]), int(bz+off[2])
+	}
+
 	if py < coreworld.WorldMinY || py > coreworld.WorldMaxY {
 		sendAcknowledgeBlockChange(mgr, p, seq)
 		return nil
 	}
 
-	// Resolve the block from the held item.
-	held := p.HeldItem()
-	if held.IsEmpty() || !javaworld.IsPlaceableAsBlock(held.ItemID) {
-		// Nothing to place — acknowledge so the client reverts its preview.
+	existing := w.GetBlock(px, py, pz)
+	if !existing.IsAir() && !placementReplaceable(existing.ResourceLocation()) {
 		sendAcknowledgeBlockChange(mgr, p, seq)
 		return nil
 	}
-
-	// Refuse to overwrite an occupied block.
-	if existing := w.GetBlock(px, py, pz); !existing.IsAir() {
-		sendAcknowledgeBlockChange(mgr, p, seq)
-		return nil
+	if !existing.IsAir() {
+		breakLinkedPlantHalf(px, py, pz, existing, w, mgr)
 	}
 
 	block := javaworld.ItemIDToBlock(held.ItemID)
 	slog.Info("block place", "player", p.Username,
 		"block", block.ResourceLocation(), "x", px, "y", py, "z", pz)
 	applyBlockChange(px, py, pz, block, w, mgr)
+	if block.ResourceLocation() == "minecraft:chest" {
+		w.SetContainerItems(px, py, pz, "minecraft:chest", nil)
+	}
+	if p.GameMode == player.GameModeSurvival {
+		slot := player.HotbarStart + p.HeldSlot
+		p.Inventory[slot].Count--
+		normalizeStack(&p.Inventory[slot])
+		p.ContainerStateID++
+		if sess, ok := mgr.Get(p.UUID); ok {
+			_ = sendSetContainerContent(sess.Conn, p, p.ContainerStateID)
+		}
+	}
 	sendAcknowledgeBlockChange(mgr, p, seq)
 	return nil
+}
+
+func placementReplaceable(blockName string) bool {
+	switch blockName {
+	case "", "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
+		"minecraft:short_grass", "minecraft:grass", "minecraft:fern",
+		"minecraft:tall_grass", "minecraft:large_fern", "minecraft:dead_bush",
+		"minecraft:dandelion", "minecraft:poppy", "minecraft:allium",
+		"minecraft:azure_bluet", "minecraft:red_tulip", "minecraft:orange_tulip",
+		"minecraft:white_tulip", "minecraft:pink_tulip", "minecraft:oxeye_daisy",
+		"minecraft:cornflower", "minecraft:lily_of_the_valley", "minecraft:blue_orchid",
+		"minecraft:sunflower", "minecraft:lilac", "minecraft:rose_bush", "minecraft:peony",
+		"minecraft:wither_rose", "minecraft:torchflower", "minecraft:brown_mushroom",
+		"minecraft:red_mushroom", "minecraft:snow", "minecraft:vine", "minecraft:fire":
+		return true
+	default:
+		return false
+	}
+}
+
+func useHoeOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.Player, w *coreworld.World, mgr *session.Manager) bool {
+	held := p.HeldItem()
+	if held.IsEmpty() || face == 0 {
+		return false
+	}
+	if isHoe(held.ItemID) {
+		above := w.GetBlock(x, y+1, z)
+		if !above.IsAir() {
+			return false
+		}
+		var replacement coreworld.Block
+		switch target.ResourceLocation() {
+		case "minecraft:grass_block", "minecraft:dirt", "minecraft:dirt_path":
+			replacement = coreworld.Block{Namespace: "minecraft", Name: "farmland", Properties: map[string]string{"moisture": "0"}}
+		case "minecraft:coarse_dirt", "minecraft:rooted_dirt":
+			replacement = coreworld.Block{Namespace: "minecraft", Name: "dirt"}
+		default:
+			return false
+		}
+		applyBlockChange(x, y, z, replacement, w, mgr)
+		broadcastSoundAt(mgr, "minecraft:item.hoe.till", soundCategoryBlocks, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+		return true
+	}
+
+	if face != 1 || !w.GetBlock(x, y+1, z).IsAir() {
+		return false
+	}
+	var crop coreworld.Block
+	switch {
+	case target.ResourceLocation() == "minecraft:farmland" && held.ItemID == "minecraft:wheat_seeds":
+		crop = coreworld.Block{Namespace: "minecraft", Name: "wheat", Properties: map[string]string{"age": "0"}}
+	case target.ResourceLocation() == "minecraft:farmland" && held.ItemID == "minecraft:carrot":
+		crop = coreworld.Block{Namespace: "minecraft", Name: "carrots", Properties: map[string]string{"age": "0"}}
+	case target.ResourceLocation() == "minecraft:farmland" && held.ItemID == "minecraft:potato":
+		crop = coreworld.Block{Namespace: "minecraft", Name: "potatoes", Properties: map[string]string{"age": "0"}}
+	case target.ResourceLocation() == "minecraft:farmland" && held.ItemID == "minecraft:beetroot_seeds":
+		crop = coreworld.Block{Namespace: "minecraft", Name: "beetroots", Properties: map[string]string{"age": "0"}}
+	case target.ResourceLocation() == "minecraft:soul_sand" && held.ItemID == "minecraft:nether_wart":
+		crop = coreworld.Block{Namespace: "minecraft", Name: "nether_wart", Properties: map[string]string{"age": "0"}}
+	default:
+		return false
+	}
+	applyBlockChange(x, y+1, z, crop, w, mgr)
+	broadcastSoundAt(mgr, "minecraft:item.crop.plant", soundCategoryBlocks, float64(x)+0.5, float64(y)+1, float64(z)+0.5, 1, 1)
+	if p.GameMode != player.GameModeCreative {
+		slot := player.HotbarStart + p.HeldSlot
+		p.Inventory[slot].Count--
+		if p.Inventory[slot].Count <= 0 {
+			p.Inventory[slot] = player.ItemStack{}
+		}
+	}
+	return true
+}
+
+func isHoe(item string) bool {
+	switch item {
+	case "minecraft:wooden_hoe", "minecraft:stone_hoe", "minecraft:iron_hoe",
+		"minecraft:golden_hoe", "minecraft:diamond_hoe", "minecraft:netherite_hoe":
+		return true
+	default:
+		return false
+	}
+}
+
+// toggleDoor toggles both halves of a non-iron door and broadcasts the two
+// resulting block states. Iron doors intentionally remain redstone-only.
+func toggleDoor(x, y, z int, door coreworld.Block, w *coreworld.World, mgr *session.Manager) bool {
+	if door.Namespace != "minecraft" || door.Name == "iron_door" ||
+		!strings.HasSuffix(door.Name, "_door") {
+		return false
+	}
+	open, ok := door.Properties["open"]
+	if !ok {
+		return false
+	}
+	nextOpen := "true"
+	if open == "true" {
+		nextOpen = "false"
+	}
+	toggled := copyBlockProperties(door)
+	toggled.Properties["open"] = nextOpen
+	applyBlockChange(x, y, z, toggled, w, mgr)
+
+	otherY := y + 1
+	if door.Properties["half"] == "upper" {
+		otherY = y - 1
+	}
+	other := w.GetBlock(x, otherY, z)
+	if other.ResourceLocation() == door.ResourceLocation() {
+		otherToggled := copyBlockProperties(other)
+		if _, exists := otherToggled.Properties["open"]; exists {
+			otherToggled.Properties["open"] = nextOpen
+			applyBlockChange(x, otherY, z, otherToggled, w, mgr)
+		}
+	}
+	return true
+}
+
+func copyBlockProperties(block coreworld.Block) coreworld.Block {
+	properties := make(map[string]string, len(block.Properties))
+	for key, value := range block.Properties {
+		properties[key] = value
+	}
+	block.Properties = properties
+	return block
 }
 
 // ── World mutation + broadcast ────────────────────────────────────────────────
@@ -408,6 +636,14 @@ func applyBlockChange(x, y, z int, block coreworld.Block, w *coreworld.World, mg
 	pkt := buildBlockUpdate(x, y, z, stateID)
 	for _, s := range mgr.SnapshotAll() {
 		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// BroadcastBlockChange sends an already-applied canonical mutation to all Java clients.
+func BroadcastBlockChange(change coreworld.BlockChange, mgr *session.Manager) {
+	pkt := buildBlockUpdate(change.X, change.Y, change.Z, javaworld.StateID(change.Block))
+	for _, current := range mgr.SnapshotAll() {
+		_ = current.Conn.WritePacket(pkt)
 	}
 }
 

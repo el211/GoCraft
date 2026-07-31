@@ -103,6 +103,8 @@ func decodeBlockEntities(list Tag) []coreworld.BlockEntity {
 		data := cloneCompound(entry.compound)
 		entityType := data["id"].Str()
 		x, y, z := int(data["x"].Int()), int(data["y"].Int()), int(data["z"].Int())
+		items := decodeContainerItems(data["Items"])
+		delete(data, "Items")
 		delete(data, "id")
 		delete(data, "x")
 		delete(data, "y")
@@ -110,9 +112,51 @@ func decodeBlockEntities(list Tag) []coreworld.BlockEntity {
 		var payload bytes.Buffer
 		wByte(&payload, byte(tagCompound))
 		writeCompoundPayload(&payload, data)
-		entities = append(entities, coreworld.BlockEntity{X: x, Y: y, Z: z, Type: entityType, Data: payload.Bytes()})
+		entities = append(entities, coreworld.BlockEntity{X: x, Y: y, Z: z, Type: entityType, Data: payload.Bytes(), Items: items})
 	}
 	return entities
+}
+
+func decodeContainerItems(list Tag) []coreworld.ContainerItem {
+	if list.typ != tagList {
+		return nil
+	}
+	items := make([]coreworld.ContainerItem, 0, len(list.listV))
+	for _, entry := range list.listV {
+		if entry.typ != tagCompound {
+			continue
+		}
+		slotTag := entry.compound["Slot"]
+		slot := int(slotTag.Byte())
+		if slotTag.typ == tagShort {
+			slot = int(slotTag.Short())
+		} else if slotTag.typ == tagInt {
+			slot = int(slotTag.Int())
+		}
+		itemID := entry.compound["id"].Str()
+		count := numericTagValue(entry.compound["count"])
+		if count == 0 {
+			count = numericTagValue(entry.compound["Count"])
+		}
+		if slot < 0 || itemID == "" || count <= 0 {
+			continue
+		}
+		items = append(items, coreworld.ContainerItem{Slot: slot, ItemID: itemID, Count: count})
+	}
+	return items
+}
+
+func numericTagValue(tag Tag) int {
+	switch tag.typ {
+	case tagByte:
+		return int(tag.Byte())
+	case tagShort:
+		return int(tag.Short())
+	case tagInt:
+		return int(tag.Int())
+	default:
+		return 0
+	}
 }
 
 // decodeBiomeData reads the modern 4x4x4 biome paletted container stored in

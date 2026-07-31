@@ -71,6 +71,9 @@ func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, 
 	if err := sendPlayerAbilities(conn, p); err != nil {
 		return fmt.Errorf("play: %w", err)
 	}
+	if err := sendCombatAttributes(conn, p); err != nil {
+		return fmt.Errorf("play: combat attributes: %w", err)
+	}
 	if err := sendDefaultSpawnPosition(conn, p); err != nil {
 		return fmt.Errorf("play: %w", err)
 	}
@@ -101,6 +104,10 @@ func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, 
 	}
 	if err := sendSetHeldItem(conn, p.HeldSlot); err != nil {
 		return fmt.Errorf("play: %w", err)
+	}
+	// Synchronize the recipe displays for crafting, furnace, and blast furnace.
+	if err := sendRecipeBook(conn); err != nil {
+		return fmt.Errorf("play: recipes: %w", err)
 	}
 	// Send command graph for tab completion.
 	if err := conn.WritePacket(buildCommandsPacket()); err != nil {
@@ -219,16 +226,65 @@ func obfuscateSeed(seed int64) int64 {
 //	0x04 allow_flying
 //	0x08 instant_build (creative)
 func sendPlayerAbilities(conn *network.ClientConn, p *player.Player) error {
+	return conn.WritePacket(buildPlayerAbilities(p))
+}
+
+func buildPlayerAbilities(p *player.Player) *protocol.Packet {
 	var flags byte
+	allowFlying := p.AllowFlying ||
+		p.GameMode == player.GameModeCreative ||
+		p.GameMode == player.GameModeSpectator
 	if p.GameMode == player.GameModeCreative {
-		flags |= 0x01 | 0x04 | 0x08 // invulnerable + allow_fly + instant_break
+		flags |= 0x01 | 0x08 // invulnerable + instant build
 	}
-	pkt := protocol.NewBuilder(packetIDPlayerAbilities).
+	if p.GameMode == player.GameModeSpectator {
+		flags |= 0x01 // invulnerable
+	}
+	if allowFlying {
+		flags |= 0x04
+	} else {
+		p.Flying = false
+	}
+	if allowFlying && (p.Flying || p.GameMode == player.GameModeSpectator) {
+		flags |= 0x02
+	}
+	flySpeed := p.FlySpeed
+	if flySpeed <= 0 {
+		flySpeed = 0.05
+	}
+	walkSpeed := p.WalkSpeed
+	if walkSpeed <= 0 {
+		walkSpeed = 0.1
+	}
+	return protocol.NewBuilder(packetIDPlayerAbilities).
 		Byte(flags).
-		Float(0.05). // flying speed
-		Float(0.1).  // fov modifier
+		Float(flySpeed).
+		Float(walkSpeed).
 		Build()
-	return conn.WritePacket(pkt)
+}
+
+// sendCombatAttributes removes the modern client attack meter when legacy
+// spam combat is selected. Attribute registry ID 4 is generic.attack_speed in
+// Java 1.21.4; a very high base value keeps item modifiers effectively instant.
+func sendCombatAttributes(conn *network.ClientConn, p *player.Player) error {
+	packet := buildCombatAttributes(p)
+	if packet == nil {
+		return nil
+	}
+	return conn.WritePacket(packet)
+}
+
+func buildCombatAttributes(p *player.Player) *protocol.Packet {
+	if p.AttackCooldown {
+		return nil
+	}
+	return protocol.NewBuilder(packetIDUpdateAttributes).
+		VarInt(p.EntityID).
+		VarInt(1).
+		VarInt(4).
+		Double(1024).
+		VarInt(0).
+		Build()
 }
 
 // sendDefaultSpawnPosition sends the Set Default Spawn Position packet (0x5B S→C).
@@ -385,6 +441,9 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 	mgr.Add(sess)
 	defer mgr.Remove(p.UUID)
 	defer onPlayerLeave(mgr, sess)
+	// Entities generated before this player joined are included in the full
+	// snapshot below, so they no longer need a separate spawn announcement.
+	_ = w.DrainSpawnedEntities()
 	onPlayerJoin(mgr, sess, w.Entities.Snapshot())
 
 	// ── Initial chunk burst ──────────────────────────────────────────────────
@@ -410,6 +469,8 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 	if err := sendChunkBatchFinished(conn, int32(len(initialKeys))); err != nil {
 		return fmt.Errorf("play loop: finishing initial chunk batch: %w", err)
 	}
+	broadcastGeneratedEntities(w, mgr)
+	sendExistingMobsInViewTo(conn, w.Entities.Snapshot(), chunkX, chunkZ, viewRadius)
 	lastChunkX, lastChunkZ := chunkX, chunkZ
 
 	// teleportTo is given to CommandContext so /tp (and any future teleport
@@ -433,6 +494,8 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 		if err := updateChunkView(conn, w, sender, sentChunks, newCX, newCZ, viewRadius, preGenerateRadius); err != nil {
 			return fmt.Errorf("update chunk view: %w", err)
 		}
+		broadcastGeneratedEntities(w, mgr)
+		sendExistingMobsInViewTo(conn, w.Entities.Snapshot(), newCX, newCZ, viewRadius)
 		lastChunkX, lastChunkZ = newCX, newCZ
 		return nil
 	}
@@ -450,6 +513,8 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 
 	// ── Main loop ────────────────────────────────────────────────────────────
 	for {
+		broadcastGeneratedEntities(w, mgr)
+
 		// Check keep-alive timeout.
 		if pendingAliveID >= 0 && time.Since(lastKASent) > keepAliveTimeout {
 			return fmt.Errorf("play loop: keep-alive timeout for player %s", p.Username)
@@ -503,15 +568,26 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 
 		// Entity interaction (right-click mob) — used for villager trading.
 		if pkt.ID == packetIDInteract {
-			if err := handleInteractPacket(pkt, w, conn); err != nil {
+			if err := handleInteractPacket(pkt, p, w, conn); err != nil {
 				slog.Warn("interact error", "player", p.Username, "err", err)
 			}
 		}
 
-		// Inventory management (held item, creative set item).
+		// Inventory management (held item, creative set item, and open containers).
 		if pkt.ID == packetIDSetHeldItemCS || pkt.ID == packetIDCreativeModeSetItem {
 			if err := handleInventoryPacket(pkt, p); err != nil {
 				slog.Warn("inventory error", "player", p.Username, "err", err)
+			}
+		}
+		if pkt.ID == packetIDContainerClick || pkt.ID == packetIDContainerClose {
+			if err := handleContainerPacket(pkt, p, conn, w); err != nil {
+				slog.Warn("container error", "player", p.Username, "err", err)
+			}
+		}
+
+		if pkt.ID == packetIDPlaceRecipe {
+			if err := handlePlaceRecipeRequest(pkt, p, conn); err != nil {
+				slog.Warn("recipe request error", "player", p.Username, "err", err)
 			}
 		}
 
@@ -527,6 +603,12 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 			}
 			lastChunkX, lastChunkZ = newChunkX, newChunkZ
 		}
+	}
+}
+
+func broadcastGeneratedEntities(w *coreworld.World, mgr *session.Manager) {
+	for _, entity := range w.DrainSpawnedEntities() {
+		BroadcastSpawnMob(entity, mgr)
 	}
 }
 
@@ -696,6 +778,15 @@ func handlePlayPacket(pkt *protocol.Packet, p *player.Player, pendingAliveID *in
 			p.OnGround = pkt.Data[0]&0x01 != 0
 		}
 
+	case packetIDPlayerAbilitiesCS:
+		// The server controls whether flight is allowed; the client only reports
+		// transitions into or out of the flying state (flag 0x02).
+		if len(pkt.Data) >= 1 {
+			allowed := p.AllowFlying ||
+				p.GameMode == player.GameModeCreative ||
+				p.GameMode == player.GameModeSpectator
+			p.Flying = allowed && pkt.Data[0]&0x02 != 0
+		}
 	case packetIDConfirmTeleport:
 		// Late teleport confirm — ignore, already processed.
 

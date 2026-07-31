@@ -168,10 +168,28 @@ func blockEntitiesTag(entities []coreworld.BlockEntity) Tag {
 		compound["x"] = Tag{typ: tagInt, intV: int32(entity.X)}
 		compound["y"] = Tag{typ: tagInt, intV: int32(entity.Y)}
 		compound["z"] = Tag{typ: tagInt, intV: int32(entity.Z)}
+		if entity.Items != nil {
+			compound["Items"] = containerItemsTag(entity.Items)
+		}
 		entries = append(entries, Tag{typ: tagCompound, compound: compound})
 	}
 	return Tag{typ: tagList, listElem: tagCompound, listV: entries}
 }
+func containerItemsTag(items []coreworld.ContainerItem) Tag {
+	entries := make([]Tag, 0, len(items))
+	for _, item := range items {
+		if item.Slot < 0 || item.Slot > 255 || item.ItemID == "" || item.Count <= 0 {
+			continue
+		}
+		entries = append(entries, Tag{typ: tagCompound, compound: map[string]Tag{
+			"Slot":  {typ: tagByte, byteV: int8(item.Slot)},
+			"id":    {typ: tagString, strV: item.ItemID},
+			"count": {typ: tagInt, intV: int32(item.Count)},
+		}})
+	}
+	return Tag{typ: tagList, listElem: tagCompound, listV: entries}
+}
+
 func chunksHaveSameBlocks(first, second *coreworld.Chunk) bool {
 	for sectionIndex := 0; sectionIndex < coreworld.SectionCount; sectionIndex++ {
 		firstSection, secondSection := first.Sections[sectionIndex], second.Sections[sectionIndex]

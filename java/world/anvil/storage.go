@@ -3,6 +3,8 @@ package anvil
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 
 	coreworld "GoCraft/core/world"
@@ -26,8 +28,15 @@ type Storage struct {
 
 // NewStorage returns a Storage rooted at worldDir.
 // worldDir should be the Minecraft world folder (containing region/, level.dat, …).
-// The directory does not need to exist yet; it is created on first save.
+// The world and region directories are created immediately so operators can
+// verify the configured persistent path before the first modified chunk.
 func NewStorage(worldDir string) (*Storage, error) {
+	if worldDir == "" {
+		return nil, fmt.Errorf("anvil storage: world directory is empty")
+	}
+	if err := os.MkdirAll(filepath.Join(worldDir, "region"), 0o755); err != nil {
+		return nil, fmt.Errorf("anvil storage: creating world directory %s: %w", worldDir, err)
+	}
 	return &Storage{
 		worldDir: worldDir,
 		pending:  make(map[[2]int32][]byte),
@@ -109,10 +118,21 @@ func (s *Storage) Flush() error {
 
 	for rk, keys := range regions {
 		if err := s.flushRegion(rk[0], rk[1], keys, pending); err != nil {
+			s.restorePending(pending)
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Storage) restorePending(pending map[[2]int32][]byte) {
+	s.mu.Lock()
+	for key, raw := range pending {
+		if _, newer := s.pending[key]; !newer {
+			s.pending[key] = raw
+		}
+	}
+	s.mu.Unlock()
 }
 
 // flushRegion writes all pending chunks for region (rx, rz) to disk.

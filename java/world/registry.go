@@ -173,13 +173,19 @@ func loadRegistries() {
 	biomeIDs = biomeMap
 	blockEntityMap, _ := loadRegistry(raw, "minecraft:block_entity_type", "registries.json")
 	blockEntityTypeIDs = blockEntityMap
+	soundMap, _ := loadRegistry(raw, "minecraft:sound_event", "registries.json")
+	soundEventIDs = soundMap
+	effectMap, _ := loadRegistry(raw, "minecraft:mob_effect", "registries.json")
+	mobEffectIDs = effectMap
 
 	slog.Info("gamedata: loaded registries",
 		"version", expectedVersion,
 		"items", len(itemIDs),
 		"entityTypes", len(entityTypeIDs),
 		"biomes", len(biomeIDs),
-		"blockEntityTypes", len(blockEntityTypeIDs))
+		"blockEntityTypes", len(blockEntityTypeIDs),
+		"soundEvents", len(soundEventIDs),
+		"mobEffects", len(mobEffectIDs))
 }
 
 // loadRegistry extracts one named registry from the top-level registries map

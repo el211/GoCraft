@@ -142,8 +142,8 @@ func sendSetContainerContent(conn *network.ClientConn, p *player.Player, stateID
 		encodeSlot(b, p.Inventory[i])
 	}
 
-	// Carried item (cursor): always empty on join.
-	b.VarInt(0)
+	// Carried item (cursor) persists while containers open and close.
+	encodeSlot(b, p.CarriedItem)
 
 	return conn.WritePacket(b.Build())
 }

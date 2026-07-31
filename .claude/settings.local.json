@@ -33,7 +33,12 @@
       "Bash(git:*)",
       "Bash(go vet:*)",
       "Bash(grep:*)",
-      "Bash(go tool:*)"
+      "Bash(go tool:*)",
+      "Bash(cat)",
+      "Bash(go run:*)",
+      "Bash(grep -r \"interact\\\\|Interact\\\\|use_entity\\\\|merchant\\\\|open_screen\\\\|MerchantOffer\" internal/protocoldata/ --include=\"*.go\" -l)",
+      "Bash(grep -r \"merchant\\\\|interact\\\\|open_screen\" java/ --include=\"*.go\" -l)",
+      "WebFetch(domain:prismarinejs.github.io)"
     ]
   }
 }

@@ -80,6 +80,7 @@ func TestProtocol769PlacementRegistryIDs(t *testing.T) {
 		}
 	}
 }
+
 func TestPackHeightmapValuesPreservesEveryColumn(t *testing.T) {
 	var surfaces [256]int
 	for i := range surfaces {
@@ -123,5 +124,30 @@ func TestEncodeChunkHeightmapsUsesChunkColumns(t *testing.T) {
 	}
 	if string(got) == string(flat) {
 		t.Fatal("dynamic heightmap unexpectedly equals constant Y=50 map")
+	}
+}
+
+func TestVillageBlockStatesExistInProtocol769Registry(t *testing.T) {
+	states := []coreworld.Block{
+		{Namespace: "minecraft", Name: "acacia_door", Properties: map[string]string{
+			"facing": "south", "half": "lower", "hinge": "left",
+			"open": "false", "powered": "false",
+		}}, {Namespace: "minecraft", Name: "acacia_door", Properties: map[string]string{
+			"facing": "south", "half": "upper", "hinge": "left",
+			"open": "true", "powered": "false",
+		}},
+		{Namespace: "minecraft", Name: "farmland", Properties: map[string]string{"moisture": "7"}},
+		{Namespace: "minecraft", Name: "wheat", Properties: map[string]string{"age": "7"}},
+		{Namespace: "minecraft", Name: "acacia_stairs", Properties: map[string]string{
+			"facing": "east", "half": "bottom", "shape": "straight", "waterlogged": "false",
+		}},
+		{Namespace: "minecraft", Name: "red_bed", Properties: map[string]string{
+			"facing": "north", "occupied": "false", "part": "foot",
+		}},
+	}
+	for _, state := range states {
+		if !HasExactState(state) {
+			t.Errorf("missing exact protocol-769 block state %s", state.Key())
+		}
 	}
 }

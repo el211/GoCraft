@@ -4,9 +4,32 @@ import (
 	"bytes"
 	"encoding/binary"
 	"io"
+	"sync"
 
 	coreworld "GoCraft/core/world"
 )
+
+const maxPooledChunkBufferCapacity = 2 << 20
+
+var chunkBufferPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func acquireChunkBuffer() *bytes.Buffer {
+	buf := chunkBufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	return buf
+}
+
+func releaseChunkBuffer(buf *bytes.Buffer) {
+	if buf.Cap() > maxPooledChunkBufferCapacity {
+		return
+	}
+	buf.Reset()
+	chunkBufferPool.Put(buf)
+}
+
+func copyBufferBytes(buf *bytes.Buffer) []byte {
+	return append([]byte(nil), buf.Bytes()...)
+}
 
 // EncodeHeightmaps returns the raw bytes of the NBT compound that goes into
 // the Heightmaps field of the Level Chunk With Light packet (1.21.4).
@@ -19,12 +42,13 @@ import (
 // encoding 256 identical values (one per column in the 16×16 chunk).
 func EncodeHeightmaps(surfaceY int) []byte {
 	longs := packHeightmap(surfaceY)
-	var buf bytes.Buffer
-	writeNetworkNBTCompound(&buf, func(w io.Writer) {
+	buf := acquireChunkBuffer()
+	defer releaseChunkBuffer(buf)
+	writeNetworkNBTCompound(buf, func(w io.Writer) {
 		writeNBTLongArray(w, "MOTION_BLOCKING", longs)
 		writeNBTLongArray(w, "WORLD_SURFACE", longs)
 	})
-	return buf.Bytes()
+	return copyBufferBytes(buf)
 }
 
 // EncodeChunkHeightmaps derives both required heightmaps from the actual block
@@ -37,12 +61,13 @@ func EncodeChunkHeightmaps(c *coreworld.Chunk) []byte {
 		}
 	}
 	longs := packHeightmapValues(surfaceYs)
-	var buf bytes.Buffer
-	writeNetworkNBTCompound(&buf, func(w io.Writer) {
+	buf := acquireChunkBuffer()
+	defer releaseChunkBuffer(buf)
+	writeNetworkNBTCompound(buf, func(w io.Writer) {
 		writeNBTLongArray(w, "MOTION_BLOCKING", longs)
 		writeNBTLongArray(w, "WORLD_SURFACE", longs)
 	})
-	return buf.Bytes()
+	return copyBufferBytes(buf)
 }
 
 // EncodeChunk converts a canonical Chunk into the raw byte slice that is sent
@@ -54,11 +79,18 @@ func EncodeChunkHeightmaps(c *coreworld.Chunk) []byte {
 //	PalettedContainer  block states (indirect palette, ≥4 bits, or single value)
 //	PalettedContainer  biomes       (single value for Milestone 4)
 func EncodeChunk(c *coreworld.Chunk) []byte {
-	var buf bytes.Buffer
+	buf := acquireChunkBuffer()
+	defer releaseChunkBuffer(buf)
+	encodeChunkTo(buf, c)
+	return copyBufferBytes(buf)
+}
+
+// encodeChunkTo writes a chunk into a caller-owned buffer. Callers may reuse
+// the buffer only after the consumer has synchronously copied its bytes.
+func encodeChunkTo(buf *bytes.Buffer, c *coreworld.Chunk) {
 	for _, sec := range c.Sections {
-		encodeSection(&buf, sec)
+		encodeSection(buf, sec)
 	}
-	return buf.Bytes()
 }
 
 // encodeSection writes one 16×16×16 section into buf.

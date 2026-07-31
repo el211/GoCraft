@@ -10,54 +10,87 @@ import "GoCraft/core/spatial"
 // e.g. "minecraft:cow".
 type EntityType string
 
+// VillagerVariant and VillagerProfession are canonical core values. Edition
+// adapters translate them to their own registry IDs at the protocol boundary.
+type VillagerVariant string
+type VillagerProfession string
+
+const (
+	VillagerVariantDesert  VillagerVariant = "minecraft:desert"
+	VillagerVariantJungle  VillagerVariant = "minecraft:jungle"
+	VillagerVariantPlains  VillagerVariant = "minecraft:plains"
+	VillagerVariantSavanna VillagerVariant = "minecraft:savanna"
+	VillagerVariantSnow    VillagerVariant = "minecraft:snow"
+	VillagerVariantSwamp   VillagerVariant = "minecraft:swamp"
+	VillagerVariantTaiga   VillagerVariant = "minecraft:taiga"
+)
+
+const (
+	VillagerProfessionNone          VillagerProfession = "minecraft:none"
+	VillagerProfessionArmorer       VillagerProfession = "minecraft:armorer"
+	VillagerProfessionButcher       VillagerProfession = "minecraft:butcher"
+	VillagerProfessionCartographer  VillagerProfession = "minecraft:cartographer"
+	VillagerProfessionCleric        VillagerProfession = "minecraft:cleric"
+	VillagerProfessionFarmer        VillagerProfession = "minecraft:farmer"
+	VillagerProfessionFisherman     VillagerProfession = "minecraft:fisherman"
+	VillagerProfessionFletcher      VillagerProfession = "minecraft:fletcher"
+	VillagerProfessionLeatherworker VillagerProfession = "minecraft:leatherworker"
+	VillagerProfessionLibrarian     VillagerProfession = "minecraft:librarian"
+	VillagerProfessionMason         VillagerProfession = "minecraft:mason"
+	VillagerProfessionNitwit        VillagerProfession = "minecraft:nitwit"
+	VillagerProfessionShepherd      VillagerProfession = "minecraft:shepherd"
+	VillagerProfessionToolsmith     VillagerProfession = "minecraft:toolsmith"
+	VillagerProfessionWeaponsmith   VillagerProfession = "minecraft:weaponsmith"
+)
+
 // All known entity types (complete list for Minecraft 1.21.4 / protocol 769).
 const (
 	// ── Passive mobs ─────────────────────────────────────────────────────────
-	TypeAllay          EntityType = "minecraft:allay"
-	TypeArmadillo      EntityType = "minecraft:armadillo"
-	TypeAxolotl        EntityType = "minecraft:axolotl"
-	TypeBat            EntityType = "minecraft:bat"
-	TypeCamel          EntityType = "minecraft:camel"
-	TypeCat            EntityType = "minecraft:cat"
-	TypeChicken        EntityType = "minecraft:chicken"
-	TypeCod            EntityType = "minecraft:cod"
-	TypeCow            EntityType = "minecraft:cow"
-	TypeDonkey         EntityType = "minecraft:donkey"
-	TypeFox            EntityType = "minecraft:fox"
-	TypeFrog           EntityType = "minecraft:frog"
-	TypeGlowSquid      EntityType = "minecraft:glow_squid"
-	TypeGoat           EntityType = "minecraft:goat"
-	TypeHorse          EntityType = "minecraft:horse"
-	TypeMooshroom      EntityType = "minecraft:mooshroom"
-	TypeMule           EntityType = "minecraft:mule"
-	TypeOcelot         EntityType = "minecraft:ocelot"
-	TypePanda          EntityType = "minecraft:panda"
-	TypeParrot         EntityType = "minecraft:parrot"
-	TypePig            EntityType = "minecraft:pig"
-	TypePufferfish     EntityType = "minecraft:pufferfish"
-	TypeRabbit         EntityType = "minecraft:rabbit"
-	TypeSalmon         EntityType = "minecraft:salmon"
-	TypeSheep          EntityType = "minecraft:sheep"
-	TypeSkeletonHorse  EntityType = "minecraft:skeleton_horse"
-	TypeSniffer        EntityType = "minecraft:sniffer"
-	TypeSquid          EntityType = "minecraft:squid"
-	TypeTadpole        EntityType = "minecraft:tadpole"
-	TypeTropicalFish   EntityType = "minecraft:tropical_fish"
-	TypeTurtle         EntityType = "minecraft:turtle"
-	TypeVillager       EntityType = "minecraft:villager"
+	TypeAllay           EntityType = "minecraft:allay"
+	TypeArmadillo       EntityType = "minecraft:armadillo"
+	TypeAxolotl         EntityType = "minecraft:axolotl"
+	TypeBat             EntityType = "minecraft:bat"
+	TypeCamel           EntityType = "minecraft:camel"
+	TypeCat             EntityType = "minecraft:cat"
+	TypeChicken         EntityType = "minecraft:chicken"
+	TypeCod             EntityType = "minecraft:cod"
+	TypeCow             EntityType = "minecraft:cow"
+	TypeDonkey          EntityType = "minecraft:donkey"
+	TypeFox             EntityType = "minecraft:fox"
+	TypeFrog            EntityType = "minecraft:frog"
+	TypeGlowSquid       EntityType = "minecraft:glow_squid"
+	TypeGoat            EntityType = "minecraft:goat"
+	TypeHorse           EntityType = "minecraft:horse"
+	TypeMooshroom       EntityType = "minecraft:mooshroom"
+	TypeMule            EntityType = "minecraft:mule"
+	TypeOcelot          EntityType = "minecraft:ocelot"
+	TypePanda           EntityType = "minecraft:panda"
+	TypeParrot          EntityType = "minecraft:parrot"
+	TypePig             EntityType = "minecraft:pig"
+	TypePufferfish      EntityType = "minecraft:pufferfish"
+	TypeRabbit          EntityType = "minecraft:rabbit"
+	TypeSalmon          EntityType = "minecraft:salmon"
+	TypeSheep           EntityType = "minecraft:sheep"
+	TypeSkeletonHorse   EntityType = "minecraft:skeleton_horse"
+	TypeSniffer         EntityType = "minecraft:sniffer"
+	TypeSquid           EntityType = "minecraft:squid"
+	TypeTadpole         EntityType = "minecraft:tadpole"
+	TypeTropicalFish    EntityType = "minecraft:tropical_fish"
+	TypeTurtle          EntityType = "minecraft:turtle"
+	TypeVillager        EntityType = "minecraft:villager"
 	TypeWanderingTrader EntityType = "minecraft:wandering_trader"
-	TypeZombieHorse    EntityType = "minecraft:zombie_horse"
+	TypeZombieHorse     EntityType = "minecraft:zombie_horse"
 
 	// ── Neutral / tameable mobs ───────────────────────────────────────────────
-	TypeBee           EntityType = "minecraft:bee"
-	TypeDolphin       EntityType = "minecraft:dolphin"
-	TypeIronGolem     EntityType = "minecraft:iron_golem"
-	TypeLlama         EntityType = "minecraft:llama"
-	TypePolarBear     EntityType = "minecraft:polar_bear"
-	TypeSnowGolem     EntityType = "minecraft:snow_golem"
-	TypeStrider       EntityType = "minecraft:strider"
-	TypeTraderLlama   EntityType = "minecraft:trader_llama"
-	TypeWolf          EntityType = "minecraft:wolf"
+	TypeBee             EntityType = "minecraft:bee"
+	TypeDolphin         EntityType = "minecraft:dolphin"
+	TypeIronGolem       EntityType = "minecraft:iron_golem"
+	TypeLlama           EntityType = "minecraft:llama"
+	TypePolarBear       EntityType = "minecraft:polar_bear"
+	TypeSnowGolem       EntityType = "minecraft:snow_golem"
+	TypeStrider         EntityType = "minecraft:strider"
+	TypeTraderLlama     EntityType = "minecraft:trader_llama"
+	TypeWolf            EntityType = "minecraft:wolf"
 	TypeZombifiedPiglin EntityType = "minecraft:zombified_piglin"
 
 	// ── Hostile mobs ─────────────────────────────────────────────────────────
@@ -122,8 +155,22 @@ type Entity struct {
 	UUID     [16]byte
 	Type     EntityType
 
+	// Villager identity. Zero values are treated as plains/none/level 1 by
+	// edition adapters and are ignored for non-villager entities.
+	VillagerVariant    VillagerVariant
+	VillagerProfession VillagerProfession
+	VillagerLevel      int32
+
+	// Generated village ownership. HasVillageHome distinguishes assigned
+	// positions from zero-value coordinates used by summoned villagers.
+	HasVillageHome     bool
+	VillageHome        spatial.BlockPos
+	VillageCenter      spatial.BlockPos
+	VillageBed         spatial.BlockPos
+	VillageWorkstation spatial.BlockPos
+	Sleeping           bool
 	// Spatial state — written only by the entity tick goroutine.
-	Position spatial.Vec3
+	Position   spatial.Vec3
 	VX, VY, VZ float64 // velocity in blocks/tick
 	Yaw, Pitch float32
 	OnGround   bool

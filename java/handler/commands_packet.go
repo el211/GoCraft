@@ -1,181 +1,176 @@
 package handler
 
-// Commands packet builder for Milestone 12.
+// Commands packet builder for Minecraft Java Edition 1.21.4.
 //
-// The Commands packet (S→C 0x11) sends the server's command graph to the
-// client as a brigadier directed acyclic graph.  The client uses it to drive
-// tab completion and the / command input screen.
-//
-// Each node carries:
-//   - A flags byte  (type | executable | redirect | suggestions)
-//   - A VarInt array of child node indices
-//   - For LITERAL nodes: a String name
-//   - For ARGUMENT nodes: a String name + VarInt parser ID + parser properties
-//
-// Node types:
-//   0x00  ROOT     — single root; no name; children = top-level commands
-//   0x01  LITERAL  — a fixed keyword (e.g. "gamemode")
-//   0x02  ARGUMENT — a typed parameter (e.g. brigadier:integer)
-//
-// Flags layout:
-//   bits 0-1  node type
-//   bit  2    is_executable  (client shows ↵ hint when all required args satisfied)
-//   bit  3    has_redirect   (not used here)
-//   bit  4    has_suggestions (not used here)
-//
-// Packet ID 0x11 is an estimate for 1.21.4 (protocol 769).
-// Milestone 13 will replace hardcoded IDs with data-driven registry loading.
+// The command graph uses vanilla Brigadier argument parsers wherever they can
+// provide richer client-side completion: game_profile for online players and
+// item_stack for item/block registry names. Dynamic GoCraft-only sets such as
+// generated biomes, summonable mobs, villager jobs, and potion effects are
+// represented as literal children so every value appears in tab completion.
 
 import "GoCraft/java/protocol"
 
-// buildCommandsPacket constructs the Commands S→C packet for the GoCraft
-// built-in command set:
-//
-//	/gamemode <survival|creative|adventure|spectator>
-//	/tp <x> <y> <z>
-//	/tp <player>
-//	/give <item> [count]
-//	/kick <player> [reason]
-//	/help
-//	/list
+const (
+	commandNodeRoot     byte = 0x00
+	commandNodeLiteral  byte = 0x01
+	commandNodeArgument byte = 0x02
+	commandExecutable   byte = 0x04
+
+	parserFloat       int32 = 1
+	parserDouble      int32 = 2
+	parserInteger     int32 = 3
+	parserString      int32 = 5
+	parserGameProfile int32 = 7
+	parserItemStack   int32 = 14
+)
+
+type commandGraphNode struct {
+	flags      byte
+	children   []int32
+	name       string
+	parser     int32
+	parserData func(*protocol.Builder)
+}
+
 func buildCommandsPacket() *protocol.Packet {
-	// ── Node index constants ──────────────────────────────────────────────────
-	const (
-		nRoot       int32 = 0
-		nGamemode   int32 = 1
-		nSurvival   int32 = 2
-		nCreative   int32 = 3
-		nAdventure  int32 = 4
-		nSpectator  int32 = 5
-		nTp         int32 = 6
-		nTpX        int32 = 7
-		nTpY        int32 = 8
-		nTpZ        int32 = 9
-		nTpTarget   int32 = 10
-		nGive       int32 = 11
-		nGiveItem   int32 = 12
-		nGiveCount  int32 = 13
-		nKick       int32 = 14
-		nKickTarget int32 = 15
-		nKickReason int32 = 16
-		nHelp       int32 = 17
-		nList       int32 = 18
-		nodeCount         = 19
-
-		// Brigadier built-in parser IDs (stable across Minecraft versions).
-		parserDouble  int32 = 2
-		parserInteger int32 = 3
-		parserString  int32 = 5
-
-		// brigadier:string behaviour sub-types.
-		strSingleWord int32 = 0
-		strGreedy     int32 = 2
-
-		// Flags shortcuts.
-		fRoot     byte = 0x00                 // ROOT, not executable
-		fLit      byte = 0x01                 // LITERAL, not executable
-		fLitX     byte = 0x01 | 0x04          // LITERAL, executable
-		fArg      byte = 0x02                 // ARGUMENT, not executable
-		fArgX     byte = 0x02 | 0x04          // ARGUMENT, executable
-	)
-
-	b := protocol.NewBuilder(packetIDCommands)
-	b.VarInt(nodeCount)
-
-	// ── 0: ROOT ───────────────────────────────────────────────────────────────
-	b.Byte(fRoot)
-	nodeChildren(b, nGamemode, nTp, nGive, nKick, nHelp, nList)
-
-	// ── 1: LITERAL "gamemode" ─────────────────────────────────────────────────
-	b.Byte(fLit)
-	nodeChildren(b, nSurvival, nCreative, nAdventure, nSpectator)
-	b.String("gamemode")
-
-	// ── 2–5: game-mode sub-commands ───────────────────────────────────────────
-	for _, name := range []string{"survival", "creative", "adventure", "spectator"} {
-		b.Byte(fLitX)
-		nodeChildren(b) // leaf
-		b.String(name)
+	nodes := []commandGraphNode{{flags: commandNodeRoot}}
+	addLiteral := func(name string, executable bool, children ...int32) int32 {
+		flags := commandNodeLiteral
+		if executable {
+			flags |= commandExecutable
+		}
+		index := int32(len(nodes))
+		nodes = append(nodes, commandGraphNode{flags: flags, children: children, name: name})
+		return index
+	}
+	addArgument := func(name string, parser int32, executable bool, parserData func(*protocol.Builder), children ...int32) int32 {
+		flags := commandNodeArgument
+		if executable {
+			flags |= commandExecutable
+		}
+		index := int32(len(nodes))
+		nodes = append(nodes, commandGraphNode{
+			flags: flags, children: children, name: name,
+			parser: parser, parserData: parserData,
+		})
+		return index
 	}
 
-	// ── 6: LITERAL "tp" ──────────────────────────────────────────────────────
-	b.Byte(fLit)
-	nodeChildren(b, nTpX, nTpTarget)
-	b.String("tp")
+	var rootChildren []int32
 
-	// ── 7: ARGUMENT "x" (double) ─────────────────────────────────────────────
-	b.Byte(fArg)
-	nodeChildren(b, nTpY)
-	b.String("x").VarInt(parserDouble).Byte(0x00) // no min/max bounds
+	modeChildren := make([]int32, 0, 4)
+	for _, mode := range []string{"survival", "creative", "adventure", "spectator"} {
+		modeChildren = append(modeChildren, addLiteral(mode, true))
+	}
+	rootChildren = append(rootChildren,
+		addLiteral("gamemode", false, modeChildren...),
+		addLiteral("gm", false, modeChildren...),
+	)
 
-	// ── 8: ARGUMENT "y" (double) ─────────────────────────────────────────────
-	b.Byte(fArg)
-	nodeChildren(b, nTpZ)
-	b.String("y").VarInt(parserDouble).Byte(0x00)
+	tpZ := addArgument("z", parserDouble, true, noNumberBounds)
+	tpY := addArgument("y", parserDouble, false, noNumberBounds, tpZ)
+	tpX := addArgument("x", parserDouble, false, noNumberBounds, tpY)
+	tpTarget := addArgument("target", parserGameProfile, true, nil)
+	rootChildren = append(rootChildren, addLiteral("tp", false, tpX, tpTarget))
 
-	// ── 9: ARGUMENT "z" (double, executable) ─────────────────────────────────
-	b.Byte(fArgX)
-	nodeChildren(b)
-	b.String("z").VarInt(parserDouble).Byte(0x00)
+	giveCount := addArgument("count", parserInteger, true, integerBounds(1, 64))
+	giveItem := addArgument("item", parserItemStack, true, nil, giveCount)
+	giveTarget := addArgument("player", parserGameProfile, false, nil, giveItem)
+	rootChildren = append(rootChildren, addLiteral("give", false, giveTarget))
 
-	// ── 10: ARGUMENT "target" (string single-word, executable) ───────────────
-	b.Byte(fArgX)
-	nodeChildren(b)
-	b.String("target").VarInt(parserString).VarInt(strSingleWord)
+	getCount := addArgument("count", parserInteger, true, integerBounds(1, 64))
+	getItem := addArgument("item", parserItemStack, true, nil, getCount)
+	rootChildren = append(rootChildren, addLiteral("get", false, getItem))
 
-	// ── 11: LITERAL "give" ────────────────────────────────────────────────────
-	b.Byte(fLit)
-	nodeChildren(b, nGiveItem)
-	b.String("give")
+	kickReason := addArgument("reason", parserString, true, stringParser(2))
+	kickTarget := addArgument("player", parserGameProfile, true, nil, kickReason)
+	rootChildren = append(rootChildren, addLiteral("kick", false, kickTarget))
 
-	// ── 12: ARGUMENT "item" (string single-word, executable so count is
-	//        optional)  ────────────────────────────────────────────────────────
-	b.Byte(fArgX)
-	nodeChildren(b, nGiveCount)
-	b.String("item").VarInt(parserString).VarInt(strSingleWord)
+	for _, name := range []string{"help", "list", "xyz", "version", "ver", "fly"} {
+		rootChildren = append(rootChildren, addLiteral(name, true))
+	}
 
-	// ── 13: ARGUMENT "count" (integer ≥ 1, executable) ───────────────────────
-	b.Byte(fArgX)
-	nodeChildren(b)
-	b.String("count").VarInt(parserInteger)
-	b.Byte(0x01).Int(1) // flags: min present; min = 1
+	locateChildren := make([]int32, 0, len(locatableTargets))
+	for _, target := range locatableTargets {
+		locateChildren = append(locateChildren, addLiteral(target, true))
+	}
+	rootChildren = append(rootChildren, addLiteral("locate", false, locateChildren...))
 
-	// ── 14: LITERAL "kick" ────────────────────────────────────────────────────
-	b.Byte(fLit)
-	nodeChildren(b, nKickTarget)
-	b.String("kick")
+	professionChildren := make([]int32, 0, len(villagerProfessionNames))
+	for _, profession := range villagerProfessionNames {
+		professionChildren = append(professionChildren, addLiteral(profession, true))
+	}
+	summonChildren := make([]int32, 0, len(summonableMobNames))
+	for _, mob := range summonableMobNames {
+		if mob == "villager" {
+			summonChildren = append(summonChildren, addLiteral(mob, true, professionChildren...))
+		} else {
+			summonChildren = append(summonChildren, addLiteral(mob, true))
+		}
+	}
+	rootChildren = append(rootChildren, addLiteral("summon", false, summonChildren...))
 
-	// ── 15: ARGUMENT "target" (string single-word, executable so reason is
-	//        optional) ─────────────────────────────────────────────────────────
-	b.Byte(fArgX)
-	nodeChildren(b, nKickReason)
-	b.String("target").VarInt(parserString).VarInt(strSingleWord)
+	effectSeconds := addArgument("seconds", parserInteger, true, integerBounds(1, 1_000_000))
+	effectChildren := make([]int32, 0, len(potionEffectNames))
+	for _, effect := range potionEffectNames {
+		effectChildren = append(effectChildren, addLiteral(effect, false, effectSeconds))
+	}
+	effectTarget := addArgument("player", parserGameProfile, false, nil, effectChildren...)
+	rootChildren = append(rootChildren, addLiteral("potioneffect", false, effectTarget))
 
-	// ── 16: ARGUMENT "reason" (string greedy-phrase, executable) ─────────────
-	b.Byte(fArgX)
-	nodeChildren(b)
-	b.String("reason").VarInt(parserString).VarInt(strGreedy)
+	speedValue := func() int32 {
+		return addArgument("value", parserFloat, true, floatBounds(0.001, 1))
+	}
+	speedReset := func() int32 { return addLiteral("reset", true) }
+	for _, command := range []string{"walkspeed", "walkspeen", "flyspeed", "flyyspeed"} {
+		rootChildren = append(rootChildren, addLiteral(command, false, speedValue(), speedReset()))
+	}
 
-	// ── 17: LITERAL "help" (executable) ──────────────────────────────────────
-	b.Byte(fLitX)
-	nodeChildren(b)
-	b.String("help")
+	nodes[0].children = rootChildren
 
-	// ── 18: LITERAL "list" (executable) ──────────────────────────────────────
-	b.Byte(fLitX)
-	nodeChildren(b)
-	b.String("list")
-
-	// Root node index (always 0).
-	b.VarInt(nRoot)
-
+	b := protocol.NewBuilder(packetIDCommands).VarInt(int32(len(nodes)))
+	for _, node := range nodes {
+		b.Byte(node.flags)
+		nodeChildren(b, node.children...)
+		switch node.flags & 0x03 {
+		case commandNodeLiteral:
+			b.String(node.name)
+		case commandNodeArgument:
+			b.String(node.name).VarInt(node.parser)
+			if node.parserData != nil {
+				node.parserData(b)
+			}
+		}
+	}
+	b.VarInt(0) // root node index
 	return b.Build()
 }
 
-// nodeChildren writes a VarInt child-count followed by each child index.
+func noNumberBounds(b *protocol.Builder) {
+	b.Byte(0x00)
+}
+
+func integerBounds(minimum, maximum int32) func(*protocol.Builder) {
+	return func(b *protocol.Builder) {
+		b.Byte(0x03).Int(minimum).Int(maximum)
+	}
+}
+
+func floatBounds(minimum, maximum float32) func(*protocol.Builder) {
+	return func(b *protocol.Builder) {
+		b.Byte(0x03).Float(minimum).Float(maximum)
+	}
+}
+
+func stringParser(kind int32) func(*protocol.Builder) {
+	return func(b *protocol.Builder) {
+		b.VarInt(kind)
+	}
+}
+
 func nodeChildren(b *protocol.Builder, indices ...int32) {
 	b.VarInt(int32(len(indices)))
-	for _, i := range indices {
-		b.VarInt(i)
+	for _, index := range indices {
+		b.VarInt(index)
 	}
 }

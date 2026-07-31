@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -26,6 +27,19 @@ type BedrockConfig struct {
 	// Disable only for LAN testing; unauthenticated XUIDs are NOT treated as
 	// trusted global identities.
 	OnlineMode bool `yaml:"online_mode"`
+}
+
+const (
+	WorldStorageDisk   = "disk"
+	WorldStorageMemory = "memory"
+)
+
+// CombatConfig controls Java combat timing and knockback. Disabling the attack
+// cooldown with the default values provides a legacy 1.8-style feel.
+type CombatConfig struct {
+	AttackCooldown      bool    `yaml:"attack_cooldown"`
+	KnockbackHorizontal float64 `yaml:"knockback_horizontal"`
+	KnockbackVertical   float64 `yaml:"knockback_vertical"`
 }
 
 // Config holds all server configuration values.
@@ -51,9 +65,11 @@ type Config struct {
 	// Set to false to disable NPC spawning (structures still generate).
 	Villagers bool `yaml:"villagers"`
 
-	// WorldDir is the path to the Minecraft world folder containing region/,
-	// level.dat, etc.  Leave empty to disable Anvil persistence and run with
-	// seeded overworld generation without persistence.
+	// WorldStorage selects "disk" (Anvil persistence plus an in-memory cache)
+	// or "memory" (no disk reads or writes).
+	WorldStorage string `yaml:"world_storage"`
+
+	// WorldDir is the Anvil world folder used when WorldStorage is "disk".
 	WorldDir string `yaml:"world_dir"`
 
 	// WorldSeed controls deterministic overworld terrain generation for chunks
@@ -64,6 +80,13 @@ type Config struct {
 	// warms a larger square in the background so movement rarely waits on worldgen.
 	ViewDistance      int `yaml:"view_distance"`
 	PreGenerateRadius int `yaml:"pregenerate_radius"`
+
+	// MaxCachedChunks bounds clean chunks retained in RAM. Dirty memory-mode
+	// chunks remain pinned so unsaved changes are never silently discarded.
+	MaxCachedChunks int `yaml:"max_cached_chunks"`
+
+	// Combat timing and knockback settings.
+	Combat CombatConfig `yaml:"combat"`
 
 	// Bedrock Edition UDP listener settings.
 	Bedrock BedrockConfig `yaml:"bedrock"`
@@ -81,8 +104,16 @@ func defaults() *Config {
 		ProtocolVersion:   769, // Minecraft Java Edition 1.21.4
 		OnlineMode:        false,
 		Villagers:         true,
+		WorldStorage:      WorldStorageDisk,
+		WorldDir:          "world",
 		ViewDistance:      8,
 		PreGenerateRadius: 12,
+		MaxCachedChunks:   768,
+		Combat: CombatConfig{
+			AttackCooldown:      false,
+			KnockbackHorizontal: 0.4,
+			KnockbackVertical:   0.4,
+		},
 		Bedrock: BedrockConfig{
 			Enabled:    false,
 			Address:    "0.0.0.0:19132",
@@ -133,6 +164,16 @@ func (c *Config) validate() error {
 			return errors.New("protocol_version must be > 0")
 		}
 	}
+	c.WorldStorage = strings.ToLower(strings.TrimSpace(c.WorldStorage))
+	switch c.WorldStorage {
+	case WorldStorageDisk:
+		if strings.TrimSpace(c.WorldDir) == "" {
+			return errors.New("world_dir must not be empty when world_storage is disk")
+		}
+	case WorldStorageMemory:
+	default:
+		return fmt.Errorf("world_storage %q must be disk or memory", c.WorldStorage)
+	}
 	if c.MaxPlayers < 0 {
 		return errors.New("max_players must be >= 0")
 	}
@@ -141,6 +182,15 @@ func (c *Config) validate() error {
 	}
 	if c.PreGenerateRadius < c.ViewDistance || c.PreGenerateRadius > 64 {
 		return fmt.Errorf("pregenerate_radius %d must be between view_distance (%d) and 64", c.PreGenerateRadius, c.ViewDistance)
+	}
+	if c.MaxCachedChunks < 128 || c.MaxCachedChunks > 65536 {
+		return fmt.Errorf("max_cached_chunks %d must be between 128 and 65536", c.MaxCachedChunks)
+	}
+	if c.Combat.KnockbackHorizontal < 0 || c.Combat.KnockbackHorizontal > 4 {
+		return fmt.Errorf("combat.knockback_horizontal %.3f must be between 0 and 4", c.Combat.KnockbackHorizontal)
+	}
+	if c.Combat.KnockbackVertical < 0 || c.Combat.KnockbackVertical > 4 {
+		return fmt.Errorf("combat.knockback_vertical %.3f must be between 0 and 4", c.Combat.KnockbackVertical)
 	}
 	if c.Bedrock.Enabled && c.Bedrock.Address == "" {
 		return errors.New("bedrock.address must not be empty when bedrock is enabled")
@@ -161,10 +211,12 @@ func (c *Config) validate() error {
 //	GOCRAFT_ONLINE_MODE       Java auth required          (default: false)
 //	GOCRAFT_MOTD              Server MOTD string
 //	GOCRAFT_MAX_PLAYERS       Max concurrent players
+//	GOCRAFT_WORLD_STORAGE     disk or memory              (default: disk)
 //	GOCRAFT_WORLD_DIR         Anvil world directory path
 //	GOCRAFT_WORLD_SEED        Signed 64-bit terrain seed
 //	GOCRAFT_VIEW_DISTANCE     Java chunk view radius        (default: 8)
 //	GOCRAFT_PREGENERATE_RADIUS Background generation radius (default: 12)
+//	GOCRAFT_MAX_CACHED_CHUNKS Clean chunk cache limit       (default: 768)
 //	GOCRAFT_BEDROCK_ENABLED   "true"/"false"              (default: false)
 //	GOCRAFT_BEDROCK_ADDR      Bedrock UDP address         (default: 0.0.0.0:19132)
 //	GOCRAFT_BEDROCK_ONLINE_MODE Xbox Live auth required   (default: true)
@@ -203,6 +255,9 @@ func (c *Config) ApplyEnvOverrides() error {
 		}
 		c.MaxPlayers = n
 	}
+	if v := os.Getenv("GOCRAFT_WORLD_STORAGE"); v != "" {
+		c.WorldStorage = strings.ToLower(strings.TrimSpace(v))
+	}
 	if v := os.Getenv("GOCRAFT_WORLD_DIR"); v != "" {
 		c.WorldDir = v
 	}
@@ -226,6 +281,34 @@ func (c *Config) ApplyEnvOverrides() error {
 			return fmt.Errorf("GOCRAFT_PREGENERATE_RADIUS %q: %w", v, err)
 		}
 		c.PreGenerateRadius = n
+	}
+	if v := os.Getenv("GOCRAFT_MAX_CACHED_CHUNKS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("GOCRAFT_MAX_CACHED_CHUNKS %q: %w", v, err)
+		}
+		c.MaxCachedChunks = n
+	}
+	if v := os.Getenv("GOCRAFT_ATTACK_COOLDOWN"); v != "" {
+		value, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("GOCRAFT_ATTACK_COOLDOWN %q: %w", v, err)
+		}
+		c.Combat.AttackCooldown = value
+	}
+	if v := os.Getenv("GOCRAFT_KNOCKBACK_HORIZONTAL"); v != "" {
+		value, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("GOCRAFT_KNOCKBACK_HORIZONTAL %q: %w", v, err)
+		}
+		c.Combat.KnockbackHorizontal = value
+	}
+	if v := os.Getenv("GOCRAFT_KNOCKBACK_VERTICAL"); v != "" {
+		value, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return fmt.Errorf("GOCRAFT_KNOCKBACK_VERTICAL %q: %w", v, err)
+		}
+		c.Combat.KnockbackVertical = value
 	}
 	if v := os.Getenv("GOCRAFT_BEDROCK_ENABLED"); v != "" {
 		b, err := strconv.ParseBool(v)
@@ -261,10 +344,15 @@ func logEnvOverrides(c *Config) {
 		{"GOCRAFT_ONLINE_MODE", os.Getenv("GOCRAFT_ONLINE_MODE")},
 		{"GOCRAFT_MOTD", os.Getenv("GOCRAFT_MOTD")},
 		{"GOCRAFT_MAX_PLAYERS", os.Getenv("GOCRAFT_MAX_PLAYERS")},
+		{"GOCRAFT_WORLD_STORAGE", os.Getenv("GOCRAFT_WORLD_STORAGE")},
 		{"GOCRAFT_WORLD_DIR", os.Getenv("GOCRAFT_WORLD_DIR")},
 		{"GOCRAFT_WORLD_SEED", os.Getenv("GOCRAFT_WORLD_SEED")},
 		{"GOCRAFT_VIEW_DISTANCE", os.Getenv("GOCRAFT_VIEW_DISTANCE")},
 		{"GOCRAFT_PREGENERATE_RADIUS", os.Getenv("GOCRAFT_PREGENERATE_RADIUS")},
+		{"GOCRAFT_MAX_CACHED_CHUNKS", os.Getenv("GOCRAFT_MAX_CACHED_CHUNKS")},
+		{"GOCRAFT_ATTACK_COOLDOWN", os.Getenv("GOCRAFT_ATTACK_COOLDOWN")},
+		{"GOCRAFT_KNOCKBACK_HORIZONTAL", os.Getenv("GOCRAFT_KNOCKBACK_HORIZONTAL")},
+		{"GOCRAFT_KNOCKBACK_VERTICAL", os.Getenv("GOCRAFT_KNOCKBACK_VERTICAL")},
 		{"GOCRAFT_BEDROCK_ENABLED", os.Getenv("GOCRAFT_BEDROCK_ENABLED")},
 		{"GOCRAFT_BEDROCK_ADDR", os.Getenv("GOCRAFT_BEDROCK_ADDR")},
 		{"GOCRAFT_BEDROCK_ONLINE_MODE", os.Getenv("GOCRAFT_BEDROCK_ONLINE_MODE")},

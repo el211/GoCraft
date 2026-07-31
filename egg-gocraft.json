@@ -129,8 +129,17 @@
       "field_type": "text"
     },
     {
+      "name": "World Storage",
+      "description": "Choose disk for persistent Anvil storage or memory for an ephemeral world that is lost on restart.",
+      "env_variable": "GOCRAFT_WORLD_STORAGE",
+      "default_value": "disk",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|in:disk,memory",
+      "field_type": "text"
+    },    {
       "name": "World Directory",
-      "description": "World directory relative to the server root. Leave empty to disable persistent Anvil world storage.",
+      "description": "World directory relative to the server root when World Storage is disk.",
       "env_variable": "GOCRAFT_WORLD_DIR",
       "default_value": "world",
       "user_viewable": true,
@@ -168,5 +177,15 @@
       "rules": "required|integer|between:2,64",
       "field_type": "text"
     }
-  ]
+,
+    {
+      "name": "Maximum Cached Chunks",
+      "description": "Maximum clean chunks retained in RAM. Lower this to reduce memory use at the cost of more disk reads or regeneration.",
+      "env_variable": "GOCRAFT_MAX_CACHED_CHUNKS",
+      "default_value": "768",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|integer|between:128,65536",
+      "field_type": "text"
+    }  ]
 }

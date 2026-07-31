@@ -45,3 +45,72 @@ func TestPregenerationRadiusCannotBeSmallerThanView(t *testing.T) {
 		t.Fatalf("validate error=%v, want pregenerate_radius error", err)
 	}
 }
+
+func TestWorldStorageDefaultsToDisk(t *testing.T) {
+	cfg := defaults()
+	if cfg.WorldStorage != WorldStorageDisk || cfg.WorldDir != "world" {
+		t.Fatalf("storage defaults = (%q,%q), want (disk,world)", cfg.WorldStorage, cfg.WorldDir)
+	}
+	if err := cfg.validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWorldStorageEnvironmentSelectsMemory(t *testing.T) {
+	t.Setenv("GOCRAFT_WORLD_STORAGE", "MEMORY")
+	cfg := defaults()
+	if err := cfg.ApplyEnvOverrides(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.WorldStorage != WorldStorageMemory {
+		t.Fatalf("WorldStorage = %q, want memory", cfg.WorldStorage)
+	}
+}
+
+func TestWorldStorageRejectsInvalidMode(t *testing.T) {
+	cfg := defaults()
+	cfg.WorldStorage = "cloud"
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "world_storage") {
+		t.Fatalf("validate error = %v, want world_storage error", err)
+	}
+}
+
+func TestMaxCachedChunksEnvironmentOverride(t *testing.T) {
+	t.Setenv("GOCRAFT_MAX_CACHED_CHUNKS", "512")
+	cfg := defaults()
+	if err := cfg.ApplyEnvOverrides(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxCachedChunks != 512 {
+		t.Fatalf("MaxCachedChunks=%d, want 512", cfg.MaxCachedChunks)
+	}
+}
+
+func TestMaxCachedChunksRejectsOutOfRange(t *testing.T) {
+	cfg := defaults()
+	cfg.MaxCachedChunks = 64
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "max_cached_chunks") {
+		t.Fatalf("validate error=%v, want max_cached_chunks error", err)
+	}
+}
+
+func TestCombatEnvironmentOverrides(t *testing.T) {
+	t.Setenv("GOCRAFT_ATTACK_COOLDOWN", "true")
+	t.Setenv("GOCRAFT_KNOCKBACK_HORIZONTAL", "0.55")
+	t.Setenv("GOCRAFT_KNOCKBACK_VERTICAL", "0.42")
+	cfg := defaults()
+	if err := cfg.ApplyEnvOverrides(); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Combat.AttackCooldown || cfg.Combat.KnockbackHorizontal != 0.55 || cfg.Combat.KnockbackVertical != 0.42 {
+		t.Fatalf("combat config = %+v", cfg.Combat)
+	}
+}
+
+func TestCombatKnockbackRejectsUnsafeRange(t *testing.T) {
+	cfg := defaults()
+	cfg.Combat.KnockbackHorizontal = 4.1
+	if err := cfg.validate(); err == nil || !strings.Contains(err.Error(), "knockback_horizontal") {
+		t.Fatalf("validate error = %v, want knockback_horizontal range error", err)
+	}
+}

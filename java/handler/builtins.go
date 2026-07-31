@@ -1,29 +1,52 @@
 package handler
 
-// Built-in command implementations for Milestone 12.
+// Built-in command implementations.
 //
 // Each command receives a CommandContext and returns an error whose text is
-// shown to the issuing player.  The Dispatcher catches all returns.
-//
-// Commands implemented here:
-//   /help                              — list available commands
-//   /list                              — list online players
-//   /gamemode <mode>                   — change the issuing player's game mode
-//   /tp <x> <y> <z>                   — teleport to coordinates
-//   /tp <player>                       — teleport to another player
-//   /give <item> [count]               — add an item to the hotbar / inventory
-//   /kick <player> [reason]            — disconnect a player
-//
-// Packet IDs marked "estimate" should be verified against a 1.21.4 capture.
-
+// shown to the issuing player. The Dispatcher catches all returns. The
+// Commands packet in commands_packet.go mirrors these handlers so arguments
+// and registry-backed values are tab-completable in the vanilla client.
 import (
+	"crypto/rand"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
+	corentity "GoCraft/core/entity"
 	"GoCraft/core/player"
+	coreworld "GoCraft/core/world"
+	"GoCraft/java/network"
 	"GoCraft/java/protocol"
+	javaworld "GoCraft/java/world"
 )
+
+var locatableTargets = append([]string{"village"}, coreworld.GeneratedBiomeNames()...)
+
+var villagerProfessionNames = []string{
+	"normal", "none", "armorer", "butcher", "cartographer", "cleric",
+	"farmer", "fisherman", "fletcher", "leatherworker", "librarian",
+	"mason", "nitwit", "shepherd", "toolsmith", "weaponsmith",
+}
+
+var potionEffectNames = javaworld.MobEffectNames()
+
+var summonableMobNames = []string{
+	"allay", "armadillo", "axolotl", "bat", "camel", "cat", "chicken",
+	"cod", "cow", "donkey", "fox", "frog", "glow_squid", "goat", "horse",
+	"mooshroom", "mule", "ocelot", "panda", "parrot", "pig", "pufferfish",
+	"rabbit", "salmon", "sheep", "skeleton_horse", "sniffer", "squid",
+	"tadpole", "tropical_fish", "turtle", "villager", "wandering_trader",
+	"zombie_horse", "bee", "dolphin", "iron_golem", "llama", "polar_bear",
+	"snow_golem", "strider", "trader_llama", "wolf", "zombified_piglin",
+	"blaze", "bogged", "breeze", "cave_spider", "creaking", "creeper",
+	"drowned", "elder_guardian", "enderman", "endermite", "evoker", "ghast",
+	"guardian", "hoglin", "husk", "illusioner", "magma_cube", "phantom",
+	"piglin", "piglin_brute", "pillager", "ravager", "shulker", "silverfish",
+	"skeleton", "slime", "spider", "stray", "vex", "vindicator", "warden",
+	"witch", "wither", "wither_skeleton", "zoglin", "zombie",
+	"zombie_villager",
+}
 
 // RegisterBuiltins registers all built-in GoCraft commands with d.
 func RegisterBuiltins(d *Dispatcher) {
@@ -32,7 +55,19 @@ func RegisterBuiltins(d *Dispatcher) {
 	d.Register("gamemode", cmdGameMode)
 	d.Register("gm", cmdGameMode) // short alias
 	d.Register("tp", cmdTp)
+	d.Register("xyz", cmdXYZ)
+	d.Register("locate", cmdLocate)
+	d.Register("summon", cmdSummon)
+	d.Register("version", cmdVersion)
+	d.Register("ver", cmdVersion)
 	d.Register("give", cmdGive)
+	d.Register("get", cmdGet)
+	d.Register("fly", cmdFly)
+	d.Register("potioneffect", cmdPotionEffect)
+	d.Register("walkspeed", cmdWalkSpeed)
+	d.Register("walkspeen", cmdWalkSpeed) // compatibility with the commonly typed spelling
+	d.Register("flyspeed", cmdFlySpeed)
+	d.Register("flyyspeed", cmdFlySpeed) // compatibility with the commonly typed spelling
 	d.Register("kick", cmdKick)
 }
 
@@ -40,7 +75,7 @@ func RegisterBuiltins(d *Dispatcher) {
 
 func cmdHelp(ctx CommandContext) error {
 	_ = sendSystemMessage(ctx.Conn,
-		"Commands: /gamemode /tp /give /kick /list /help")
+		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /help")
 	return nil
 }
 
@@ -58,6 +93,167 @@ func cmdList(ctx CommandContext) error {
 }
 
 // ── /gamemode ─────────────────────────────────────────────────────────────────
+
+func cmdXYZ(ctx CommandContext) error {
+	if ctx.Player == nil {
+		return fmt.Errorf("player state is unavailable")
+	}
+	position := ctx.Player.Position
+	block := position.ToBlock()
+	chunkX := int32(math.Floor(position.X / float64(coreworld.SectionSize)))
+	chunkZ := int32(math.Floor(position.Z / float64(coreworld.SectionSize)))
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+		"Position: X=%.2f Y=%.2f Z=%.2f | Block: %d %d %d | Chunk: %d %d",
+		position.X, position.Y, position.Z, block.X, block.Y, block.Z, chunkX, chunkZ,
+	))
+	return nil
+}
+
+const (
+	locateMaxDistance = 8192
+	goCraftVersion    = "GoCraft 1.21.4"
+)
+
+func cmdLocate(ctx CommandContext) error {
+	if len(ctx.Args) != 1 {
+		return fmt.Errorf("usage: /locate <village|biome>")
+	}
+	if ctx.World == nil || ctx.Player == nil {
+		return fmt.Errorf("world state is unavailable")
+	}
+
+	target := strings.ToLower(strings.TrimPrefix(ctx.Args[0], "minecraft:"))
+	originX := int(math.Floor(ctx.Player.Position.X))
+	originZ := int(math.Floor(ctx.Player.Position.Z))
+
+	if target == "village" {
+		center, ok := ctx.World.NearestVillage(originX, originZ, locateMaxDistance)
+		if !ok {
+			return fmt.Errorf("no village found within %d blocks", locateMaxDistance)
+		}
+		y := ctx.World.SurfaceY(center.WorldX, center.WorldZ) + 1
+		distance := int(math.Round(math.Hypot(
+			float64(center.WorldX-originX),
+			float64(center.WorldZ-originZ),
+		)))
+		biome := strings.TrimPrefix(center.Biome, "minecraft:")
+		_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+			"Nearest village: %d %d %d (%d blocks, %s). Teleport: /tp %d %d %d",
+			center.WorldX, y, center.WorldZ, distance, biome,
+			center.WorldX, y, center.WorldZ,
+		))
+		return nil
+	}
+
+	if !containsName(coreworld.GeneratedBiomeNames(), target) {
+		return fmt.Errorf("unknown locate target %q; use tab completion", ctx.Args[0])
+	}
+	x, z, ok := ctx.World.NearestBiome(
+		originX, originZ, "minecraft:"+target, locateMaxDistance,
+	)
+	if !ok {
+		return fmt.Errorf("no %s biome found within %d blocks", target, locateMaxDistance)
+	}
+	y := ctx.World.SurfaceY(x, z) + 1
+	distance := int(math.Round(math.Hypot(float64(x-originX), float64(z-originZ))))
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+		"Nearest %s: %d %d %d (%d blocks). Teleport: /tp %d %d %d",
+		target, x, y, z, distance, x, y, z,
+	))
+	return nil
+}
+
+func cmdVersion(ctx CommandContext) error {
+	_ = sendSystemMessage(ctx.Conn, goCraftVersion)
+	return nil
+}
+
+func cmdSummon(ctx CommandContext) error {
+	if len(ctx.Args) < 1 || len(ctx.Args) > 2 {
+		return fmt.Errorf("usage: /summon <mob> [villager_profession]")
+	}
+	if ctx.Player == nil || ctx.World == nil || ctx.Manager == nil {
+		return fmt.Errorf("world state is unavailable")
+	}
+	if ctx.NextEntityID == nil {
+		return fmt.Errorf("entity allocator is unavailable")
+	}
+
+	mobName := strings.ToLower(strings.TrimPrefix(ctx.Args[0], "minecraft:"))
+	if !containsName(summonableMobNames, mobName) {
+		return fmt.Errorf("unknown mob %q; use tab completion", ctx.Args[0])
+	}
+
+	professionName := "normal"
+	if len(ctx.Args) == 2 {
+		if mobName != "villager" {
+			return fmt.Errorf("villager professions can only be used with /summon villager")
+		}
+		professionName = strings.ToLower(strings.TrimPrefix(ctx.Args[1], "minecraft:"))
+		if !containsName(villagerProfessionNames, professionName) {
+			return fmt.Errorf("unknown villager profession %q; use tab completion", ctx.Args[1])
+		}
+	}
+
+	var uuid [16]byte
+	if _, err := rand.Read(uuid[:]); err != nil {
+		return fmt.Errorf("creating entity UUID: %w", err)
+	}
+	uuid[6] = (uuid[6] & 0x0f) | 0x40
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
+
+	position := ctx.Player.Position
+	entity := corentity.New(
+		ctx.NextEntityID(),
+		uuid,
+		corentity.EntityType("minecraft:"+mobName),
+		position.X+1.5,
+		position.Y,
+		position.Z,
+	)
+	entity.OnGround = ctx.Player.OnGround
+	if mobName == "villager" {
+		entity.VillagerVariant = corentity.VillagerVariantPlains
+		entity.VillagerProfession = corentity.VillagerProfessionNone
+		entity.VillagerLevel = 1
+		if professionName != "normal" && professionName != "none" {
+			entity.VillagerProfession = corentity.VillagerProfession("minecraft:" + professionName)
+		}
+	}
+
+	spawnPacket, ok := buildSpawnMob(entity)
+	if !ok {
+		return fmt.Errorf("mob %q is unavailable in the Java 1.21.4 registry", mobName)
+	}
+	metadataPacket := buildMobMetadata(entity)
+	ctx.World.Entities.Add(entity)
+	for _, session := range ctx.Manager.SnapshotAll() {
+		_ = session.Conn.WritePacket(spawnPacket)
+		if metadataPacket != nil {
+			_ = session.Conn.WritePacket(metadataPacket)
+		}
+	}
+	if mobName == "villager" {
+		_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+			"Summoned villager (%s) with entity ID %d",
+			professionName, entity.EntityID,
+		))
+	} else {
+		_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+			"Summoned %s with entity ID %d", mobName, entity.EntityID,
+		))
+	}
+	return nil
+}
+
+func containsName(names []string, target string) bool {
+	for _, name := range names {
+		if name == target {
+			return true
+		}
+	}
+	return false
+}
 
 func cmdGameMode(ctx CommandContext) error {
 	if len(ctx.Args) < 1 {
@@ -166,65 +362,174 @@ func cmdTp(ctx CommandContext) error {
 // ── /give ─────────────────────────────────────────────────────────────────────
 
 func cmdGive(ctx CommandContext) error {
-	if len(ctx.Args) < 1 {
-		return fmt.Errorf("usage: /give <item> [count]")
+	if len(ctx.Args) < 2 || len(ctx.Args) > 3 {
+		return fmt.Errorf("usage: /give <player> <item|block> [count]")
+	}
+	target, targetConn, err := findOnlinePlayer(ctx, ctx.Args[0])
+	if err != nil {
+		return err
 	}
 
-	// Normalize item name: accept "stone" or "minecraft:stone".
-	itemName := ctx.Args[0]
-	if !strings.Contains(itemName, ":") {
-		itemName = "minecraft:" + itemName
+	itemName := normalizeResourceLocation(ctx.Args[1])
+	if itemName == "minecraft:air" || javaworld.ItemID(itemName) < 0 {
+		return fmt.Errorf("unknown item or block %q", ctx.Args[1])
 	}
-
-	count := 1
-	if len(ctx.Args) >= 2 {
-		n, err := strconv.Atoi(ctx.Args[1])
-		if err != nil || n < 1 {
-			return fmt.Errorf("count must be a positive integer, got %q", ctx.Args[1])
-		}
-		count = n
+	count, err := parseGiveCount(ctx.Args[2:])
+	if err != nil {
+		return err
 	}
-	if count > 64 {
-		count = 64
+	if !target.GiveItem(player.ItemStack{ItemID: itemName, Count: count}) {
+		return fmt.Errorf("%s's inventory is full", target.Username)
 	}
-
-	// Find the first empty slot: hotbar first, then main inventory.
-	slot := firstEmptySlot(ctx.Player)
-	if slot < 0 {
-		return fmt.Errorf("inventory is full")
-	}
-
-	ctx.Player.Inventory[slot] = player.ItemStack{ItemID: itemName, Count: count}
-
-	// Sync the full inventory so the client reflects the new item.
-	if err := sendSetContainerContent(ctx.Conn, ctx.Player, 1); err != nil {
-		return fmt.Errorf("syncing inventory: %w", err)
+	if err := sendSetContainerContent(targetConn, target, 1); err != nil {
+		return fmt.Errorf("syncing %s's inventory: %w", target.Username, err)
 	}
 	_ = sendSystemMessage(ctx.Conn,
-		fmt.Sprintf("Given %dx %s", count, itemName))
+		fmt.Sprintf("Given %dx %s to %s", count, itemName, target.Username))
+	if target != ctx.Player {
+		_ = sendSystemMessage(targetConn,
+			fmt.Sprintf("You received %dx %s", count, itemName))
+	}
 	return nil
 }
 
-// firstEmptySlot returns the index of the first empty slot in the player's
-// hotbar (preferred) or main inventory, or -1 if the inventory is full.
-func firstEmptySlot(p *player.Player) int {
-	// Hotbar: slots HotbarStart … HotbarStart+8
-	for i := player.HotbarStart; i < player.HotbarStart+9; i++ {
-		if p.Inventory[i].IsEmpty() {
-			return i
-		}
+func cmdGet(ctx CommandContext) error {
+	if len(ctx.Args) < 1 || len(ctx.Args) > 2 {
+		return fmt.Errorf("usage: /get <item|block> [count]")
 	}
-	// Main inventory: slots 9 … HotbarStart-1
-	for i := 9; i < player.HotbarStart; i++ {
-		if p.Inventory[i].IsEmpty() {
-			return i
-		}
-	}
-	return -1
+	args := make([]string, 0, len(ctx.Args)+1)
+	args = append(args, ctx.Player.Username)
+	args = append(args, ctx.Args...)
+	ctx.Args = args
+	return cmdGive(ctx)
 }
 
-// ── /kick ─────────────────────────────────────────────────────────────────────
+func parseGiveCount(args []string) (int, error) {
+	if len(args) == 0 {
+		return 1, nil
+	}
+	count, err := strconv.Atoi(args[0])
+	if err != nil || count < 1 || count > 64 {
+		return 0, fmt.Errorf("count must be between 1 and 64, got %q", args[0])
+	}
+	return count, nil
+}
 
+func normalizeResourceLocation(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !strings.Contains(name, ":") {
+		return "minecraft:" + name
+	}
+	return name
+}
+
+func findOnlinePlayer(ctx CommandContext, name string) (*player.Player, *network.ClientConn, error) {
+	if name == "@s" || strings.EqualFold(name, ctx.Player.Username) {
+		return ctx.Player, ctx.Conn, nil
+	}
+	for _, candidate := range ctx.Manager.SnapshotAll() {
+		if strings.EqualFold(candidate.Player.Username, name) {
+			return candidate.Player, candidate.Conn, nil
+		}
+	}
+	return nil, nil, fmt.Errorf("player not found: %s", name)
+}
+
+func cmdFly(ctx CommandContext) error {
+	if len(ctx.Args) != 0 {
+		return fmt.Errorf("usage: /fly")
+	}
+	if ctx.Player.GameMode == player.GameModeCreative ||
+		ctx.Player.GameMode == player.GameModeSpectator {
+		ctx.Player.Flying = !ctx.Player.Flying
+	} else {
+		ctx.Player.AllowFlying = !ctx.Player.AllowFlying
+		ctx.Player.Flying = ctx.Player.AllowFlying
+	}
+	if err := sendPlayerAbilities(ctx.Conn, ctx.Player); err != nil {
+		return fmt.Errorf("sending flight abilities: %w", err)
+	}
+	state := "disabled"
+	if ctx.Player.Flying {
+		state = "enabled"
+	}
+	_ = sendSystemMessage(ctx.Conn, "Flight "+state)
+	return nil
+}
+
+func cmdWalkSpeed(ctx CommandContext) error {
+	speed, err := parseSpeedArgument(ctx.Args, 0.1, "/walkspeed")
+	if err != nil {
+		return err
+	}
+	ctx.Player.WalkSpeed = speed
+	if err := sendPlayerAbilities(ctx.Conn, ctx.Player); err != nil {
+		return fmt.Errorf("sending walking speed: %w", err)
+	}
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("Walking speed set to %.3g", speed))
+	return nil
+}
+
+func cmdFlySpeed(ctx CommandContext) error {
+	speed, err := parseSpeedArgument(ctx.Args, 0.05, "/flyspeed")
+	if err != nil {
+		return err
+	}
+	ctx.Player.FlySpeed = speed
+	if err := sendPlayerAbilities(ctx.Conn, ctx.Player); err != nil {
+		return fmt.Errorf("sending flying speed: %w", err)
+	}
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("Flying speed set to %.3g", speed))
+	return nil
+}
+
+func parseSpeedArgument(args []string, defaultValue float32, command string) (float32, error) {
+	if len(args) != 1 {
+		return 0, fmt.Errorf("usage: %s <value|reset>", command)
+	}
+	if strings.EqualFold(args[0], "reset") {
+		return defaultValue, nil
+	}
+	value, err := strconv.ParseFloat(args[0], 32)
+	if err != nil || value < 0.001 || value > 1 {
+		return 0, fmt.Errorf("speed must be between 0.001 and 1, or reset")
+	}
+	return float32(value), nil
+}
+
+func cmdPotionEffect(ctx CommandContext) error {
+	if len(ctx.Args) != 3 {
+		return fmt.Errorf("usage: /potioneffect <player> <potion_type> <seconds>")
+	}
+	target, _, err := findOnlinePlayer(ctx, ctx.Args[0])
+	if err != nil {
+		return err
+	}
+	effectName := normalizeResourceLocation(ctx.Args[1])
+	effectID := javaworld.MobEffectID(effectName)
+	if effectID < 0 {
+		return fmt.Errorf("unknown potion effect %q; use tab completion", ctx.Args[1])
+	}
+	seconds, err := strconv.Atoi(ctx.Args[2])
+	if err != nil || seconds < 1 || seconds > 1_000_000 {
+		return fmt.Errorf("effect time must be between 1 and 1000000 seconds")
+	}
+	pkt := protocol.NewBuilder(packetIDUpdateMobEffect).
+		VarInt(target.EntityID).
+		VarInt(effectID).
+		VarInt(0). // amplifier: level I
+		VarInt(int32(seconds * 20)).
+		Byte(0x06). // show particles and icon
+		Build()
+	for _, viewer := range ctx.Manager.SnapshotAll() {
+		_ = viewer.Conn.WritePacket(pkt)
+	}
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(
+		"Applied %s to %s for %d seconds", effectName, target.Username, seconds))
+	return nil
+}
+
+// -- /kick -----------------------------------------------------------------
 func cmdKick(ctx CommandContext) error {
 	if len(ctx.Args) < 1 {
 		return fmt.Errorf("usage: /kick <player> [reason]")

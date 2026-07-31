@@ -6,10 +6,17 @@ max_players: 20
 version_name: 1.21.4
 protocol_version: 769
 online_mode: false
-world_dir: ""
+villagers: true
+combat:
+    attack_cooldown: false
+    knockback_horizontal: 0.4
+    knockback_vertical: 0.4
+world_storage: disk
+world_dir: world
 world_seed: 0
 view_distance: 8
 pregenerate_radius: 12
+max_cached_chunks: 768
 bedrock:
     enabled: false
     address: 0.0.0.0:19132

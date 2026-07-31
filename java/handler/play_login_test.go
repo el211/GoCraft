@@ -1,9 +1,11 @@
 package handler
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -330,5 +332,38 @@ func TestObfuscateSeedMatchesMinecraftBiomeManager(t *testing.T) {
 		if got := obfuscateSeed(tc.seed); got != tc.want {
 			t.Errorf("obfuscateSeed(%d) = %d, want %d", tc.seed, got, tc.want)
 		}
+	}
+}
+
+func TestBuildPlayerAbilitiesUsesCommandState(t *testing.T) {
+	p := &player.Player{
+		GameMode:    player.GameModeSurvival,
+		AllowFlying: true,
+		Flying:      true,
+		FlySpeed:    0.2,
+		WalkSpeed:   0.35,
+	}
+	packet := buildPlayerAbilities(p)
+	reader := bytes.NewReader(packet.Data)
+	flags, err := protocol.ReadByte(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags != 0x06 {
+		t.Fatalf("ability flags = 0x%02x, want flying+allow_flying", flags)
+	}
+	flySpeed, err := protocol.ReadFloat(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walkSpeed, err := protocol.ReadFloat(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(float64(flySpeed-0.2)) > 1e-6 || math.Abs(float64(walkSpeed-0.35)) > 1e-6 {
+		t.Fatalf("speeds fly=%f walk=%f", flySpeed, walkSpeed)
+	}
+	if reader.Len() != 0 {
+		t.Fatalf("abilities packet has %d trailing bytes", reader.Len())
 	}
 }

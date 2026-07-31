@@ -2,6 +2,8 @@ package world
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 
 	coreworld "GoCraft/core/world"
 	"GoCraft/internal/protocoldata"
@@ -24,6 +26,26 @@ type Sender struct {
 // DefaultSender encodes canonical chunks for Java Edition.
 var DefaultSender = &Sender{SurfaceY: 63}
 
+var skyLightPagePool = sync.Pool{New: func() any { return new([2048]byte) }}
+
+func acquireSkyLightPage() []byte {
+	page := skyLightPagePool.Get().(*[2048]byte)
+	clear(page[:])
+	return page[:]
+}
+
+func releaseSkyLightPage(page []byte) {
+	if len(page) == 2048 && cap(page) == 2048 {
+		skyLightPagePool.Put((*[2048]byte)(page))
+	}
+}
+
+func releaseSkyLightPages(pages [][]byte) {
+	for _, page := range pages {
+		releaseSkyLightPage(page)
+	}
+}
+
 // SendChunk encodes c and sends it to conn as a Level Chunk With Light packet.
 //
 // Packet layout (1.21.4):
@@ -43,8 +65,11 @@ var DefaultSender = &Sender{SurfaceY: 63}
 //	VarInt     Block Light array count (0)
 func (s *Sender) SendChunk(conn *network.ClientConn, c *coreworld.Chunk) error {
 	heightmapNBT := EncodeChunkHeightmaps(c)
-	chunkData := EncodeChunk(c)
+	chunkBuffer := acquireChunkBuffer()
+	defer releaseChunkBuffer(chunkBuffer)
+	encodeChunkTo(chunkBuffer, c)
 	skyMask, emptySkyMask, skyArrays := buildSkyLight(c)
+	defer releaseSkyLightPages(skyArrays)
 
 	type encodedBlockEntity struct {
 		entity coreworld.BlockEntity
@@ -62,7 +87,7 @@ func (s *Sender) SendChunk(conn *network.ClientConn, c *coreworld.Chunk) error {
 		Int(c.X).
 		Int(c.Z).
 		Bytes(heightmapNBT).
-		ByteArray(chunkData).
+		ByteArray(chunkBuffer.Bytes()).
 		VarInt(int32(len(blockEntities)))
 	for _, encoded := range blockEntities {
 		entity := encoded.entity
@@ -84,50 +109,150 @@ func (s *Sender) SendChunk(conn *network.ClientConn, c *coreworld.Chunk) error {
 // buildSkyLight returns protocol masks and 2048-byte nibble arrays for the 24
 // world sections plus the two boundary light sections. Terrain and caves below
 // the highest opaque block receive zero sky light; open sky receives level 15.
-func buildSkyLight(c *coreworld.Chunk) (skyMask, emptyMask int64, arrays [][]byte) {
-	var opaqueTop [coreworld.SectionSize * coreworld.SectionSize]int
-	for z := 0; z < coreworld.SectionSize; z++ {
-		for x := 0; x < coreworld.SectionSize; x++ {
-			top := coreworld.WorldMinY - 1
-			for sectionIndex := coreworld.SectionCount - 1; sectionIndex >= 0 && top < coreworld.WorldMinY; sectionIndex-- {
-				section := c.Sections[sectionIndex]
-				if section == nil || section.NonAir == 0 {
+const chunkSkyLightCells = coreworld.SectionCount * coreworld.SectionSize * coreworld.SectionSize * coreworld.SectionSize
+
+var (
+	skyLightLevelPool = sync.Pool{New: func() any { return new([chunkSkyLightCells]byte) }}
+	skyLightQueuePool = sync.Pool{New: func() any {
+		queue := make([]int, 0, chunkSkyLightCells/8)
+		return &queue
+	}}
+)
+
+func acquireSkyLightLevels() []byte {
+	levels := skyLightLevelPool.Get().(*[chunkSkyLightCells]byte)
+	clear(levels[:])
+	return levels[:]
+}
+
+func releaseSkyLightLevels(levels []byte) {
+	if len(levels) == chunkSkyLightCells && cap(levels) == chunkSkyLightCells {
+		skyLightLevelPool.Put((*[chunkSkyLightCells]byte)(levels))
+	}
+}
+
+func chunkBlockAt(c *coreworld.Chunk, x, worldY, z int) coreworld.Block {
+	sectionIndex := (worldY - coreworld.WorldMinY) / coreworld.SectionSize
+	if sectionIndex < 0 || sectionIndex >= coreworld.SectionCount {
+		return coreworld.Air
+	}
+	return c.Sections[sectionIndex].At(x, (worldY-coreworld.WorldMinY)&15, z)
+}
+
+func skyCellIndex(x, worldY, z int) int {
+	return (worldY-coreworld.WorldMinY)*256 + z*16 + x
+}
+
+// computeSkyLightLevels first fills directly sky-exposed transparent cells with
+// level 15, then performs a bounded flood through transparent cells. This
+// models the lateral daylight that vanilla uses beneath roof overhangs and
+// prevents doors, crops, and interiors from rendering pitch black.
+func computeSkyLightLevels(c *coreworld.Chunk) []byte {
+	levels := acquireSkyLightLevels()
+
+	for z := 0; z < 16; z++ {
+		for x := 0; x < 16; x++ {
+			skyOpen := true
+			for worldY := coreworld.WorldMaxY; worldY >= coreworld.WorldMinY; worldY-- {
+				if !isSkyTransparent(chunkBlockAt(c, x, worldY, z).ResourceLocation()) {
+					skyOpen = false
 					continue
 				}
-				for y := coreworld.SectionSize - 1; y >= 0; y-- {
-					material := section.At(x, y, z)
-					if !isSkyTransparent(material.ResourceLocation()) {
-						top = coreworld.SectionMinY(sectionIndex) + y
+				if skyOpen {
+					levels[skyCellIndex(x, worldY, z)] = 15
+				}
+			}
+		}
+	}
+
+	queuePtr := skyLightQueuePool.Get().(*[]int)
+	queue := (*queuePtr)[:0]
+	defer func() {
+		clear(queue)
+		*queuePtr = queue[:0]
+		skyLightQueuePool.Put(queuePtr)
+	}()
+
+	// Seed only the dark cells bordering direct daylight. Enqueuing every
+	// directly lit sky cell would create unnecessary work in empty sections.
+	for worldY := coreworld.WorldMinY; worldY <= coreworld.WorldMaxY; worldY++ {
+		for z := 0; z < 16; z++ {
+			for x := 0; x < 16; x++ {
+				index := skyCellIndex(x, worldY, z)
+				if levels[index] != 0 || !isSkyTransparent(chunkBlockAt(c, x, worldY, z).ResourceLocation()) {
+					continue
+				}
+				directNeighbor := false
+				for _, delta := range [][3]int{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}} {
+					nx, ny, nz := x+delta[0], worldY+delta[1], z+delta[2]
+					if nx < 0 || nx >= 16 || nz < 0 || nz >= 16 || ny < coreworld.WorldMinY || ny > coreworld.WorldMaxY {
+						continue
+					}
+					if levels[skyCellIndex(nx, ny, nz)] == 15 {
+						directNeighbor = true
 						break
 					}
 				}
+				if directNeighbor {
+					levels[index] = 14
+					queue = append(queue, index)
+				}
 			}
-			opaqueTop[z*coreworld.SectionSize+x] = top
 		}
 	}
+
+	for head := 0; head < len(queue); head++ {
+		index := queue[head]
+		level := levels[index]
+		if level <= 1 {
+			continue
+		}
+		yOffset := index / 256
+		rem := index % 256
+		z := rem / 16
+		x := rem % 16
+		worldY := coreworld.WorldMinY + yOffset
+		nextLevel := level - 1
+		for _, delta := range [][3]int{{-1, 0, 0}, {1, 0, 0}, {0, -1, 0}, {0, 1, 0}, {0, 0, -1}, {0, 0, 1}} {
+			nx, ny, nz := x+delta[0], worldY+delta[1], z+delta[2]
+			if nx < 0 || nx >= 16 || nz < 0 || nz >= 16 || ny < coreworld.WorldMinY || ny > coreworld.WorldMaxY {
+				continue
+			}
+			neighbor := skyCellIndex(nx, ny, nz)
+			if levels[neighbor] >= nextLevel ||
+				!isSkyTransparent(chunkBlockAt(c, nx, ny, nz).ResourceLocation()) {
+				continue
+			}
+			levels[neighbor] = nextLevel
+			queue = append(queue, neighbor)
+		}
+	}
+	return levels
+}
+
+// buildSkyLight returns protocol masks and 2048-byte nibble arrays for the 24
+// world sections plus the two boundary light sections.
+func buildSkyLight(c *coreworld.Chunk) (skyMask, emptyMask int64, arrays [][]byte) {
+	levels := computeSkyLightLevels(c)
+	defer releaseSkyLightLevels(levels)
 
 	// Bottom boundary section has no sky light.
 	emptyMask |= 1
 	for sectionIndex := 0; sectionIndex < coreworld.SectionCount; sectionIndex++ {
-		light := make([]byte, 2048)
+		light := acquireSkyLightPage()
 		nonZero := false
-		for y := 0; y < 16; y++ {
-			worldY := coreworld.SectionMinY(sectionIndex) + y
-			for z := 0; z < 16; z++ {
-				for x := 0; x < 16; x++ {
-					if worldY <= opaqueTop[z*16+x] {
-						continue
-					}
-					index := y*256 + z*16 + x
-					byteIndex := index >> 1
-					if index&1 == 0 {
-						light[byteIndex] |= 0x0f
-					} else {
-						light[byteIndex] |= 0xf0
-					}
-					nonZero = true
-				}
+		for localIndex := 0; localIndex < 4096; localIndex++ {
+			level := levels[sectionIndex*4096+localIndex]
+			if level == 0 {
+				continue
 			}
+			byteIndex := localIndex >> 1
+			if localIndex&1 == 0 {
+				light[byteIndex] |= level
+			} else {
+				light[byteIndex] |= level << 4
+			}
+			nonZero = true
 		}
 		bit := int64(1) << (sectionIndex + 1)
 		if nonZero {
@@ -135,11 +260,12 @@ func buildSkyLight(c *coreworld.Chunk) (skyMask, emptyMask int64, arrays [][]byt
 			arrays = append(arrays, light)
 		} else {
 			emptyMask |= bit
+			releaseSkyLightPage(light)
 		}
 	}
 
 	// Top boundary section is full daylight.
-	full := make([]byte, 2048)
+	full := acquireSkyLightPage()
 	for i := range full {
 		full[i] = 0xff
 	}
@@ -147,7 +273,6 @@ func buildSkyLight(c *coreworld.Chunk) (skyMask, emptyMask int64, arrays [][]byt
 	arrays = append(arrays, full)
 	return skyMask, emptyMask, arrays
 }
-
 func isSkyTransparent(resourceLocation string) bool {
 	switch resourceLocation {
 	case "", "minecraft:air", "minecraft:cave_air", "minecraft:void_air",
@@ -180,9 +305,27 @@ func isSkyTransparent(resourceLocation string) bool {
 		"minecraft:ladder", "minecraft:rail",
 		"minecraft:powered_rail", "minecraft:detector_rail", "minecraft:activator_rail":
 		return true
-	default:
-		return false
 	}
+	// These families do not fill their block cube, so daylight can propagate
+	// through them. Treating them as opaque makes doors, crops and roof stairs
+	// render almost black even in direct daylight.
+	for _, suffix := range []string{
+		"_bed", "_button", "_carpet", "_door", "_fence", "_fence_gate",
+		"_pane", "_pressure_plate", "_sapling", "_sign", "_slab", "_stairs",
+		"_trapdoor", "_wall", "_wall_sign",
+	} {
+		if strings.HasSuffix(resourceLocation, suffix) {
+			return true
+		}
+	}
+	switch resourceLocation {
+	case "minecraft:wheat", "minecraft:carrots", "minecraft:potatoes",
+		"minecraft:beetroots", "minecraft:nether_wart", "minecraft:cocoa",
+		"minecraft:sweet_berry_bush", "minecraft:torchflower_crop",
+		"minecraft:pitcher_crop":
+		return true
+	}
+	return false
 }
 
 // SendChunksAround sends all chunks in a square of radius r centred on chunk

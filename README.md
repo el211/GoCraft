@@ -24,7 +24,7 @@ A vanilla Minecraft: Java Edition 1.21.4 client can connect, authenticate, compl
 | Minecraft: Java Edition 1.21.4 | Active development target |
 | Java protocol 769 | Implemented |
 | Other Java Edition versions | Not supported |
-| Minecraft: Bedrock Edition | Planned; no adapter exists yet |
+| Minecraft: Bedrock Edition 1.26.30 / protocol 1001 | Early adapter scaffold: RakNet/login and a flat test world only; not supported for normal gameplay or cross-play |
 
 Changing `version_name` or `protocol_version` in `server.yml` changes the advertised status metadata only; it does not add protocol compatibility.
 
@@ -50,15 +50,15 @@ Changing `version_name` or `protocol_version` in `server.yml` changes the advert
   - Edition-agnostic `Block` type with `Namespace`, `Name`, and `Properties` — no Java or Bedrock IDs in the core
   - Palette-based `Section` and `Chunk` types; 24 sections per column (Y=−64 to 319)
   - Deterministic seeded terrain with oceans, mountains, cliffs, climate biomes, caves, ores, and vegetation
-  - Concurrent World cache with on-demand generation and configurable background pregeneration
-  - `Storage` interface with Anvil region-file implementation: NBT read/write, zlib compression, atomic `.tmp`-then-rename saves, dirty-chunk tracking, lazy load on first access
+  - Concurrent in-memory chunk cache with on-demand generation, configurable background pregeneration, and bounded reusable chunk/light encoding buffers
+  - `Storage` interface with explicit `disk` or `memory` mode; disk mode uses Anvil region files, NBT, zlib compression, atomic saves, dirty-chunk tracking, lazy loading, and periodic autosaves
   - Architecture test that fails at compile time if any `core/` package imports `java/`
 - **Java chunk encoding** (`java/world`):
   - Data-driven Java 1.21.4 global block state ID registry
   - `Block → Java state ID` lookup at the adapter boundary — the core never touches Java IDs
   - Network-NBT heightmap encoding (root compound without name, 1.20.2+ format)
   - `PalettedContainer` encoder: indirect palette, ≥4 bits/entry, no-overflow packing
-  - Level Chunk With Light packets with height-aware sky-light masks and block entities
+  - Level Chunk With Light packets with height-aware masks, pooled lateral skylight propagation beneath roofs, and block entities
   - Center-first chunk batches, configurable view distance, unload hysteresis, and background pregeneration
 - **Multiplayer** (`java/handler`):
   - Player spawn and despawn packets broadcast to all other sessions
@@ -66,39 +66,47 @@ Changing `version_name` or `protocol_version` in `server.yml` changes the advert
   - Lock-free broadcast via session snapshot (no lock held during socket writes)
 - **Chat** (`java/handler`):
   - Player chat messages broadcast to all connected players
-  - `/`-prefixed input treated as commands (no-op until M12)
+  - `/`-prefixed input dispatched through the built-in command system
   - 256-character message length limit with client notification
-- **Block interaction** (`java/handler`):
-  - Creative instant-break on START\_DIGGING; survival break on FINISH\_DIGGING
-  - Block placement from the held item; occupied-block guard prevents overwriting solid blocks
-  - Y-bounds validation before any world mutation
-  - Block Update broadcast to all sessions; Acknowledge Block Change sequence echo
-  - Container menus and processing (crafting tables, furnaces, chests) are not implemented yet; loaded block-entity NBT is preserved
+- **Block interaction and containers** (`java/handler`):
+  - Creative instant-break on START_DIGGING; survival completes solid-block breaks on FINISH_DIGGING, while zero-hardness plants break immediately (server-authoritative hardness/tool timing is still incomplete)
+  - Held-item block placement replaces grass, flowers, and other replaceable plants, refuses to overwrite solid blocks, consumes the stack in survival, and validates world Y bounds
+  - Hoes till supported dirt variants; wheat, carrot, potato, beetroot, and nether-wart crops can be planted and grow without a light requirement
+  - Block Update broadcast, Acknowledge Block Change sequence echo, material-aware break sounds, and experience-ore pickup feedback (experience-orb entities are not implemented yet)
+  - The complete Java 1.21.4 recipe source set is embedded: 1,370 definitions, including 1,358 fixed recipe displays across crafting, furnaces, smokers, campfires, stonecutters, and smithing; 12 dynamic special recipes remain non-executable
+  - Crafting tables support recipe-book automatic placement plus basic grid, result, cursor, and shift-click movement; advanced click modes and ingredient remainders are still incomplete
+  - Single chests provide 27 usable slots with server-authoritative clicks and Anvil block-entity persistence in disk mode; double chests are not implemented
+  - Furnace, blast-furnace, smoker, and other station menus and recipes are advertised, but timed processing and most non-crafting station inventory logic are not implemented yet
 - **Inventory and items** (`core/player`, `java/world`, `java/handler`):
   - `ItemStack{ItemID, Count}` in `core/player` — no Java IDs in the core
   - 46-slot player inventory with hotbar slot tracking; `HeldItem()` accessor
   - Creative Mode Set Item handling: maps numeric item registry IDs to canonical resource locations
   - Set Held Item tracking for hotbar scroll; initial inventory sent on join
 - **Data-driven registries** (`internal/gamedata`, `java/world`):
-  - Block state IDs, item protocol IDs, and entity-type protocol IDs loaded from JSON at init time
-  - `internal/gamedata` package embeds `java/1.21.4/blocks.json` and `java/1.21.4/registries.json` via `//go:embed`; files ship inside the binary — no external data directory required at runtime
-  - JSON format matches Minecraft's data-generator output (`--reports`); replace the embedded files and rebuild to update version or expand coverage
+  - Block-state, item, entity-type, biome, sound-event, and mob-effect protocol IDs loaded from JSON at init time
+  - `internal/gamedata` package embeds `java/1.21.4/blocks.json`, `java/1.21.4/registries.json`, and `java/1.21.4/recipes.json` via `//go:embed`; files ship inside the binary — no external data directory required at runtime
+  - Registry JSON follows Minecraft data-generator output; the embedded recipe catalog is generated from the official Java 1.21.4 server data pack and rebuilt with the binary
   - Property-keyed block state lookup (`"minecraft:grass_block[snowy=true]"` → ID) extracted from states arrays; key sort matches `core/world.Block.Key()` so no Java IDs leak into the core
   - Block, item, and entity-type hardcoded Go maps removed; maps populated by `registry.go` init function with structured logging of entry counts
 - Protocol-independent player, spatial, and online-player registry types
-- YAML configuration with defaults and validation (`world_dir` for Anvil persistence and `world_seed` for deterministic terrain)
+- YAML configuration with defaults and validation (`world_storage: disk|memory`, `world_dir`, and deterministic `world_seed`)
 - Structured logging through Go's `log/slog`
-- Automated tests for authentication, cryptography, packet framing, VarInt encoding, and architecture isolation
+- Automated tests for authentication, cryptography, packet framing, recipes, crafting and chest containers, Anvil persistence, world generation, entity behavior, commands, configuration, and architecture isolation
 
 - **Entity system** (`core/entity`, `java/handler`, `server/`):
   - Canonical `Entity` struct with position, velocity, health, dead flag, and concurrency ownership comment
   - `entity.Manager`: thread-safe Add / Remove / Get / Snapshot
   - ~40 `EntityType` string constants (resource location format)
-  - 20 TPS tick loop in `server.Server`: gravity (−0.08 blocks/tick²), horizontal drag (0.98), flat-world ground clamp at Y=64, dead-entity cleanup, tick-drift warning (>50 ms)
+  - 20 TPS tick loop with gravity, horizontal drag, interior-aware ground detection, queued entity damage, dead-entity cleanup, and tick-drift warnings
   - Non-blocking broadcast: packets built synchronously inside the tick goroutine (sole writer), dispatched to a goroutine for I/O so slow clients cannot stall the simulation
   - Java entity encoding: Spawn Entity packet, Teleport Entity packet, Remove Entities packet
-  - Five passive test mobs spawned near world spawn; sent to joining players via `onPlayerJoin`
+  - Five passive mobs spawn near the configured world spawn; a capped experimental surface-animal spawn loop runs near online players; left-click attacks queue damage for the simulation tick, broadcast hurt sounds, animation, configurable knockback, and despawn packets, and make surviving passive mobs jump and flee from the attacker. Attack cooldown can be disabled for a legacy-style feel; player-versus-player combat is not implemented
   - `game.Game.NextEntityID()` shared atomic counter ensures player and mob IDs never collide
+- **Experimental villages and villagers**:
+  - Newly generated houses include biome-specific roofs and doors, one bed per house, and profession workstations; farms use hydrated crops and composters
+  - Generated villages receive multiple villagers plus an iron-golem guard; residents are assigned to a house, bed, workstation, and village center and roam within the village
+  - Villagers return to their beds at night and expose profession-specific merchant offers on right-click
+  - Trading inventory execution and vanilla-complete villager POI/pathfinding are not implemented yet; saved chunks created by older builds are not overwritten
 - **Command system** (`java/handler`):
   - `Dispatcher` with `Register` / `Dispatch`; unknown commands and handler errors reported to the issuing player as chat messages
   - `CommandContext` with `Player`, `Conn`, `Args`, `World`, `Manager`, and `TeleportTo` closure
@@ -107,12 +115,19 @@ Changing `version_name` or `protocol_version` in `server.yml` changes the advert
   - `/gamemode <mode>` — updates canonical `Player.GameMode`, sends Game Event reason 3 + Player Abilities + tab-list update broadcast
   - `/tp <x> <y> <z>` — teleports player, sends Synchronize Player Position, immediately streams destination chunks and unloads origin chunks via `TeleportTo` closure
   - `/tp <player>` — player-name teleport with the same immediate chunk-streaming behaviour
-  - `/give <item> [count]` — fills first empty hotbar/inventory slot, syncs full inventory
+  - `/xyz` — reports precise position, block coordinates, and chunk coordinates
+  - `/locate <village|biome>` — locates the nearest generated village or a supported generated biome and prints a ready-to-use `/tp` command; every target is tab-completable
+  - `/summon <mob> [villager_profession]` — spawns a known 1.21.4 mob beside the player; villager professions are tab-completable, while mob AI remains experimental
+  - `/version` and `/ver` — report `GoCraft 1.21.4`
+  - `/give <player> <item|block> [count]` and `/get <item|block> [count]` — validate against the 1.21.4 item registry, add to the target/self inventory, and synchronize it
+  - `/fly` — toggles authorized flight and the current flying state
+  - `/potioneffect <player> <effect> <seconds>` — applies a registry-backed level-I effect with particles and HUD icon
+  - `/walkspeed <value|reset>` and `/flyspeed <value|reset>` — update Player Abilities speed values (`/walkspeen` and `/flyyspeed` are accepted aliases)
   - `/kick <player> [reason]` — sends Disconnect (Play) with NBT-encoded reason, closes connection
 
 ### Not implemented
 
-Permissions, survival gameplay mechanics, and complete entity AI are not implemented. Paper plugin compatibility, Bedrock clients, and cross-play are not supported.
+Complete survival simulation, vanilla-complete block hardness and tool validation, player-versus-player combat, advanced inventory click modes, timed furnace/smoker/blast-furnace processing, double chests, dynamic special recipe execution, complete entity AI/pathfinding, permissions, and trading transactions are not implemented. Paper plugin compatibility, production Bedrock gameplay, and cross-play are not supported.
 
 ## Architecture
 
@@ -134,8 +149,8 @@ Java Edition client ───▶ │ Java protocol adapter    │
                          └──────────────┬───────────┘
                                         │ canonical Block / Chunk
                          ┌──────────────▼───────────┐
-Bedrock client ─ ─ ─ ─ ▶ │ Future Bedrock adapter  │
-                         │ bedrock/world (planned)  │
+Bedrock client ─ ─ ─ ─ ▶ │ Experimental Bedrock      │
+                         │ bedrock/world (flat test)│
                          └──────────────────────────┘
 ```
 
@@ -180,7 +195,7 @@ type Provider interface {
 
 - **GoCraft core (`core/`)** owns the edition-neutral game state: blocks, chunks, world, entities, players, inventories, and spatial types. It never imports `java/` or `bedrock/`.
 - **Java adapter (`java/`)** reads from `core/` and produces native Java Edition packets: TCP framing, login auth, encryption, chunk encoding, and play-state management. It does not know Bedrock exists.
-- **Bedrock adapter (`bedrock/`)** will read from the same `core/` and produce native Bedrock Edition packets independently: RakNet/UDP, Xbox auth, Sub Chunk format, Bedrock runtime IDs. It does not consume Java packets and is not a proxy.
+- **Bedrock adapter (`bedrock/`)** is an early scaffold using RakNet/UDP and Xbox authentication. It currently serves minimal flat test chunks and posts limited intents to the core; canonical-world encoding, normal gameplay, and cross-play remain future work.
 - **Server layer (`server/`)** wires configuration, the core, and the active adapters into the executable.
 
 ## Development status
@@ -198,17 +213,18 @@ type Provider interface {
 | 9 — World persistence | Complete | Anvil region-file I/O, NBT read/write, atomic saves, dirty-chunk tracking, `Storage` interface |
 | 10 — Inventory and items | Complete | ItemStack, 46-slot inventory, hotbar tracking, Creative Mode Set Item, placement from held item, occupied-block guard |
 | 11 — Entity system | Complete | Canonical Entity type, entity registry, mob spawn/tick/despawn, health and damage, 20 TPS tick loop |
-| 12 — Commands | Complete | Command dispatcher, Commands packet (tab-completion DAG), /gamemode /tp /give /kick /list /help |
+| 12 — Commands | Complete | Command dispatcher, Commands packet with typed/literal tab completion, navigation/summon, targeted give/get, flight/speeds, potion effects, administration, and version/help commands |
 | 13 — Data-driven registries | Complete | Load block state IDs, item IDs, entity-type IDs, and biome IDs from versioned JSON (`blocks.json`, `items.json`, `registries.json`); embedded via go:embed; hardcoded Go maps replaced; unknown IDs warn once via sync.Map |
 | 13.1 — Data-driven packet IDs | Complete | Semantic packet names (minecraft:login etc.) in versioned JSON; internal/protocoldata MustCB/MustSB panic at startup on missing names; all handler hex constants removed; validation test suite (7 distinct invariants); GitHub Actions CI on ubuntu-latest |
-| 14 — Bedrock adapter | Future work | RakNet/UDP, Xbox auth, bedrock/world encoder using M13 registries for runtime IDs, cross-play via shared core/ |
+| Experimental gameplay extensions | In progress | Full recipe catalog, basic crafting execution, persistent single chests, farming, configurable legacy-style mob combat, village residents and guards |
+| 14 — Bedrock adapter | In progress | RakNet/UDP, Xbox auth, and minimal flat test chunks exist; canonical-world encoding and cross-play remain future work |
 | 15 — Go plugin API | Future work | Event bus, command registration, scheduler, permission nodes; plugins are compiled Go packages |
 
 Detailed records for completed milestones are kept in [`logs/`](logs/).
 
 ## Requirements
 
-- [Go](https://go.dev/) 1.23 or newer, as declared by `go.mod`
+- [Go](https://go.dev/) 1.24 or newer, as declared by `go.mod`
 - Git, when cloning the repository
 - A Minecraft: Java Edition 1.21.4 client for manual connection testing
 - Network access to Mojang's session service when `online_mode: true`
@@ -242,6 +258,7 @@ go build -o gocraft .
 GoCraft reads `server.yml` from its working directory. The repository includes:
 
 ```yaml
+java_enabled: true
 host: 0.0.0.0
 port: 25565
 motd: A GoCraft Server
@@ -249,14 +266,26 @@ max_players: 20
 version_name: 1.21.4
 protocol_version: 769
 online_mode: false
+villagers: true
+combat:
+  attack_cooldown: false
+  knockback_horizontal: 0.4
+  knockback_vertical: 0.4
+world_storage: disk
 world_dir: world
 world_seed: 0
 view_distance: 8
 pregenerate_radius: 12
+max_cached_chunks: 768
+bedrock:
+  enabled: false
+  address: 0.0.0.0:19132
+  online_mode: true
 ```
 
 | Setting | Meaning |
 | --- | --- |
+| `java_enabled` | Enables the Java Edition TCP listener |
 | `host` | Address on which the Java TCP listener binds |
 | `port` | Java Edition server port |
 | `motd` | Text shown in the multiplayer server list |
@@ -264,12 +293,21 @@ pregenerate_radius: 12
 | `version_name` | Advertised version name; currently `1.21.4` |
 | `protocol_version` | Advertised protocol number; currently `769` |
 | `online_mode` | Enables Mojang session authentication and encrypted login |
-| `world_dir` | Anvil world folder used to load and persist modified chunks |
+| `villagers` | Spawns generated village residents and iron-golem guards when true |
+| `combat.attack_cooldown` | Enables modern timed attacks; false exposes legacy-style rapid attacks |
+| `combat.knockback_horizontal` | Horizontal mob knockback strength (`0`-`4`) |
+| `combat.knockback_vertical` | Vertical mob knockback strength (`0`-`4`) |
+| `world_storage` | `disk` for persistent Anvil storage (default), or `memory` for an ephemeral world |
+| `world_dir` | Anvil world folder used when `world_storage: disk` |
 | `world_seed` | Signed 64-bit seed for deterministic overworld terrain |
 | `view_distance` | Java chunk radius sent to each client (`2`-`32`) |
 | `pregenerate_radius` | Larger background cache radius (`view_distance`-`64`) |
+| `max_cached_chunks` | Maximum clean chunks retained in RAM (`128`-`65536`); default `768` |
+| `bedrock.*` | Enables/configures the early Bedrock listener; it currently provides only experimental flat-world connectivity, not supported gameplay or cross-play |
 
-Changing `world_seed` affects newly generated chunks only. Use a new `world_dir` when changing seeds to avoid terrain seams. The built-in generator creates continents, climate biomes, oceans, beaches, mountains, caves, ores, and biome vegetation. It is an original generator and is not block-for-block seed-compatible with Mojang's noise router. For exact Java terrain, point `world_dir` at a world generated by vanilla/Paper 1.21.4; GoCraft reads its `level.dat`, full biome palettes, block states, and Anvil chunks.
+Disk mode creates `world_dir/region` at startup, keeps a bounded hot-chunk cache in RAM, commits generated and modified chunks to Anvil region files every 30 seconds, and flushes again on clean shutdown. Memory mode performs no disk reads or writes, so its world changes are lost on restart. Go may retain freed heap pages for reuse, so panel-reported RAM does not always fall immediately even when cached chunks are evicted.
+
+Changing `world_seed` and village-generation improvements affect newly generated chunks only. Use a new `world_dir` when changing seeds to avoid terrain seams. The built-in generator creates continents, climate biomes, oceans, beaches, mountains, caves, ores, and biome vegetation. It is an original generator and is not block-for-block seed-compatible with Mojang's noise router. For exact Java terrain, point `world_dir` at a world generated by vanilla/Paper 1.21.4; GoCraft reads its `level.dat`, full biome palettes, block states, and Anvil chunks.
 
 If `server.yml` is absent, GoCraft creates it with defaults. Offline mode does not verify player identities; use it only in a trusted development environment.
 
@@ -294,7 +332,8 @@ Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd>. The default listener is `0.0.
 ```text
 GoCraft/
 ├── bedrock/
-│   └── doc.go                 # Future Bedrock adapter placeholder
+│   ├── listener.go            # Experimental RakNet/login and limited Bedrock play loop
+│   └── world/                 # Minimal flat test sub-chunk encoder
 ├── config/
 │   └── config.go              # YAML loading, defaults, and validation
 ├── core/
@@ -308,14 +347,14 @@ GoCraft/
 │   ├── spatial/spatial.go     # Position and rotation types
 │   └── world/
 │       ├── block.go           # Block{Namespace, Name, Properties} — no edition IDs
-│       ├── chunk.go           # Section and Chunk with palette-based block storage
+│       ├── chunk.go           # Sections, chunks, block entities, and canonical container items
 │       ├── generator.go       # Generator interface and seeded OverworldGenerator
 │       ├── storage.go         # Storage interface for chunk persistence
 │       ├── world.go           # Concurrent world cache with dirty-chunk tracking
 │       └── arch_test.go       # Fails build if core/ imports java/
 ├── java/
 │   ├── auth/                  # Login crypto, UUIDs, Mojang sessions
-│   ├── handler/               # Handshake, status, login, config, play, block, chat, inventory, entity, commands
+│   ├── handler/               # Login/play handlers, commands, recipes, crafting, chests, blocks, inventory, entities
 │   ├── network/               # TCP listener and client connections
 │   ├── protocol/              # Framing, packets, VarInts, wire types
 │   ├── registry/              # Provider interface + VanillaProvider
@@ -332,7 +371,8 @@ GoCraft/
 │   │   ├── embed.go           # go:embed declaration for embedded JSON data
 │   │   └── java/1.21.4/
 │   │       ├── blocks.json    # Block state IDs (Minecraft data-generator format)
-│   │       └── registries.json# Item, entity-type, and biome protocol IDs
+│   │       ├── registries.json# Item, entity-type, biome, sound, and effect protocol IDs
+│   │       └── recipes.json   # Embedded Java 1.21.4 recipe definitions
 │   └── protocoldata/
 │       ├── protocoldata.go    # MustCB/MustSB packet ID resolver; panics on unknown names
 │       ├── protocoldata_test.go # 7-invariant validation test suite
@@ -354,7 +394,7 @@ A Go-native plugin API is planned, but **no plugin system is implemented today**
 
 ## Bedrock and cross-play plans
 
-Bedrock support is planned for Milestone 14, after the data-driven registry layer (M13) is in place.
+Milestone 14 is in progress. GoCraft has an experimental Bedrock listener and minimal flat test-chunk encoder, but it does not yet encode the canonical GoCraft world or provide usable Java/Bedrock cross-play.
 
 ### What "adapter" means here
 
@@ -376,9 +416,9 @@ GoCraft is **not** a protocol translator like Geyser. The Bedrock adapter does n
          Java client                       Bedrock client
 ```
 
-A Java client and a Bedrock client in the same world are both looking at the same `core/world.World`. Each adapter converts that world into its own protocol independently — they never talk to each other. This is why M13 (data-driven registries) must come first: both adapters need to resolve canonical `Block` values to their own edition-specific IDs, and they should share the same registry infrastructure rather than maintaining separate hardcoded tables.
+The intended end state is for Java and Bedrock clients to observe the same `core/world.World`, with each adapter converting canonical state into its own protocol independently. The current Bedrock flat test world does **not** do that yet. Completing canonical Bedrock block/runtime-ID encoding is required before cross-play can work.
 
-The current `bedrock/` package contains only design documentation. No RakNet listener, Bedrock login, packet encoding, or working cross-play exists yet.
+The current `bedrock/` package can accept RakNet connections, perform Bedrock login, start a session, and serve a minimal flat test world. Canonical terrain, shared entities/inventories, block interaction, and working cross-play do not exist yet.
 
 ## Contributing
 

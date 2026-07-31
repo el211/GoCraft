@@ -58,3 +58,29 @@ func TestConcurrentChunkGenerationIsCoalesced(t *testing.T) {
 		t.Fatalf("generator calls=%d, want 1", got)
 	}
 }
+
+func TestCleanChunkCacheIsBounded(t *testing.T) {
+	world := New(&FlatGenerator{}, nil, false)
+	defer world.Close()
+	world.SetMaxCachedChunks(128)
+	for x := int32(0); x < 256; x++ {
+		world.Chunk(x, 0)
+	}
+	if got := world.LoadedCount(); got > 128 {
+		t.Fatalf("loaded chunks=%d, want at most 128", got)
+	}
+}
+
+func TestEntityCollisionAndGroundCorrection(t *testing.T) {
+	world := New(&FlatGenerator{}, nil, false)
+	defer world.Close()
+	if !world.CanEntityOccupy(0.5, 64, 0.5) {
+		t.Fatal("surface spawn position should be occupiable")
+	}
+	if world.CanEntityOccupy(0.5, 63, 0.5) {
+		t.Fatal("position inside the ground should collide")
+	}
+	if got := world.GroundYAtOrBelow(0, 0, 64); got != 63 {
+		t.Fatalf("ground Y=%d, want 63", got)
+	}
+}

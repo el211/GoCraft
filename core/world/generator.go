@@ -22,6 +22,45 @@ type OverworldGenerator struct {
 func NewOverworldGenerator(seed int64) *OverworldGenerator { return &OverworldGenerator{seed: seed} }
 func (g *OverworldGenerator) Seed() int64                  { return g.seed }
 
+var generatedBiomeNames = []string{
+	"deep_frozen_ocean",
+	"deep_ocean",
+	"frozen_ocean",
+	"mushroom_fields",
+	"ocean",
+	"snowy_beach",
+	"stony_shore",
+	"beach",
+	"frozen_peaks",
+	"stony_peaks",
+	"jagged_peaks",
+	"snowy_slopes",
+	"meadow",
+	"windswept_hills",
+	"cherry_grove",
+	"badlands",
+	"desert",
+	"savanna",
+	"bamboo_jungle",
+	"jungle",
+	"mangrove_swamp",
+	"swamp",
+	"snowy_plains",
+	"taiga",
+	"dark_forest",
+	"flower_forest",
+	"forest",
+	"old_growth_birch_forest",
+	"birch_forest",
+	"plains",
+}
+
+// GeneratedBiomeNames returns every biome name that the GoCraft overworld
+// generator can produce, without the minecraft namespace prefix.
+func GeneratedBiomeNames() []string {
+	return append([]string(nil), generatedBiomeNames...)
+}
+
 func block(name string) Block { return Block{Namespace: "minecraft", Name: name} }
 
 func blockProps(name string, kvPairs ...string) Block {
@@ -80,12 +119,12 @@ var (
 	deepslateEmeraldOreBlock  = block("deepslate_emerald_ore")
 
 	// Ground cover — grass types
-	shortGrassBlock      = block("short_grass")
-	fernBlock            = block("fern")
-	tallGrassLowerBlock  = blockProps("tall_grass", "half", "lower")
-	tallGrassUpperBlock  = blockProps("tall_grass", "half", "upper")
-	largeFernLowerBlock  = blockProps("large_fern", "half", "lower")
-	largeFernUpperBlock  = blockProps("large_fern", "half", "upper")
+	shortGrassBlock     = block("short_grass")
+	fernBlock           = block("fern")
+	tallGrassLowerBlock = blockProps("tall_grass", "half", "lower")
+	tallGrassUpperBlock = blockProps("tall_grass", "half", "upper")
+	largeFernLowerBlock = blockProps("large_fern", "half", "lower")
+	largeFernUpperBlock = blockProps("large_fern", "half", "upper")
 
 	// Single-block flowers
 	dandelionBlock       = block("dandelion")
@@ -112,13 +151,13 @@ var (
 	peonyUpperBlock     = blockProps("peony", "half", "upper")
 
 	// Other vegetation
-	deadBushBlock        = block("dead_bush")
-	sugarCaneBlock       = block("sugar_cane")
-	bambooBlock          = block("bamboo")
-	lilyPadBlock         = block("lily_pad")
-	seagrassBlock        = block("seagrass")
-	brownMushroomBlock   = block("brown_mushroom")
-	redMushroomBlock     = block("red_mushroom")
+	deadBushBlock      = block("dead_bush")
+	sugarCaneBlock     = block("sugar_cane")
+	bambooBlock        = block("bamboo")
+	lilyPadBlock       = block("lily_pad")
+	seagrassBlock      = block("seagrass")
+	brownMushroomBlock = block("brown_mushroom")
+	redMushroomBlock   = block("red_mushroom")
 
 	// Additional tree types
 	darkOakLogBlock  = block("dark_oak_log")
@@ -197,6 +236,51 @@ func (g *OverworldGenerator) SurfaceHeight(x, z int) int { return g.sampleTerrai
 
 // BiomeAt returns the deterministic surface biome at an absolute column.
 func (g *OverworldGenerator) BiomeAt(x, z int) string { return g.sampleTerrain(x, z).biome }
+
+// NearestBiome finds a nearby sample of target within maxDistance blocks.
+// Samples are spaced 32 blocks apart, matching the broad scale of GoCraft's
+// climate regions while keeping an in-game lookup inexpensive.
+func (g *OverworldGenerator) NearestBiome(x, z int, target string, maxDistance int) (int, int, bool) {
+	if maxDistance < 0 {
+		return 0, 0, false
+	}
+	const sampleStep = 32
+	for radius := 0; radius <= maxDistance; radius += sampleStep {
+		bestX, bestZ := 0, 0
+		bestDistanceSquared := int64(math.MaxInt64)
+		found := false
+		consider := func(sampleX, sampleZ int) {
+			if g.BiomeAt(sampleX, sampleZ) != target {
+				return
+			}
+			dx := int64(sampleX - x)
+			dz := int64(sampleZ - z)
+			distanceSquared := dx*dx + dz*dz
+			if distanceSquared < bestDistanceSquared {
+				bestX, bestZ = sampleX, sampleZ
+				bestDistanceSquared = distanceSquared
+				found = true
+			}
+		}
+
+		if radius == 0 {
+			consider(x, z)
+		} else {
+			for offset := -radius; offset <= radius; offset += sampleStep {
+				consider(x+offset, z-radius)
+				consider(x+offset, z+radius)
+				if offset != -radius && offset != radius {
+					consider(x-radius, z+offset)
+					consider(x+radius, z+offset)
+				}
+			}
+		}
+		if found {
+			return bestX, bestZ, true
+		}
+	}
+	return 0, 0, false
+}
 
 func (g *OverworldGenerator) sampleTerrain(x, z int) terrainSample {
 	fx, fz := float64(x), float64(z)

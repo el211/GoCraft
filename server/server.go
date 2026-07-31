@@ -82,17 +82,23 @@ type Server struct {
 	// mobAIs tracks per-entity wander state indexed by entity ID.
 	// Written and read only by the tick goroutine, so no lock is needed.
 	mobAIs map[int32]*mobAI
+
+	// worldAge is advanced only by the entity tick goroutine.
+	worldAge int64
+	spawnRNG *rand.Rand
 }
 
 // mobAI holds the wander state for a passive mob.
 // All fields are written only by the entity tick goroutine.
 type mobAI struct {
-	homeX, homeZ float64    // world-space spawn/home position (homed mobs only)
-	dirX, dirZ   float64    // current normalised walk direction
-	wanderTick   int        // ticks until next direction pick (0 = pick now)
-	pauseTick    int        // remaining ticks of stillness (overrides wanderTick)
-	roaming      bool       // true = no fixed home (animals); false = homed (villagers)
-	rng          *rand.Rand // per-entity PRNG seeded from entity ID
+	homeX, homeZ  float64    // world-space spawn/home position (homed mobs only)
+	dirX, dirZ    float64    // current normalised walk direction
+	wanderTick    int        // ticks until next direction pick (0 = pick now)
+	pauseTick     int        // remaining ticks of stillness (overrides wanderTick)
+	panicTick     int        // remaining ticks fleeing from a recent attacker
+	knockbackTick int        // ticks retaining the configured initial hit velocity
+	roaming       bool       // true = no fixed home (animals); false = homed (villagers)
+	rng           *rand.Rand // per-entity PRNG seeded from entity ID
 }
 
 // New creates a Server with the given configuration.
@@ -112,7 +118,7 @@ func New(cfg *config.Config) (*Server, error) {
 	// for the seed and spawn so generated fallback chunks do not form seams.
 	var storage coreworld.Storage
 	spawnX, spawnZ := 0, 0
-	if cfg.WorldDir != "" {
+	if cfg.WorldStorage == config.WorldStorageDisk {
 		if metadata, metadataErr := anvil.LoadLevelMetadata(cfg.WorldDir); metadataErr == nil {
 			cfg.WorldSeed = metadata.Seed
 			spawnX, spawnZ = int(metadata.SpawnX), int(metadata.SpawnZ)
@@ -130,25 +136,30 @@ func New(cfg *config.Config) (*Server, error) {
 		}
 		st, err := anvil.NewStorage(cfg.WorldDir)
 		if err != nil {
-			slog.Warn("server: could not open Anvil storage; running without persistence",
-				"worldDir", cfg.WorldDir, "err", err)
-		} else {
-			storage = st
-			slog.Info("server: opened Anvil world", "worldDir", cfg.WorldDir)
+			return nil, fmt.Errorf("server: opening Anvil storage %s: %w", cfg.WorldDir, err)
 		}
+		storage = st
+		slog.Info("server: opened Anvil world", "worldDir", cfg.WorldDir, "storage", "disk")
+	} else {
+		slog.Info("server: using memory-only world storage", "storage", "memory")
 	}
 
+	gameCore := game.New()
 	cmds := handler.NewDispatcher()
+	cmds.SetEntityIDAllocator(gameCore.NextEntityID)
 	handler.RegisterBuiltins(cmds)
 
 	bus := intent.NewBus(64, 512)
 
+	worldInstance := coreworld.New(coreworld.NewOverworldGenerator(cfg.WorldSeed), storage, cfg.Villagers)
+	worldInstance.SetMaxCachedChunks(cfg.MaxCachedChunks)
+
 	s := &Server{
 		cfg:         cfg,
-		game:        game.New(),
+		game:        gameCore,
 		privKey:     privKey,
 		pubKeyDER:   pubKeyDER,
-		world:       coreworld.New(coreworld.NewOverworldGenerator(cfg.WorldSeed), storage, cfg.Villagers),
+		world:       worldInstance,
 		spawnX:      spawnX,
 		spawnZ:      spawnZ,
 		regProvider: &registry.VanillaProvider{},
@@ -156,7 +167,8 @@ func New(cfg *config.Config) (*Server, error) {
 		sessions:    session.NewManager(),
 		cmds:        cmds,
 		intentBus:   bus,
-		mobAIs: make(map[int32]*mobAI),
+		mobAIs:      make(map[int32]*mobAI),
+		spawnRNG:    rand.New(rand.NewSource(cfg.WorldSeed ^ 0x4d6f624372616674)),
 	}
 	// Warm spawn immediately; login-time streaming will reuse this cache.
 	s.world.QueuePregeneration(int32(math.Floor(float64(spawnX)/16)), int32(math.Floor(float64(spawnZ)/16)), int32(cfg.PreGenerateRadius))
@@ -187,7 +199,8 @@ func (s *Server) Run(ctx context.Context) error {
 			"onlineMode", s.cfg.Bedrock.OnlineMode,
 		)
 	}
-	slog.Info("starting GoCraft server", "motd", s.cfg.MOTD, "worldSeed", s.cfg.WorldSeed)
+	slog.Info("starting GoCraft server", "motd", s.cfg.MOTD, "worldSeed", s.cfg.WorldSeed,
+		"worldStorage", s.cfg.WorldStorage, "maxCachedChunks", s.cfg.MaxCachedChunks)
 
 	// Spawn a small set of passive mobs near the world spawn for testing.
 	s.spawnTestMobs()
@@ -241,6 +254,11 @@ func (s *Server) runEntityTick(ctx context.Context) {
 		case <-ticker.C:
 			s.tickIntents()
 			s.tickEntities()
+			if s.worldAge%600 == 0 {
+				if err := s.world.Flush(); err != nil {
+					slog.Warn("world autosave failed", "err", err)
+				}
+			}
 		}
 	}
 }
@@ -338,6 +356,7 @@ func (s *Server) applyChat(i intent.ChatIntent) {
 // See the concurrency comment on core/entity.Entity for the full invariant.
 func (s *Server) tickEntities() {
 	start := time.Now()
+	s.worldAge++
 
 	const (
 		gravity = -0.08 // blocks/tick² downward acceleration
@@ -346,9 +365,24 @@ func (s *Server) tickEntities() {
 	)
 
 	var (
-		moved   []*corentity.Entity // entities whose position changed this tick
-		deadIDs []int32             // entity IDs removed from the world this tick
+		moved        []*corentity.Entity // entities whose position changed this tick
+		hurtEntities []*corentity.Entity // entities damaged during this tick
+		deadIDs      []int32             // entity IDs removed from the world this tick
 	)
+
+	for entityID, event := range s.world.DrainEntityDamage() {
+		entity, ok := s.world.Entities.Get(entityID)
+		if !ok || entity.Dead {
+			continue
+		}
+		entity.Damage(event.Amount)
+		if isPassiveMob(entity.Type) && !entity.Dead {
+			s.startPassiveMobPanic(entity, event)
+		}
+		hurtEntities = append(hurtEntities, entity)
+		slog.Info("entity damaged", "type", entity.Type, "id", entityID,
+			"damage", event.Amount, "health", entity.Health)
+	}
 
 	for _, e := range s.world.Entities.Snapshot() {
 		// ── Dead entity cleanup ───────────────────────────────────────────────
@@ -372,12 +406,22 @@ func (s *Server) tickEntities() {
 
 		// ── Position integration ──────────────────────────────────────────────
 		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
-		e.Position.X += e.VX
+		nextX := e.Position.X + e.VX
+		if s.world.CanEntityOccupy(nextX, e.Position.Y, e.Position.Z) {
+			e.Position.X = nextX
+		} else {
+			e.VX = 0
+		}
 		e.Position.Y += e.VY
-		e.Position.Z += e.VZ
+		nextZ := e.Position.Z + e.VZ
+		if s.world.CanEntityOccupy(e.Position.X, e.Position.Y, nextZ) {
+			e.Position.Z = nextZ
+		} else {
+			e.VZ = 0
+		}
 
 		// ── Ground detection (generated or loaded terrain) ───────────────────────
-		groundY := float64(s.world.SurfaceY(int(math.Floor(e.Position.X)), int(math.Floor(e.Position.Z))) + 1)
+		groundY := float64(s.world.GroundYAtOrBelow(int(math.Floor(e.Position.X)), int(math.Floor(e.Position.Z)), int(math.Floor(math.Max(prevY, e.Position.Y)))) + 1)
 		if e.Position.Y <= groundY {
 			e.Position.Y = groundY
 			e.VY = 0
@@ -405,7 +449,16 @@ func (s *Server) tickEntities() {
 	// Build packets and dispatch network I/O off the tick goroutine.
 	// DispatchTickBroadcast reads entity fields here (tick goroutine, sole
 	// writer) to build immutable packets before spawning the send goroutine.
-	handler.DispatchTickBroadcast(moved, deadIDs, s.sessions)
+	handler.DispatchTickBroadcast(moved, hurtEntities, deadIDs, s.sessions)
+	if s.worldAge%20 == 0 {
+		handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
+		for _, change := range s.world.TickCrops(s.worldAge, 64) {
+			handler.BroadcastBlockChange(change, s.sessions)
+		}
+	}
+	if s.worldAge%200 == 0 {
+		s.spawnPassiveMobsNearPlayers()
+	}
 
 	// Warn when the CPU work in a tick exceeds the tick budget.
 	// Network I/O is off-goroutine and does not count toward this budget.
@@ -423,11 +476,11 @@ func (s *Server) spawnTestMobs() {
 		x, z float64
 	}
 	mobs := []spawn{
-		{corentity.TypeCow, 6, 0},
-		{corentity.TypeCow, -6, 4},
-		{corentity.TypePig, 0, 7},
-		{corentity.TypeSheep, 4, -5},
-		{corentity.TypeChicken, -4, -6},
+		{corentity.TypeCow, float64(s.spawnX + 6), float64(s.spawnZ)},
+		{corentity.TypeCow, float64(s.spawnX - 6), float64(s.spawnZ + 4)},
+		{corentity.TypePig, float64(s.spawnX), float64(s.spawnZ + 7)},
+		{corentity.TypeSheep, float64(s.spawnX + 4), float64(s.spawnZ - 5)},
+		{corentity.TypeChicken, float64(s.spawnX - 4), float64(s.spawnZ - 6)},
 	}
 	for _, m := range mobs {
 		id := s.game.NextEntityID()
@@ -439,6 +492,40 @@ func (s *Server) spawnTestMobs() {
 		slog.Info("spawned entity", "type", m.t, "id", id,
 			"x", m.x, "y", y, "z", m.z)
 	}
+}
+
+// spawnPassiveMobsNearPlayers provides a small, capped natural-spawn loop.
+// It intentionally implements only common surface animals for now.
+func (s *Server) spawnPassiveMobsNearPlayers() {
+	animals := 0
+	for _, e := range s.world.Entities.Snapshot() {
+		if e.Type != corentity.TypeVillager && isPassiveMob(e.Type) {
+			animals++
+		}
+	}
+	if animals >= 24 {
+		return
+	}
+	types := [...]corentity.EntityType{corentity.TypeCow, corentity.TypePig, corentity.TypeSheep, corentity.TypeChicken}
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if animals >= 24 {
+			return
+		}
+		angle := s.spawnRNG.Float64() * 2 * math.Pi
+		distance := 12 + s.spawnRNG.Float64()*12
+		x := p.Position.X + math.Cos(angle)*distance
+		z := p.Position.Z + math.Sin(angle)*distance
+		y := float64(s.world.SurfaceY(int(math.Floor(x)), int(math.Floor(z))) + 1)
+		if !s.world.CanEntityOccupy(x, y, z) {
+			return
+		}
+		e := corentity.New(s.game.NextEntityID(), newRandomUUID(), types[s.spawnRNG.Intn(len(types))], x, y, z)
+		e.OnGround = true
+		s.world.Entities.Add(e)
+		handler.BroadcastSpawnMob(e, s.sessions)
+		animals++
+		slog.Info("passive mob spawned", "type", e.Type, "id", e.EntityID, "x", x, "y", y, "z", z)
+	})
 }
 
 // isPassiveMob reports whether the given entity type uses passive-mob wander AI.
@@ -472,21 +559,95 @@ func isPassiveMob(t corentity.EntityType) bool {
 	return false
 }
 
+func (s *Server) mobAIFor(e *corentity.Entity) *mobAI {
+	ai, ok := s.mobAIs[e.EntityID]
+	if ok {
+		return ai
+	}
+	roaming := !e.HasVillageHome
+	homeX, homeZ := e.Position.X, e.Position.Z
+	if e.HasVillageHome {
+		homeX = float64(e.VillageCenter.X) + 0.5
+		homeZ = float64(e.VillageCenter.Z) + 0.5
+	}
+	ai = &mobAI{
+		homeX:   homeX,
+		homeZ:   homeZ,
+		roaming: roaming,
+		rng:     rand.New(rand.NewSource(int64(e.EntityID) * 6364136223846793005)),
+	}
+	s.mobAIs[e.EntityID] = ai
+	return ai
+}
+
+// startPassiveMobPanic makes a recently hurt passive mob jump and sprint away
+// from its attacker. It is called only by the entity tick goroutine.
+func (s *Server) startPassiveMobPanic(e *corentity.Entity, hit coreworld.EntityDamage) {
+	ai := s.mobAIFor(e)
+	dx, dz := e.Position.X-hit.SourceX, e.Position.Z-hit.SourceZ
+	distance := math.Hypot(dx, dz)
+	if !hit.HasSource || distance < 0.01 {
+		angle := ai.rng.Float64() * 2 * math.Pi
+		dx, dz, distance = math.Cos(angle), math.Sin(angle), 1
+	}
+	ai.dirX, ai.dirZ = dx/distance, dz/distance
+	ai.panicTick = 60
+	ai.knockbackTick = 8
+	ai.pauseTick = 0
+	ai.wanderTick = 60
+	horizontal, vertical := 0.4, 0.4
+	if s.cfg != nil {
+		horizontal = s.cfg.Combat.KnockbackHorizontal
+		vertical = s.cfg.Combat.KnockbackVertical
+	}
+	e.VX = ai.dirX * horizontal
+	e.VZ = ai.dirZ * horizontal
+	if e.OnGround {
+		e.VY = vertical
+	}
+	e.Sleeping = false
+}
+
 // tickPassiveMobAI advances wander AI for a single passive mob.
 //
 // Villagers are homed: they stay within 8 blocks of their spawn point.
 // All other passive mobs roam freely, occasionally pausing.
 func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
-	ai, ok := s.mobAIs[e.EntityID]
-	if !ok {
-		roaming := e.Type != corentity.TypeVillager
-		ai = &mobAI{
-			homeX:   e.Position.X,
-			homeZ:   e.Position.Z,
-			roaming: roaming,
-			rng:     rand.New(rand.NewSource(int64(e.EntityID) * 6364136223846793005)),
+	ai := s.mobAIFor(e)
+
+	if ai.knockbackTick > 0 {
+		ai.knockbackTick--
+		e.Yaw = float32(math.Atan2(-ai.dirX, ai.dirZ) * 180 / math.Pi)
+		return
+	}
+
+	if ai.panicTick > 0 {
+		ai.panicTick--
+		e.VX, e.VZ = ai.dirX*0.28, ai.dirZ*0.28
+		e.Yaw = float32(math.Atan2(-ai.dirX, ai.dirZ) * 180 / math.Pi)
+		return
+	}
+
+	// Assigned villagers return to their own bed at night and stay there until
+	// morning. The canonical Sleeping flag is adapter-independent state.
+	if e.Type == corentity.TypeVillager && e.HasVillageHome {
+		dayTime := s.worldAge % 24000
+		if dayTime >= 12542 && dayTime < 23460 {
+			targetX := float64(e.VillageBed.X) + 0.5
+			targetZ := float64(e.VillageBed.Z) + 0.5
+			dx, dz := targetX-e.Position.X, targetZ-e.Position.Z
+			distance := math.Hypot(dx, dz)
+			if distance <= 0.6 {
+				e.VX, e.VZ = 0, 0
+				e.Sleeping = true
+				return
+			}
+			e.Sleeping = false
+			e.VX, e.VZ = dx/distance*0.1, dz/distance*0.1
+			e.Yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
+			return
 		}
-		s.mobAIs[e.EntityID] = ai
+		e.Sleeping = false
 	}
 
 	// While paused, hold still.
@@ -513,7 +674,7 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 			// Homed (villager): walk back toward home if too far, else random.
 			dx := e.Position.X - ai.homeX
 			dz := e.Position.Z - ai.homeZ
-			if dx*dx+dz*dz > 49 { // > 7 blocks → return home
+			if dx*dx+dz*dz > 676 { // beyond 26 blocks: return toward village center
 				d := math.Sqrt(dx*dx + dz*dz)
 				ai.dirX = -dx / d
 				ai.dirZ = -dz / d
@@ -611,6 +772,7 @@ func (s *Server) handleConn(conn *network.ClientConn) {
 func (s *Server) registerPlayer(result *handler.LoginResult) *player.Player {
 	// protocol.UUID is [16]byte — convertible to the core's raw [16]byte UUID.
 	p := player.New([16]byte(result.UUID), result.Name, player.ClientEditionJava)
+	p.AttackCooldown = s.cfg.Combat.AttackCooldown
 	// Spawn on the highest generated or loaded block at the world origin.
 	p.Position.X = float64(s.spawnX) + 0.5
 	p.Position.Y = float64(s.world.SurfaceY(s.spawnX, s.spawnZ) + 1)

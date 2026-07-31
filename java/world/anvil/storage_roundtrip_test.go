@@ -28,11 +28,12 @@ func TestStorageRegionRoundTrip(t *testing.T) {
 	section.SetBiomeCell(2, 1, 3, "minecraft:badlands")
 	chunk.Sections[sectionIndex] = section
 	chunk.BlockEntities = []coreworld.BlockEntity{{
-		X:    int(chunk.X)*16 + 2,
-		Y:    64,
-		Z:    int(chunk.Z)*16 + 3,
-		Type: "minecraft:furnace",
-		Data: testBlockEntityPayload(),
+		X:     int(chunk.X)*16 + 2,
+		Y:     64,
+		Z:     int(chunk.Z)*16 + 3,
+		Type:  "minecraft:furnace",
+		Data:  testBlockEntityPayload(),
+		Items: []coreworld.ContainerItem{{Slot: 2, ItemID: "minecraft:iron_ingot", Count: 17}},
 	}}
 
 	neighbor := &coreworld.Chunk{X: 34, Z: -1}
@@ -86,6 +87,9 @@ func TestStorageRegionRoundTrip(t *testing.T) {
 	if got := loaded.BlockEntities[0]; got.Type != "minecraft:furnace" || got.X != chunk.BlockEntities[0].X || got.Y != 64 || got.Z != chunk.BlockEntities[0].Z || !bytes.Equal(got.Data, chunk.BlockEntities[0].Data) {
 		t.Fatalf("block entity differs after disk round trip: %+v", got)
 	}
+	if got := loaded.BlockEntities[0].Items; len(got) != 1 || got[0].Slot != 2 || got[0].ItemID != "minecraft:iron_ingot" || got[0].Count != 17 {
+		t.Fatalf("container items differ after disk round trip: %+v", got)
+	}
 
 	root, err := loadChunkFromRegion(worldDir, chunk.X, chunk.Z)
 	if err != nil {
@@ -122,4 +126,24 @@ func testBlockEntityPayload() []byte {
 		"CustomName": {typ: tagString, strV: `{"text":"Test Furnace"}`},
 	})
 	return buffer.Bytes()
+}
+
+func TestWorldFlushPersistsGeneratedChunk(t *testing.T) {
+	worldDir := t.TempDir()
+	storage, err := NewStorage(worldDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(filepath.Join(worldDir, "region")); err != nil || !info.IsDir() {
+		t.Fatalf("region directory was not created immediately: info=%v err=%v", info, err)
+	}
+	world := coreworld.New(&coreworld.FlatGenerator{}, storage, false)
+	defer world.Close()
+	world.Chunk(0, 0)
+	if err := world.Flush(); err != nil {
+		t.Fatalf("World.Flush: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(worldDir, "region", "r.0.0.mca")); err != nil {
+		t.Fatalf("autosave did not create region file: %v", err)
+	}
 }

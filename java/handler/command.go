@@ -13,8 +13,8 @@ import (
 	"strings"
 	"sync"
 
-	coreworld "GoCraft/core/world"
 	"GoCraft/core/player"
+	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/session"
 )
@@ -36,6 +36,10 @@ type CommandContext struct {
 	// (e.g. /tp) must call this instead of mutating Player.Position directly
 	// so the client's chunk view is kept in sync.
 	TeleportTo func(x, y, z float64) error
+
+	// NextEntityID allocates an ID shared with players and naturally spawned
+	// mobs. It is supplied by the dispatcher for commands such as /summon.
+	NextEntityID func() int32
 }
 
 // CommandFunc is the handler signature for a built-in server command.
@@ -46,8 +50,9 @@ type CommandFunc func(ctx CommandContext) error
 // Dispatcher maps command names (lower-case) to their implementations.
 // All methods are safe for concurrent use.
 type Dispatcher struct {
-	mu   sync.RWMutex
-	cmds map[string]CommandFunc
+	mu           sync.RWMutex
+	cmds         map[string]CommandFunc
+	nextEntityID func() int32
 }
 
 // NewDispatcher returns an empty, ready-to-use Dispatcher.
@@ -60,6 +65,14 @@ func NewDispatcher() *Dispatcher {
 func (d *Dispatcher) Register(name string, fn CommandFunc) {
 	d.mu.Lock()
 	d.cmds[strings.ToLower(name)] = fn
+	d.mu.Unlock()
+}
+
+// SetEntityIDAllocator installs the game-wide allocator used by entity-spawning
+// commands. The allocator may be configured once during server startup.
+func (d *Dispatcher) SetEntityIDAllocator(allocate func() int32) {
+	d.mu.Lock()
+	d.nextEntityID = allocate
 	d.mu.Unlock()
 }
 
@@ -82,7 +95,9 @@ func (d *Dispatcher) Dispatch(input string, ctx CommandContext) {
 
 	d.mu.RLock()
 	fn, ok := d.cmds[name]
+	allocateEntityID := d.nextEntityID
 	d.mu.RUnlock()
+	ctx.NextEntityID = allocateEntityID
 
 	if !ok {
 		_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("Unknown command: /%s", name))

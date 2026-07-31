@@ -12,8 +12,11 @@ type Storage interface {
 	// generated or never saved).
 	LoadChunk(x, z int32) (*Chunk, error)
 
-	// SaveChunk persists c to the backing store.
+	// SaveChunk stages c for persistence in the backing store.
 	SaveChunk(c *Chunk) error
+
+	// Flush commits all staged writes to durable storage.
+	Flush() error
 
 	// Close flushes any buffered writes and releases file handles.
 	// After Close returns, no other methods may be called.

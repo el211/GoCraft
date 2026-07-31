@@ -4,17 +4,20 @@ package handler
 //
 // When a player right-clicks (INTERACT or INTERACT_AT) a villager entity, the
 // server:
-//  1. Sends Open Screen (0x36) to open the Merchant UI (container type 19).
-//  2. Sends Merchant Offers (0x2F) with the trade list.
+//  1. Sends Open Screen (0x35) to open the Merchant UI (container type 19).
+//  2. Sends Merchant Offers (0x2E) with the trade list.
 //
-// The trade list is static per biome — no persistence is needed for a basic
+// The trade list is currently static — no persistence is needed for a basic
 // implementation.  Each trade is a cheap input-item → output-item mapping; the
 // client renders prices, use counters, and restock indicators automatically.
 
 import (
 	"fmt"
+	"log/slog"
+	"time"
 
 	corentity "GoCraft/core/entity"
+	"GoCraft/core/player"
 	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
@@ -97,7 +100,7 @@ var defaultVillagerTrades = []tradeOffer{
 //
 // If the targeted entity is a villager and the interaction is INTERACT with the
 // main hand, the trading UI is opened.
-func handleInteractPacket(pkt *protocol.Packet, w *coreworld.World, conn *network.ClientConn) error {
+func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, conn *network.ClientConn) error {
 	r := pkt.Reader()
 
 	entityID, err := protocol.ReadVarInt(r)
@@ -108,8 +111,10 @@ func handleInteractPacket(pkt *protocol.Packet, w *coreworld.World, conn *networ
 	if err != nil {
 		return fmt.Errorf("interact: reading type: %w", err)
 	}
+	if interactType < 0 || interactType > 2 {
+		return fmt.Errorf("interact: invalid type %d", interactType)
+	}
 
-	// INTERACT_AT (2) carries three target floats before the hand field.
 	if interactType == 2 {
 		for i := 0; i < 3; i++ {
 			if _, err := protocol.ReadFloat(r); err != nil {
@@ -118,22 +123,41 @@ func handleInteractPacket(pkt *protocol.Packet, w *coreworld.World, conn *networ
 		}
 	}
 
-	// ATTACK (1) has no hand field — skip hand parsing.
+	mainHand := true
 	if interactType == 0 || interactType == 2 {
 		hand, err := protocol.ReadVarInt(r)
 		if err != nil {
 			return fmt.Errorf("interact: reading hand: %w", err)
 		}
-		if hand != 0 {
-			return nil // off-hand interact — ignore
-		}
+		mainHand = hand == 0
+	}
+	if _, err := protocol.ReadBool(r); err != nil {
+		return fmt.Errorf("interact: reading sneaking flag: %w", err)
+	}
+	if r.Len() != 0 {
+		return fmt.Errorf("interact: %d trailing payload bytes", r.Len())
 	}
 
 	if interactType == 1 {
-		return nil // attack — not handled here
+		if p.GameMode != player.GameModeSpectator {
+			now := time.Now()
+			if p.AttackCooldown && !p.LastAttack.IsZero() && now.Sub(p.LastAttack) < playerAttackCooldown(p) {
+				return nil
+			}
+			damage := playerAttackDamage(p)
+			if w.QueueEntityDamageFrom(entityID, damage, p.Position.X, p.Position.Z) {
+				p.LastAttack = now
+				slog.Info("entity attack queued", "player", p.Username, "entityID", entityID, "damage", damage)
+			} else {
+				slog.Debug("entity attack ignored", "player", p.Username, "entityID", entityID)
+			}
+		}
+		return nil
+	}
+	if !mainHand {
+		return nil
 	}
 
-	// Look up entity; only villagers open a trade screen.
 	entity, ok := w.Entities.Get(entityID)
 	if !ok || entity.Type != corentity.TypeVillager {
 		return nil
@@ -142,13 +166,13 @@ func handleInteractPacket(pkt *protocol.Packet, w *coreworld.World, conn *networ
 	if err := sendOpenScreen(conn, villagerWindowID, merchantContainerType, "Villager"); err != nil {
 		return fmt.Errorf("interact: opening screen: %w", err)
 	}
-	if err := sendMerchantOffers(conn, villagerWindowID, defaultVillagerTrades); err != nil {
+	if err := sendMerchantOffers(conn, villagerWindowID, tradesForProfession(entity.VillagerProfession)); err != nil {
 		return fmt.Errorf("interact: sending offers: %w", err)
 	}
 	return nil
 }
 
-// sendOpenScreen sends the Open Screen packet (0x36 S→C).
+// sendOpenScreen sends the Open Screen packet (0x35 S→C).
 //
 // Wire layout (1.21.4):
 //
@@ -164,17 +188,17 @@ func sendOpenScreen(conn *network.ClientConn, windowID, windowType int32, title 
 	return conn.WritePacket(pkt)
 }
 
-// sendMerchantOffers sends the Merchant Offers packet (0x2F S→C).
+// sendMerchantOffers sends the Merchant Offers packet (0x2E S→C).
 //
 // Wire layout (1.21.4):
 //
 //	VarInt  window_id
 //	VarInt  size  (number of trades)
 //	For each trade:
-//	  Slot    input_item_1
+//	  ItemCost input_item_1
 //	  Slot    output_item
 //	  Bool    has_second_input
-//	  [Slot   input_item_2  — only when has_second_input]
+//	  [ItemCost input_item_2  — only when has_second_input]
 //	  Bool    out_of_stock
 //	  Int     number_of_trades_uses
 //	  Int     max_uses
@@ -187,35 +211,51 @@ func sendOpenScreen(conn *network.ClientConn, windowID, windowType int32, title 
 //	Bool    is_regular_villager
 //	Bool    can_restock
 func sendMerchantOffers(conn *network.ClientConn, windowID int32, trades []tradeOffer) error {
+	return conn.WritePacket(buildMerchantOffers(windowID, trades))
+}
+
+func buildMerchantOffers(windowID int32, trades []tradeOffer) *protocol.Packet {
 	b := protocol.NewBuilder(packetIDMerchantOffers).
 		VarInt(windowID).
 		VarInt(int32(len(trades)))
 
-	for _, t := range trades {
-		encodeTradingSlot(b, t.input1)
-		encodeTradingSlot(b, t.output)
+	for _, trade := range trades {
+		encodeTradeCost(b, trade.input1)
+		encodeTradingSlot(b, trade.output)
 
-		hasSecond := t.input2.itemName != ""
+		hasSecond := trade.input2.itemName != ""
 		b.Bool(hasSecond)
 		if hasSecond {
-			encodeTradingSlot(b, t.input2)
+			encodeTradeCost(b, trade.input2)
 		}
 
-		b.Bool(false). // out_of_stock (always available)
-				Int(0).            // number_of_trades_uses
-				Int(t.maxUses).    // max_uses
-				Int(t.xpPerTrade). // xp earned per trade
-				Int(0).            // special_price (demand discount)
-				Float(0.05).       // price_multiplier
-				Int(0)             // demand
+		b.Bool(false).
+			Int(0).
+			Int(trade.maxUses).
+			Int(trade.xpPerTrade).
+			Int(0).
+			Float(0.05).
+			Int(0)
 	}
 
-	b.VarInt(1). // villager_level: Novice
-			VarInt(0).  // villager_xp: 0
-			Bool(true). // is_regular_villager
-			Bool(true)  // can_restock
+	return b.VarInt(1).
+		VarInt(0).
+		Bool(true).
+		Bool(true).
+		Build()
+}
 
-	return conn.WritePacket(b.Build())
+// encodeTradeCost encodes the 1.21.4 ItemCost structure used for merchant
+// inputs: item ID, count, and the required data-component predicate.
+func encodeTradeCost(b *protocol.Builder, item tradeItem) {
+	id := javaworld.ItemID(item.itemName)
+	if item.itemName == "" || item.count <= 0 || id < 0 {
+		b.VarInt(0).VarInt(0).VarInt(0)
+		return
+	}
+	b.VarInt(id).
+		VarInt(item.count).
+		VarInt(0)
 }
 
 // encodeTradingSlot encodes a tradeItem as a 1.21.4 slot into b.
@@ -234,4 +274,59 @@ func encodeTradingSlot(b *protocol.Builder, item tradeItem) {
 		VarInt(id).
 		VarInt(0). // components_to_add
 		VarInt(0)  // components_to_remove
+}
+
+func tradesForProfession(profession corentity.VillagerProfession) []tradeOffer {
+	switch profession {
+	case corentity.VillagerProfessionLibrarian:
+		return []tradeOffer{
+			{input1: tradeItem{"minecraft:paper", 24}, output: tradeItem{"minecraft:emerald", 1}, maxUses: 12, xpPerTrade: 3},
+			{input1: tradeItem{"minecraft:emerald", 1}, output: tradeItem{"minecraft:bookshelf", 1}, maxUses: 12, xpPerTrade: 5},
+		}
+	case corentity.VillagerProfessionFletcher:
+		return []tradeOffer{
+			{input1: tradeItem{"minecraft:stick", 32}, output: tradeItem{"minecraft:emerald", 1}, maxUses: 16, xpPerTrade: 2},
+			{input1: tradeItem{"minecraft:emerald", 1}, output: tradeItem{"minecraft:arrow", 16}, maxUses: 12, xpPerTrade: 2},
+		}
+	default:
+		return defaultVillagerTrades
+	}
+}
+
+func playerAttackCooldown(p *player.Player) time.Duration {
+	switch p.HeldItem().ItemID {
+	case "minecraft:wooden_axe", "minecraft:stone_axe":
+		return 1250 * time.Millisecond
+	case "minecraft:iron_axe":
+		return 1100 * time.Millisecond
+	case "minecraft:diamond_axe", "minecraft:netherite_axe", "minecraft:golden_axe":
+		return time.Second
+	case "minecraft:wooden_sword", "minecraft:stone_sword", "minecraft:iron_sword",
+		"minecraft:diamond_sword", "minecraft:netherite_sword", "minecraft:golden_sword":
+		return 625 * time.Millisecond
+	default:
+		return 250 * time.Millisecond
+	}
+}
+func playerAttackDamage(p *player.Player) float32 {
+	switch p.HeldItem().ItemID {
+	case "minecraft:wooden_sword", "minecraft:golden_sword":
+		return 4
+	case "minecraft:stone_sword":
+		return 5
+	case "minecraft:iron_sword":
+		return 6
+	case "minecraft:diamond_sword":
+		return 7
+	case "minecraft:netherite_sword":
+		return 8
+	case "minecraft:wooden_axe", "minecraft:golden_axe":
+		return 7
+	case "minecraft:stone_axe", "minecraft:iron_axe", "minecraft:diamond_axe":
+		return 9
+	case "minecraft:netherite_axe":
+		return 10
+	default:
+		return 1
+	}
 }

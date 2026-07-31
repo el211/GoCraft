@@ -4,6 +4,8 @@
 package player
 
 import (
+	"time"
+
 	"GoCraft/core/spatial"
 )
 
@@ -51,6 +53,18 @@ type Player struct {
 	// GameMode is the current game mode.
 	GameMode GameMode
 
+	// Flying and movement-speed settings are protocol-independent player
+	// preferences controlled by the built-in flight and speed commands.
+	AllowFlying bool
+	Flying      bool
+	FlySpeed    float32
+	WalkSpeed   float32
+
+	// AttackCooldown selects modern timed attacks when true. LastAttack is
+	// canonical combat timing state shared by every protocol adapter.
+	AttackCooldown bool
+	LastAttack     time.Time
+
 	// EntityID is the server-assigned entity ID used in packets.
 	// It is assigned by the game core when the player joins.
 	EntityID int32
@@ -61,6 +75,17 @@ type Player struct {
 
 	// HeldSlot is the currently selected hotbar slot (0–8).
 	HeldSlot int
+
+	// Open-container state is edition-independent inventory state. The Java
+	// adapter maps these slots to the protocol-specific crafting-table layout.
+	OpenContainerID   int32
+	OpenContainerKind string
+	OpenContainerPos  spatial.BlockPos
+	ContainerStateID  int32
+	ContainerSlots    []ItemStack
+	CraftingGrid      [9]ItemStack
+	CraftingResult    ItemStack
+	CarriedItem       ItemStack
 }
 
 // HeldItem returns the ItemStack in the currently selected hotbar slot.
@@ -75,27 +100,58 @@ func (p *Player) GiveItem(item ItemStack) bool {
 	if item.IsEmpty() {
 		return true
 	}
-	// Priority: hotbar first, then main inventory.
-	ranges := [][2]int{{HotbarStart, InventorySize - 1}, {9, HotbarStart}}
-	for _, stackFirst := range []bool{true, false} {
-		for _, r := range ranges {
-			for i := r[0]; i < r[1]; i++ {
-				slot := &p.Inventory[i]
-				if stackFirst {
-					if slot.ItemID == item.ItemID && slot.Count < 64 {
-						slot.Count += item.Count
-						return true
-					}
-				} else {
-					if slot.IsEmpty() {
-						*slot = item
-						return true
-					}
-				}
+	remaining := item.Count
+	ranges := [][2]int{{HotbarStart, InventorySize}, {9, HotbarStart}}
+
+	// Refuse atomically when the inventory cannot hold the whole request.
+	capacity := 0
+	for _, inventoryRange := range ranges {
+		for i := inventoryRange[0]; i < inventoryRange[1]; i++ {
+			slot := p.Inventory[i]
+			switch {
+			case slot.IsEmpty():
+				capacity += 64
+			case slot.ItemID == item.ItemID && slot.Count < 64:
+				capacity += 64 - slot.Count
 			}
 		}
 	}
-	return false
+	if capacity < remaining {
+		return false
+	}
+
+	// Merge into compatible partial stacks first.
+	for _, inventoryRange := range ranges {
+		for i := inventoryRange[0]; i < inventoryRange[1] && remaining > 0; i++ {
+			slot := &p.Inventory[i]
+			if slot.ItemID != item.ItemID || slot.Count >= 64 {
+				continue
+			}
+			room := 64 - slot.Count
+			add := remaining
+			if add > room {
+				add = room
+			}
+			slot.Count += add
+			remaining -= add
+		}
+	}
+	// Then use empty slots, splitting across stacks when necessary.
+	for _, inventoryRange := range ranges {
+		for i := inventoryRange[0]; i < inventoryRange[1] && remaining > 0; i++ {
+			slot := &p.Inventory[i]
+			if !slot.IsEmpty() {
+				continue
+			}
+			add := remaining
+			if add > 64 {
+				add = 64
+			}
+			*slot = ItemStack{ItemID: item.ItemID, Count: add}
+			remaining -= add
+		}
+	}
+	return remaining == 0
 }
 
 // New creates a Player with sensible defaults.
@@ -103,10 +159,12 @@ func (p *Player) GiveItem(item ItemStack) bool {
 // for testing.  A config-driven game-mode option will be added in a later milestone.
 func New(uuid [16]byte, username string, edition ClientEdition) *Player {
 	return &Player{
-		UUID:     uuid,
-		Username: username,
-		Edition:  edition,
-		Position: spatial.DefaultSpawnPos,
-		GameMode: GameModeCreative,
+		UUID:      uuid,
+		Username:  username,
+		Edition:   edition,
+		Position:  spatial.DefaultSpawnPos,
+		GameMode:  GameModeCreative,
+		FlySpeed:  0.05,
+		WalkSpeed: 0.1,
 	}
 }

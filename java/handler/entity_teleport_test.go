@@ -75,3 +75,53 @@ func assertTeleportEntityPayload(t *testing.T, pkt *protocol.Packet, wantEntityI
 		t.Fatalf("unexpected trailing payload: %d bytes", r.Len())
 	}
 }
+
+func TestVillagerMetadataUsesProtocol769RegistryValues(t *testing.T) {
+	villager := corentity.New(77, [16]byte{3}, corentity.TypeVillager, 0, 64, 0)
+	villager.VillagerVariant = corentity.VillagerVariantSavanna
+	villager.VillagerProfession = corentity.VillagerProfessionLibrarian
+	villager.VillagerLevel = 2
+
+	pkt := buildMobMetadata(villager)
+	if pkt == nil {
+		t.Fatal("buildMobMetadata(villager) = nil")
+	}
+	if pkt.ID != packetIDSetEntityData {
+		t.Fatalf("packet ID = %d, want %d", pkt.ID, packetIDSetEntityData)
+	}
+	r := pkt.Reader()
+	assertVarInt := func(name string, want int32) {
+		t.Helper()
+		got, err := protocol.ReadVarInt(r)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if got != want {
+			t.Fatalf("%s = %d, want %d", name, got, want)
+		}
+	}
+	assertVarInt("entity ID", 77)
+	index, err := protocol.ReadByte(r)
+	if err != nil {
+		t.Fatalf("read metadata index: %v", err)
+	}
+	if index != 18 {
+		t.Fatalf("metadata index = %d, want 18", index)
+	}
+	assertVarInt("serializer ID", 19)
+	assertVarInt("savanna variant ID", 3)
+	assertVarInt("librarian profession ID", 9)
+	assertVarInt("villager level", 2)
+	terminator, err := protocol.ReadByte(r)
+	if err != nil {
+		t.Fatalf("read metadata terminator: %v", err)
+	}
+	if terminator != 0xff || r.Len() != 0 {
+		t.Fatalf("metadata terminator/trailing bytes = 0x%02x/%d, want 0xff/0", terminator, r.Len())
+	}
+
+	cow := corentity.New(78, [16]byte{4}, corentity.TypeCow, 0, 64, 0)
+	if got := buildMobMetadata(cow); got != nil {
+		t.Fatalf("buildMobMetadata(cow) = %v, want nil", got)
+	}
+}
