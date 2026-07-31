@@ -122,6 +122,7 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 			"mode", p.GameMode, "status", status)
 		applyBlockChange(int(bx), int(by), int(bz), coreworld.Air, w, mgr)
 		breakLinkedPlantHalf(int(bx), int(by), int(bz), broken, w, mgr)
+		unlinkChestPartner(int(bx), int(by), int(bz), broken, w, mgr)
 		broadcastSoundAt(mgr, blockBreakSound(broken.ResourceLocation()), soundCategoryBlocks,
 			float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 0.8)
 
@@ -442,7 +443,8 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 		if targetBlock.ResourceLocation() == "minecraft:crafting_table" {
 			return openCraftingTable(p, conn)
 		}
-		if targetBlock.ResourceLocation() == "minecraft:chest" {
+		if targetBlock.ResourceLocation() == "minecraft:chest" ||
+			targetBlock.ResourceLocation() == "minecraft:trapped_chest" {
 			return openChest(p, conn, w, spatial.BlockPos{X: bx, Y: by, Z: bz})
 		}
 		return sendOpenScreen(conn, 1, menuType, title)
@@ -484,9 +486,12 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 	block := javaworld.ItemIDToBlock(held.ItemID)
 	slog.Info("block place", "player", p.Username,
 		"block", block.ResourceLocation(), "x", px, "y", py, "z", pz)
-	applyBlockChange(px, py, pz, block, w, mgr)
-	if block.ResourceLocation() == "minecraft:chest" {
-		w.SetContainerItems(px, py, pz, "minecraft:chest", nil)
+	switch block.ResourceLocation() {
+	case "minecraft:chest", "minecraft:trapped_chest":
+		placeChestBlock(p, px, py, pz, block.ResourceLocation(), w, mgr)
+		w.SetContainerItems(px, py, pz, block.ResourceLocation(), nil)
+	default:
+		applyBlockChange(px, py, pz, block, w, mgr)
 	}
 	if p.GameMode == player.GameModeSurvival {
 		slot := player.HotbarStart + p.HeldSlot

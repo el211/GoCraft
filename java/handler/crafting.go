@@ -267,6 +267,8 @@ func handleContainerClose(pkt *protocol.Packet, p *player.Player, conn *network.
 		p.OpenContainerID = 0
 		p.OpenContainerKind = ""
 		p.OpenContainerPos = spatial.BlockPos{}
+		p.OpenContainerPartnerPos = spatial.BlockPos{}
+		p.OpenContainerHasPartner = false
 		p.ContainerSlots = nil
 		p.ContainerStateID++
 		return sendSetContainerContent(conn, p, p.ContainerStateID)

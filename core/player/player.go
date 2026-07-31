@@ -78,11 +78,13 @@ type Player struct {
 
 	// Open-container state is edition-independent inventory state. The Java
 	// adapter maps these slots to the protocol-specific crafting-table layout.
-	OpenContainerID   int32
-	OpenContainerKind string
-	OpenContainerPos  spatial.BlockPos
-	ContainerStateID  int32
-	ContainerSlots    []ItemStack
+	OpenContainerID          int32
+	OpenContainerKind        string
+	OpenContainerPos         spatial.BlockPos // right-half pos (slots 0-26) or sole chest
+	OpenContainerPartnerPos  spatial.BlockPos // left-half pos (slots 27-53); zero if single
+	OpenContainerHasPartner  bool
+	ContainerStateID         int32
+	ContainerSlots           []ItemStack
 	CraftingGrid      [9]ItemStack
 	CraftingResult    ItemStack
 	CarriedItem       ItemStack
