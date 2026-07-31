@@ -91,14 +91,18 @@ type Server struct {
 // mobAI holds the wander state for a passive mob.
 // All fields are written only by the entity tick goroutine.
 type mobAI struct {
-	homeX, homeZ  float64    // world-space spawn/home position (homed mobs only)
-	dirX, dirZ    float64    // current normalised walk direction
-	wanderTick    int        // ticks until next direction pick (0 = pick now)
-	pauseTick     int        // remaining ticks of stillness (overrides wanderTick)
-	panicTick     int        // remaining ticks fleeing from a recent attacker
-	knockbackTick int        // ticks retaining the configured initial hit velocity
-	roaming       bool       // true = no fixed home (animals); false = homed (villagers)
-	rng           *rand.Rand // per-entity PRNG seeded from entity ID
+	homeX, homeZ   float64    // world-space spawn/home position (homed mobs only)
+	dirX, dirZ     float64    // current normalised walk direction
+	wanderTick     int        // ticks until next direction pick (0 = pick now)
+	pauseTick      int        // remaining ticks of stillness (overrides wanderTick)
+	panicTick      int        // remaining ticks fleeing from a recent attacker
+	knockbackTick  int        // ticks retaining the configured initial hit velocity
+	roaming        bool       // true = no fixed home (animals); false = homed (villagers)
+	rng            *rand.Rand // per-entity PRNG seeded from entity ID
+	hasTarget      bool       // hostile AI: currently chasing a target
+	targetX        float64    // hostile AI: current target world X
+	targetZ        float64    // hostile AI: current target world Z
+	attackCooldown int        // ticks until next melee swing
 }
 
 // New creates a Server with the given configuration.
@@ -379,6 +383,14 @@ func (s *Server) tickEntities() {
 		if isPassiveMob(entity.Type) && !entity.Dead {
 			s.startPassiveMobPanic(entity, event)
 		}
+		if (entity.Type == corentity.TypeIronGolem || entity.Type == corentity.TypeSnowGolem) &&
+			!entity.Dead && event.HasSource {
+			ai := s.mobAIFor(entity)
+			ai.hasTarget = true
+			ai.targetX = event.SourceX
+			ai.targetZ = event.SourceZ
+			ai.attackCooldown = 0
+		}
 		hurtEntities = append(hurtEntities, entity)
 		slog.Info("entity damaged", "type", entity.Type, "id", entityID,
 			"damage", event.Amount, "health", entity.Health)
@@ -394,9 +406,11 @@ func (s *Server) tickEntities() {
 			continue
 		}
 
-		// ── Passive mob AI (wander) ───────────────────────────────────────────
+		// ── Mob AI (wander / hostile) ─────────────────────────────────────────
 		if isPassiveMob(e.Type) {
 			s.tickPassiveMobAI(e)
+		} else if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
+			s.tickGolemAI(e)
 		}
 
 		// ── Gravity ───────────────────────────────────────────────────────────
@@ -404,11 +418,17 @@ func (s *Server) tickEntities() {
 			e.VY += gravity
 		}
 
-		// ── Position integration ──────────────────────────────────────────────
+		// ── Position integration with step-up ────────────────────────────────
 		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
 		nextX := e.Position.X + e.VX
 		if s.world.CanEntityOccupy(nextX, e.Position.Y, e.Position.Z) {
 			e.Position.X = nextX
+		} else if e.OnGround && e.VX != 0 &&
+			s.world.CanEntityOccupy(nextX, e.Position.Y+1, e.Position.Z) {
+			// Step up over a 1-block obstacle.
+			e.Position.X = nextX
+			e.Position.Y = math.Floor(e.Position.Y) + 1
+			e.VY = 0
 		} else {
 			e.VX = 0
 		}
@@ -416,6 +436,12 @@ func (s *Server) tickEntities() {
 		nextZ := e.Position.Z + e.VZ
 		if s.world.CanEntityOccupy(e.Position.X, e.Position.Y, nextZ) {
 			e.Position.Z = nextZ
+		} else if e.OnGround && e.VZ != 0 &&
+			s.world.CanEntityOccupy(e.Position.X, e.Position.Y+1, nextZ) {
+			// Step up over a 1-block obstacle.
+			e.Position.Z = nextZ
+			e.Position.Y = math.Floor(e.Position.Y) + 1
+			e.VY = 0
 		} else {
 			e.VZ = 0
 		}
@@ -552,8 +578,7 @@ func isPassiveMob(t corentity.EntityType) bool {
 		corentity.TypeCod, corentity.TypeSalmon, corentity.TypeTropicalFish,
 		corentity.TypePufferfish,
 		corentity.TypeBat, corentity.TypeFrog, corentity.TypeBee,
-		corentity.TypeDolphin, corentity.TypePolarBear,
-		corentity.TypeIronGolem, corentity.TypeSnowGolem:
+		corentity.TypeDolphin, corentity.TypePolarBear:
 		return true
 	}
 	return false
@@ -705,6 +730,64 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 		yawRad := math.Atan2(-ai.dirX, ai.dirZ)
 		e.Yaw = float32(yawRad * 180 / math.Pi)
 	}
+}
+
+// tickGolemAI handles iron and snow golem behaviour.
+//
+// When the golem has been hit by a player, it charges at the attacker's last
+// known position.  The target refreshes each tick from the nearest player
+// within 16 blocks so the golem tracks its target as it moves.  Without a
+// player health system, the golem only knocks back the nearby player (future
+// milestone will add health depletion).
+func (s *Server) tickGolemAI(e *corentity.Entity) {
+	ai := s.mobAIFor(e)
+
+	if !ai.hasTarget {
+		// No target: wander like a homed passive mob near the village centre.
+		s.tickPassiveMobAI(e)
+		return
+	}
+
+	// Refresh target from the nearest player within 24 blocks.
+	nearestDist := 24.0
+	for _, sess := range s.sessions.SnapshotAll() {
+		if sess.Player == nil {
+			continue
+		}
+		dx := sess.Player.Position.X - e.Position.X
+		dz := sess.Player.Position.Z - e.Position.Z
+		d := math.Hypot(dx, dz)
+		if d < nearestDist {
+			ai.targetX = sess.Player.Position.X
+			ai.targetZ = sess.Player.Position.Z
+			nearestDist = d
+		}
+	}
+	if nearestDist >= 24.0 {
+		// No player nearby — give up chase.
+		ai.hasTarget = false
+		e.VX, e.VZ = 0, 0
+		return
+	}
+
+	dx, dz := ai.targetX-e.Position.X, ai.targetZ-e.Position.Z
+	dist := math.Hypot(dx, dz)
+
+	if ai.attackCooldown > 0 {
+		ai.attackCooldown--
+	}
+
+	if dist <= 2.0 {
+		// In melee range — stop and swing.
+		e.VX, e.VZ = 0, 0
+		return
+	}
+
+	// Charge at the target at golem speed.
+	speed := 0.14
+	e.VX = dx / dist * speed
+	e.VZ = dz / dist * speed
+	e.Yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
 }
 
 // newRandomUUID generates a random RFC 4122 version-4 UUID.
