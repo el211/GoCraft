@@ -28,6 +28,8 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -91,6 +93,11 @@ type Server struct {
 	worldAge int64
 	spawnRNG *rand.Rand
 
+	// sleepAllTick is the worldAge tick at which ALL online players were first
+	// detected sleeping.  0 means nobody is sleeping or the check hasn't fired.
+	// The tick goroutine waits sleepAnimTicks before skipping the night.
+	sleepAllTick int64
+
 	// timings collects per-subsystem tick durations for /timings and /tps.
 	timings *tickTimings
 }
@@ -106,6 +113,7 @@ type mobAI struct {
 	knockbackTick  int        // ticks retaining the configured initial hit velocity
 	roaming        bool       // true = no fixed home (animals); false = homed (villagers)
 	rng            *rand.Rand // per-entity PRNG seeded from entity ID
+	sleepingWas    bool       // previous-tick sleeping state — detects transitions for metadata broadcast
 	hasTarget      bool       // hostile AI: currently chasing a target
 	targetX        float64    // hostile AI: current target world X
 	targetZ        float64    // hostile AI: current target world Z
@@ -136,7 +144,12 @@ func New(cfg *config.Config) (*Server, error) {
 			spawnX, spawnZ = int(metadata.SpawnX), int(metadata.SpawnZ)
 			// Resume the world clock from where the vanilla server left off so
 			// the day/night cycle continues naturally across restarts.
-			if metadata.Time > 0 {
+			// gocraft_time.dat (written by saveWorldAge) takes priority because it
+			// tracks the live clock; level.dat only has the time at the last
+			// vanilla-server save.
+			if saved, ok := loadSavedWorldAge(cfg.WorldDir); ok {
+				initialWorldAge = saved
+			} else if metadata.Time > 0 {
 				initialWorldAge = metadata.Time
 			}
 			slog.Info("server: loaded Java level.dat",
@@ -219,6 +232,50 @@ func New(cfg *config.Config) (*Server, error) {
 		return handler.SendSystemMessage(ctx.Conn,
 			fmt.Sprintf("TPS: %s%.1f§r  Avg tick: §f%.2fms", color, tps, avgMs))
 	})
+	cmds.Register("time", func(ctx handler.CommandContext) error {
+		if len(ctx.Args) == 0 {
+			tod := s.worldAge % 24000
+			return handler.SendSystemMessage(ctx.Conn,
+				fmt.Sprintf("Time of day: %d (world age: %d)", tod, s.worldAge))
+		}
+		switch strings.ToLower(ctx.Args[0]) {
+		case "day":
+			// Jump to noon (6000).
+			tod := s.worldAge % 24000
+			if tod <= 6000 {
+				s.worldAge += 6000 - tod
+			} else {
+				s.worldAge += 24000 - tod + 6000
+			}
+		case "night":
+			// Jump to midnight (18000).
+			tod := s.worldAge % 24000
+			if tod <= 18000 {
+				s.worldAge += 18000 - tod
+			} else {
+				s.worldAge += 24000 - tod + 18000
+			}
+		case "set":
+			if len(ctx.Args) < 2 {
+				return fmt.Errorf("usage: /time set <0-23999>")
+			}
+			val, err := strconv.ParseInt(ctx.Args[1], 10, 64)
+			if err != nil || val < 0 || val > 23999 {
+				return fmt.Errorf("time value must be 0–23999")
+			}
+			tod := s.worldAge % 24000
+			if tod <= val {
+				s.worldAge += val - tod
+			} else {
+				s.worldAge += 24000 - tod + val
+			}
+		default:
+			return fmt.Errorf("usage: /time <day|night|set <0-23999>>")
+		}
+		handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
+		return handler.SendSystemMessage(ctx.Conn,
+			fmt.Sprintf("Time set to %d", s.worldAge%24000))
+	})
 	// Warm spawn immediately; login-time streaming will reuse this cache.
 	s.world.QueuePregeneration(int32(math.Floor(float64(spawnX)/16)), int32(math.Floor(float64(spawnZ)/16)), int32(cfg.PreGenerateRadius))
 	s.loginHandler = handler.NewLoginHandler(cfg, privKey, pubKeyDER)
@@ -300,6 +357,7 @@ func (s *Server) Run(ctx context.Context) error {
 	if closeErr := s.world.Close(); closeErr != nil {
 		slog.Warn("server: error flushing world on shutdown", "err", closeErr)
 	}
+	s.saveWorldAge()
 	return listenErr
 }
 
@@ -312,14 +370,30 @@ func (s *Server) runEntityTick(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			s.tickIntents()
-			s.tickEntities()
-			if s.worldAge%600 == 0 {
-				if err := s.world.Flush(); err != nil {
-					slog.Warn("world autosave failed", "err", err)
-				}
-			}
+			s.safeTick()
 		}
+	}
+}
+
+// safeTick wraps a single game tick in a recover so that a panic in any tick
+// subsystem logs the stack trace and restarts the tick rather than crashing
+// the entire server process.
+func (s *Server) safeTick() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC in tick goroutine — server recovered",
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	s.tickIntents()
+	s.tickEntities()
+	if s.worldAge%600 == 0 {
+		if err := s.world.Flush(); err != nil {
+			slog.Warn("world autosave failed", "err", err)
+		}
+		s.saveWorldAge()
 	}
 }
 
@@ -464,10 +538,70 @@ func (s *Server) tickEntities() {
 			continue
 		}
 
+		// ── Primed TNT fuse countdown ────────────────────────────────────────
+		if e.Type == corentity.TypePrimedTNT {
+			e.FuseTicks--
+			if e.FuseTicks <= 0 {
+				s.explodeTNT(e.Position.X, e.Position.Y, e.Position.Z)
+				s.world.Entities.Remove(e.EntityID)
+				delete(s.mobAIs, e.EntityID)
+				deadIDs = append(deadIDs, e.EntityID)
+				e.Dead = true
+				continue
+			}
+			// TNT falls with gravity during fuse.
+			if !e.OnGround {
+				e.VY += gravity
+				e.Position.Y += e.VY
+				moved = append(moved, e)
+			}
+			continue
+		}
+
+		// ── Boat physics ─────────────────────────────────────────────────────
+		if corentity.IsBoat(e.Type) {
+			s.tickBoatPhysics(e)
+			// If a rider is controlling the boat, the client sends move_vehicle
+			// and we skip server-side movement — just track for broadcast.
+			if e.RiderEntityID != 0 {
+				// Position is authoritative from client; still broadcast to others.
+				// (broadcastBoatPositionExcept is called inside HandleMoveVehiclePacket)
+				continue
+			}
+			if e.VX != 0 || e.VY != 0 || e.VZ != 0 {
+				moved = append(moved, e)
+			}
+			continue
+		}
+
+		// ── FallingBlock landing ──────────────────────────────────────────────
+		if e.Type == corentity.TypeFallingBlock && e.OnGround {
+			// Place the block at the landing position and despawn the entity.
+			lx := int(math.Round(e.Position.X - 0.5))
+			ly := int(e.Position.Y)
+			lz := int(math.Round(e.Position.Z - 0.5))
+			landBlock := coreworld.Block{
+				Namespace:  "minecraft",
+				Name:       strings.TrimPrefix(e.FallingBlockName, "minecraft:"),
+				Properties: map[string]string{},
+			}
+			s.world.SetBlock(lx, ly, lz, landBlock)
+			deadIDs = append(deadIDs, e.EntityID)
+			e.Dead = true
+			handler.BroadcastBlockChange(coreworld.BlockChange{X: lx, Y: ly, Z: lz, Block: landBlock}, s.sessions)
+			s.world.Entities.Remove(e.EntityID)
+			delete(s.mobAIs, e.EntityID)
+			continue
+		}
+
 		// ── Mob AI (wander / hostile) ─────────────────────────────────────────
 		endAI := s.timings.measure(sectionAI)
 		if isPassiveMob(e.Type) {
-			s.tickPassiveMobAI(e)
+			if s.tickPassiveMobAI(e) && e.Type == corentity.TypeVillager {
+				// Sleeping state changed: broadcast updated pose so all clients
+				// see the villager lie down or stand up.
+				handler.BroadcastVillagerMetadata(e, s.sessions)
+			}
 		} else if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
 			s.tickGolemAI(e)
 		}
@@ -590,6 +724,18 @@ func (s *Server) tickEntities() {
 		s.spawnHostileMobsNearPlayers()
 		endSpawnH()
 	}
+	// Sleeping: if all online players are sleeping, skip night.
+	s.tickSleep()
+	// Villager baby grow-up: every tick, age all babies; grow up after ~5 min.
+	s.tickVillagerAging()
+	// Villager breeding: every 2 minutes, villages with adults + free beds breed.
+	if s.worldAge%2400 == 0 && s.worldAge > 0 {
+		s.tickVillagerBreeding()
+	}
+	// Block physics: falling blocks + fluid spreading.
+	endBP := s.timings.measure(sectionBlockPhysics)
+	s.tickBlockPhysics()
+	endBP()
 	// Every 5 minutes: force a GC cycle and return freed pages to the OS.
 	// Go's runtime retains freed heap pages by default; this keeps RSS in check.
 	if s.worldAge%6000 == 0 && s.worldAge > 0 {
@@ -871,23 +1017,28 @@ func (s *Server) startPassiveMobPanic(e *corentity.Entity, hit coreworld.EntityD
 }
 
 // tickPassiveMobAI advances wander AI for a single passive mob.
+// Returns true if the entity's Sleeping state changed this tick (so the caller
+// can broadcast a pose metadata update).
 //
 // Villagers are homed: they stay within 8 blocks of their spawn point.
 // All other passive mobs roam freely, occasionally pausing.
-func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
+func (s *Server) tickPassiveMobAI(e *corentity.Entity) bool {
 	ai := s.mobAIFor(e)
+	wasAsleep := ai.sleepingWas
 
 	if ai.knockbackTick > 0 {
 		ai.knockbackTick--
 		e.Yaw = float32(math.Atan2(-ai.dirX, ai.dirZ) * 180 / math.Pi)
-		return
+		ai.sleepingWas = e.Sleeping
+		return wasAsleep != e.Sleeping
 	}
 
 	if ai.panicTick > 0 {
 		ai.panicTick--
 		e.VX, e.VZ = ai.dirX*0.28, ai.dirZ*0.28
 		e.Yaw = float32(math.Atan2(-ai.dirX, ai.dirZ) * 180 / math.Pi)
-		return
+		ai.sleepingWas = e.Sleeping
+		return wasAsleep != e.Sleeping
 	}
 
 	// Assigned villagers return to their own bed at night and stay there until
@@ -902,12 +1053,16 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 			if distance <= 0.6 {
 				e.VX, e.VZ = 0, 0
 				e.Sleeping = true
-				return
+				changed := !wasAsleep
+				ai.sleepingWas = true
+				return changed
 			}
 			e.Sleeping = false
 			e.VX, e.VZ = dx/distance*0.1, dz/distance*0.1
 			e.Yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
-			return
+			changed := wasAsleep
+			ai.sleepingWas = false
+			return changed
 		}
 		e.Sleeping = false
 	}
@@ -916,7 +1071,8 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 	if ai.pauseTick > 0 {
 		ai.pauseTick--
 		e.VX, e.VZ = 0, 0
-		return
+		ai.sleepingWas = e.Sleeping
+		return wasAsleep != e.Sleeping
 	}
 
 	ai.wanderTick--
@@ -927,7 +1083,8 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 			if ai.rng.Intn(4) == 0 {
 				ai.pauseTick = 40 + ai.rng.Intn(60) // 2–5 s pause
 				e.VX, e.VZ = 0, 0
-				return
+				ai.sleepingWas = e.Sleeping
+				return wasAsleep != e.Sleeping
 			}
 			angle := ai.rng.Float64() * 2 * math.Pi
 			ai.dirX = math.Cos(angle)
@@ -967,6 +1124,8 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) {
 		yawRad := math.Atan2(-ai.dirX, ai.dirZ)
 		e.Yaw = float32(yawRad * 180 / math.Pi)
 	}
+	ai.sleepingWas = e.Sleeping
+	return wasAsleep != e.Sleeping
 }
 
 // tickGolemAI handles iron and snow golem behaviour.
@@ -981,7 +1140,7 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 
 	if !ai.hasTarget {
 		// No target: wander like a homed passive mob near the village centre.
-		s.tickPassiveMobAI(e)
+		_ = s.tickPassiveMobAI(e)
 		return
 	}
 
@@ -1069,6 +1228,15 @@ func newRandomUUID() [16]byte {
 func (s *Server) handleConn(conn *network.ClientConn) {
 	s.connCount.Add(1)
 	defer s.connCount.Add(-1)
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("PANIC in connection goroutine — client disconnected",
+				"remote", conn.RemoteAddr(),
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
 
 	remote := conn.RemoteAddr()
 
@@ -1103,7 +1271,7 @@ func (s *Server) handleConn(conn *network.ClientConn) {
 		p := s.registerPlayer(result)
 		defer s.game.RemovePlayer(p.UUID)
 
-		if err := handler.HandlePlay(conn, p, s.world, s.chunkSender, s.sessions, s.cmds, s.regProvider, s.cfg.WorldSeed, int32(s.cfg.ViewDistance), int32(s.cfg.PreGenerateRadius)); err != nil {
+		if err := handler.HandlePlay(conn, p, s.world, s.chunkSender, s.sessions, s.cmds, s.regProvider, s.cfg.WorldSeed, func() int64 { return s.worldAge }, int32(s.cfg.ViewDistance), int32(s.cfg.PreGenerateRadius), s.game.NextEntityID); err != nil {
 			slog.Debug("play error", "remote", remote, "err", err)
 		}
 
@@ -1147,6 +1315,710 @@ func (s *Server) OnlineCount() int {
 // Config returns the server's configuration (read-only).
 func (s *Server) Config() *config.Config {
 	return s.cfg
+}
+
+// saveWorldAge writes the current worldAge to <worldDir>/gocraft_time.dat so
+// the day/night cycle survives server restarts.  Disk-only; no-op for memory worlds.
+func (s *Server) saveWorldAge() {
+	if s.cfg.WorldStorage != config.WorldStorageDisk {
+		return
+	}
+	path := s.cfg.WorldDir + "/gocraft_time.dat"
+	data := strconv.FormatInt(s.worldAge, 10)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		slog.Warn("could not save world age", "err", err)
+	}
+}
+
+// loadSavedWorldAge reads gocraft_time.dat from worldDir.
+// Returns (age, true) if the file exists and parses successfully.
+func loadSavedWorldAge(worldDir string) (int64, bool) {
+	data, err := os.ReadFile(worldDir + "/gocraft_time.dat")
+	if err != nil {
+		return 0, false
+	}
+	age, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil || age < 0 {
+		return 0, false
+	}
+	return age, true
+}
+
+// tickBlockPhysics drains all due block-physics updates and processes them:
+//   - updateFall: if the block is still a gravity block with air below, convert
+//     it to a FallingBlock entity and clear the world block.
+//   - updateFluid: spread water or lava into adjacent passable positions.
+func (s *Server) tickBlockPhysics() {
+	due := s.world.BlockPhysics.DrainDue(s.worldAge)
+
+	// Flush redstone — may produce visual changes and newly-powered loads.
+	redstone := s.world.Redstone.FlushUpdates()
+
+	if len(due) == 0 && len(redstone.Changes) == 0 {
+		return
+	}
+
+	var blockChanges []coreworld.BlockChange
+
+	for _, u := range due {
+		switch u.Kind {
+		case coreworld.UpdateFall:
+			s.processFallUpdate(u.X, u.Y, u.Z, &blockChanges)
+		case coreworld.UpdateFluid:
+			s.processFluidUpdate(u.X, u.Y, u.Z, &blockChanges)
+		case coreworld.UpdateLeafDecay:
+			s.processLeafDecayUpdate(u.X, u.Y, u.Z, &blockChanges)
+		case coreworld.UpdateFire:
+			s.processFireUpdate(u.X, u.Y, u.Z, &blockChanges)
+		case coreworld.UpdateIce:
+			s.processIceUpdate(u.X, u.Y, u.Z, &blockChanges)
+		}
+	}
+
+	// Activate loads that just received redstone power.
+	for _, pos := range redstone.PoweredLoads {
+		block := s.world.GetBlock(pos[0], pos[1], pos[2])
+		switch block.ResourceLocation() {
+		case "minecraft:tnt":
+			s.activateTNT(pos[0], pos[1], pos[2], &blockChanges)
+		}
+		// Pistons, dispensers, etc. can be added here.
+	}
+
+	blockChanges = append(blockChanges, redstone.Changes...)
+
+	// Broadcast all block changes to clients in one go.
+	for _, bc := range blockChanges {
+		handler.BroadcastBlockChange(bc, s.sessions)
+	}
+}
+
+// processFallUpdate converts a gravity block to a FallingBlock entity if it
+// still has no support below.
+func (s *Server) processFallUpdate(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	if !coreworld.IsGravityBlock(block.ResourceLocation()) {
+		return
+	}
+	below := s.world.GetBlock(x, y-1, z)
+	if coreworld.IsSolidLandingSurface(below.ResourceLocation()) {
+		return // still has support — no fall needed
+	}
+
+	// Remove block from world.
+	s.world.SetBlock(x, y, z, coreworld.Air)
+	*changes = append(*changes, coreworld.BlockChange{X: x, Y: y, Z: z, Block: coreworld.Air})
+
+	// Spawn a FallingBlock entity at the block's centre.
+	id := s.game.NextEntityID()
+	uuid := newRandomUUID()
+	fb := corentity.New(id, uuid, corentity.TypeFallingBlock,
+		float64(x)+0.5, float64(y), float64(z)+0.5)
+	fb.FallingBlockName = block.ResourceLocation()
+	fb.FallingBlockStateID = javaworld.StateID(block)
+	fb.VY = -0.04 // initial downward nudge
+	fb.OnGround = false
+	s.world.Entities.Add(fb)
+	handler.BroadcastSpawnMob(fb, s.sessions)
+}
+
+// processFluidUpdate spreads water or lava from (x,y,z) into adjacent air.
+func (s *Server) processFluidUpdate(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	name := block.ResourceLocation()
+	if !coreworld.IsFluidBlock(name) {
+		return
+	}
+	level := coreworld.FluidLevel(block)
+	if level < 0 {
+		return
+	}
+
+	isLava := name == "minecraft:lava"
+	// Lava spreads at most 3 blocks, water at most 7.
+	maxLevel := 7
+	if isLava {
+		maxLevel = 3
+	}
+	// Delay between spreads: water=5 ticks, lava=30 ticks.
+	spreadDelay := int64(5)
+	if isLava {
+		spreadDelay = 30
+	}
+
+	// Try to fall down first — falling fluid keeps the same level.
+	below := s.world.GetBlock(x, y-1, z)
+	belowName := below.ResourceLocation()
+
+	// Water+lava collision below.
+	if opposite := fluidOpposite(name); belowName == opposite {
+		result := fluidCollisionResult(name, below)
+		s.world.SetBlock(x, y-1, z, result)
+		*changes = append(*changes, coreworld.BlockChange{X: x, Y: y - 1, Z: z, Block: result})
+	} else if belowName == "minecraft:air" || belowName == "minecraft:cave_air" ||
+		belowName == "minecraft:void_air" || coreworld.IsFluidPassable(belowName) {
+		if y-1 >= coreworld.WorldMinY {
+			// Harden concrete powder if it falls into water.
+			if coreworld.IsFluidBlock(name) && name == "minecraft:water" &&
+				coreworld.IsConcretePowder(belowName) {
+				hardened := coreworld.Block{
+					Namespace:  "minecraft",
+					Name:       strings.TrimPrefix(coreworld.ConcreteName(belowName), "minecraft:"),
+					Properties: map[string]string{},
+				}
+				s.world.SetBlock(x, y-1, z, hardened)
+				*changes = append(*changes, coreworld.BlockChange{X: x, Y: y - 1, Z: z, Block: hardened})
+			} else {
+				newBlock := coreworld.MakeFluid(name, level) // falling keeps level
+				s.world.SetBlock(x, y-1, z, newBlock)
+				*changes = append(*changes, coreworld.BlockChange{X: x, Y: y - 1, Z: z, Block: newBlock})
+				s.world.BlockPhysics.ScheduleFluid(x, y-1, z, s.worldAge, spreadDelay)
+			}
+		}
+	}
+
+	// Spread horizontally if not too diluted.
+	if level < maxLevel {
+		newLevel := level + 1
+		dirs := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+		for _, d := range dirs {
+			nx, nz := x+d[0], z+d[1]
+			nb := s.world.GetBlock(nx, y, nz)
+			nbName := nb.ResourceLocation()
+
+			// Water+lava collision horizontal.
+			if opposite := fluidOpposite(name); nbName == opposite {
+				result := fluidCollisionResult(name, nb)
+				s.world.SetBlock(nx, y, nz, result)
+				*changes = append(*changes, coreworld.BlockChange{X: nx, Y: y, Z: nz, Block: result})
+				continue
+			}
+
+			// Harden concrete powder touched by water.
+			if name == "minecraft:water" && coreworld.IsConcretePowder(nbName) {
+				hardened := coreworld.Block{
+					Namespace:  "minecraft",
+					Name:       strings.TrimPrefix(coreworld.ConcreteName(nbName), "minecraft:"),
+					Properties: map[string]string{},
+				}
+				s.world.SetBlock(nx, y, nz, hardened)
+				*changes = append(*changes, coreworld.BlockChange{X: nx, Y: y, Z: nz, Block: hardened})
+				continue
+			}
+
+			// Only spread into air / passable — don't overwrite blocks.
+			if nbName == "minecraft:air" || nbName == "minecraft:cave_air" ||
+				nbName == "minecraft:void_air" || coreworld.IsFluidPassable(nbName) {
+				existingLevel := coreworld.FluidLevel(s.world.GetBlock(nx, y, nz))
+				if existingLevel < 0 || existingLevel > newLevel {
+					newBlock := coreworld.MakeFluid(name, newLevel)
+					s.world.SetBlock(nx, y, nz, newBlock)
+					*changes = append(*changes, coreworld.BlockChange{X: nx, Y: y, Z: nz, Block: newBlock})
+					s.world.BlockPhysics.ScheduleFluid(nx, y, nz, s.worldAge, spreadDelay)
+				}
+			}
+		}
+	}
+}
+
+// fluidOpposite returns the opposing fluid name for water/lava collision.
+func fluidOpposite(name string) string {
+	if name == "minecraft:water" {
+		return "minecraft:lava"
+	}
+	if name == "minecraft:lava" {
+		return "minecraft:water"
+	}
+	return ""
+}
+
+// fluidCollisionResult returns the block produced when fluid meets its opposite.
+// Vanilla rules:
+//   - Lava source (level 0) + water → obsidian
+//   - Flowing lava (level > 0) + water → cobblestone
+//   - Water + lava source → obsidian (lava wins)
+func fluidCollisionResult(fluid string, oppositeBlock coreworld.Block) coreworld.Block {
+	var lavaLevel int
+	if fluid == "minecraft:lava" {
+		lavaLevel = 0 // the spreading fluid is lava source
+	} else {
+		lavaLevel = coreworld.FluidLevel(oppositeBlock)
+	}
+	if lavaLevel == 0 {
+		return coreworld.Block{Namespace: "minecraft", Name: "obsidian", Properties: map[string]string{}}
+	}
+	return coreworld.Block{Namespace: "minecraft", Name: "cobblestone", Properties: map[string]string{}}
+}
+
+// ─── Leaf decay ──────────────────────────────────────────────────────────────
+
+// processLeafDecayUpdate checks if a leaf block is too far from any log and
+// decays it to air if so. Schedules adjacent leaves for re-check.
+func (s *Server) processLeafDecayUpdate(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	if !coreworld.IsLeafBlock(block.ResourceLocation()) {
+		return // already gone or changed
+	}
+	// Player-placed (persistent) leaves never decay.
+	if block.Properties["persistent"] == "true" {
+		return
+	}
+
+	// BFS to find nearest log within LeafDecayRadius steps.
+	type pos3 struct{ x, y, z int }
+	start := pos3{x, y, z}
+	visited := map[pos3]int{start: 0}
+	queue := []pos3{start}
+	found := false
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		d := visited[cur]
+		if d > coreworld.LeafDecayRadius {
+			break
+		}
+		for _, nb := range [6][3]int{
+			{cur.x + 1, cur.y, cur.z}, {cur.x - 1, cur.y, cur.z},
+			{cur.x, cur.y + 1, cur.z}, {cur.x, cur.y - 1, cur.z},
+			{cur.x, cur.y, cur.z + 1}, {cur.x, cur.y, cur.z - 1},
+		} {
+			p := pos3{nb[0], nb[1], nb[2]}
+			if _, seen := visited[p]; seen {
+				continue
+			}
+			nbName := s.world.GetBlock(nb[0], nb[1], nb[2]).ResourceLocation()
+			if coreworld.IsLogBlock(nbName) {
+				found = true
+				break
+			}
+			if coreworld.IsLeafBlock(nbName) {
+				visited[p] = d + 1
+				queue = append(queue, p)
+			}
+		}
+		if found {
+			break
+		}
+	}
+
+	if !found {
+		// Decay this leaf.
+		s.world.SetBlock(x, y, z, coreworld.Air)
+		*changes = append(*changes, coreworld.BlockChange{X: x, Y: y, Z: z, Block: coreworld.Air})
+		// Schedule adjacent leaves to re-check (they may now also be too far).
+		for _, nb := range [6][3]int{
+			{x + 1, y, z}, {x - 1, y, z},
+			{x, y + 1, z}, {x, y - 1, z},
+			{x, y, z + 1}, {x, y, z - 1},
+		} {
+			nbBlock := s.world.GetBlock(nb[0], nb[1], nb[2])
+			if coreworld.IsLeafBlock(nbBlock.ResourceLocation()) {
+				s.world.BlockPhysics.ScheduleLeafDecay(nb[0], nb[1], nb[2], s.worldAge, 5)
+			}
+		}
+	}
+}
+
+// ─── Fire spreading ──────────────────────────────────────────────────────────
+
+// fireTicksKey tracks how many fire-spread ticks have occurred at a position
+// so fire can self-extinguish after FireBurnTicks total ticks without fuel.
+// Stored as a per-server map since it's only written by the tick goroutine.
+var fireAgeMap = map[[3]int]int64{}
+
+// processFireUpdate spreads fire to adjacent flammable blocks and may burn out.
+func (s *Server) processFireUpdate(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	if !coreworld.IsFireBlock(block.ResourceLocation()) {
+		delete(fireAgeMap, [3]int{x, y, z})
+		return
+	}
+	below := s.world.GetBlock(x, y-1, z)
+
+	// Fire on netherrack / soul sand is permanent.
+	isPermanent := coreworld.IsNetherrack(below.ResourceLocation())
+
+	key := [3]int{x, y, z}
+	fireAgeMap[key]++
+	age := fireAgeMap[key]
+
+	// Burn out after FireBurnTicks if not on permanent fuel.
+	if !isPermanent && age > coreworld.FireBurnTicks {
+		s.world.SetBlock(x, y, z, coreworld.Air)
+		*changes = append(*changes, coreworld.BlockChange{X: x, Y: y, Z: z, Block: coreworld.Air})
+		delete(fireAgeMap, key)
+		return
+	}
+
+	fireBlock := coreworld.Block{Namespace: "minecraft", Name: "fire", Properties: map[string]string{}}
+
+	// Try to spread to adjacent flammable blocks (each direction independently).
+	dirs := [6][3]int{
+		{x + 1, y, z}, {x - 1, y, z},
+		{x, y + 1, z}, {x, y - 1, z},
+		{x, y, z + 1}, {x, y, z - 1},
+	}
+	for _, d := range dirs {
+		target := s.world.GetBlock(d[0], d[1], d[2])
+		tName := target.ResourceLocation()
+		score := coreworld.FlammabilityScore(tName)
+		if score <= 0 {
+			continue
+		}
+		// Probability check: higher score = more likely to ignite.
+		// Use a simple deterministic-ish check based on worldAge + position.
+		roll := int((s.worldAge + int64(d[0]*31+d[1]*17+d[2]*7)) % 100)
+		if roll >= score {
+			continue
+		}
+		// Ignite: if it's TNT, spawn primed TNT instead.
+		if tName == "minecraft:tnt" {
+			s.activateTNT(d[0], d[1], d[2], changes)
+			continue
+		}
+		// Place fire at the target position.
+		s.world.SetBlock(d[0], d[1], d[2], fireBlock)
+		*changes = append(*changes, coreworld.BlockChange{X: d[0], Y: d[1], Z: d[2], Block: fireBlock})
+		s.world.BlockPhysics.ScheduleFire(d[0], d[1], d[2], s.worldAge, 20)
+	}
+
+	// Reschedule this fire for next spread tick.
+	s.world.BlockPhysics.ScheduleFire(x, y, z, s.worldAge, 20+age%10)
+}
+
+// ─── Ice melting ─────────────────────────────────────────────────────────────
+
+// processIceUpdate melts an ice block to water if exposed above (no opaque block
+// directly above, indicating sky exposure / warmth).
+func (s *Server) processIceUpdate(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	if !coreworld.IsIceBlock(block.ResourceLocation()) {
+		return
+	}
+	// Packed/blue ice never melts.
+	if coreworld.IsPackedIce(block.ResourceLocation()) {
+		return
+	}
+	// Melt: replace with water.
+	water := coreworld.MakeFluid("minecraft:water", 0)
+	s.world.SetBlock(x, y, z, water)
+	*changes = append(*changes, coreworld.BlockChange{X: x, Y: y, Z: z, Block: water})
+	s.world.BlockPhysics.ScheduleFluid(x, y, z, s.worldAge, 5)
+}
+
+// ─── TNT ─────────────────────────────────────────────────────────────────────
+
+// activateTNT removes the TNT block and spawns a primed TNT entity with an 80-tick fuse.
+func (s *Server) activateTNT(x, y, z int, changes *[]coreworld.BlockChange) {
+	block := s.world.GetBlock(x, y, z)
+	if block.ResourceLocation() != "minecraft:tnt" {
+		return
+	}
+	s.world.SetBlock(x, y, z, coreworld.Air)
+	*changes = append(*changes, coreworld.BlockChange{X: x, Y: y, Z: z, Block: coreworld.Air})
+
+	id := s.game.NextEntityID()
+	uuid := newRandomUUID()
+	tnt := corentity.New(id, uuid, corentity.TypePrimedTNT,
+		float64(x)+0.5, float64(y), float64(z)+0.5)
+	tnt.FuseTicks = 80
+	tnt.VY = 0.2 // small upward pop like vanilla
+	s.world.Entities.Add(tnt)
+	handler.BroadcastSpawnMob(tnt, s.sessions)
+}
+
+// explodeTNT applies an explosion centred at (cx,cy,cz) with radius 4.
+// Destroys blocks in a rough sphere, damages nearby entities, and broadcasts
+// the block changes to all clients.
+func (s *Server) explodeTNT(cx, cy, cz float64) {
+	const radius = 4.0
+	var changes []coreworld.BlockChange
+
+	// Destroy blocks in explosion radius with probability based on distance.
+	for dx := -int(radius) - 1; dx <= int(radius)+1; dx++ {
+		for dy := -int(radius) - 1; dy <= int(radius)+1; dy++ {
+			for dz := -int(radius) - 1; dz <= int(radius)+1; dz++ {
+				dist := math.Sqrt(float64(dx*dx + dy*dy + dz*dz))
+				if dist > radius {
+					continue
+				}
+				bx := int(math.Round(cx)) + dx
+				by := int(math.Round(cy)) + dy
+				bz := int(math.Round(cz)) + dz
+				block := s.world.GetBlock(bx, by, bz)
+				name := block.ResourceLocation()
+				if name == "" || name == "minecraft:air" || name == "minecraft:bedrock" {
+					continue
+				}
+				// Probability: blocks at the edge have ~30% chance, centre ~100%.
+				breakChance := 1.0 - (dist / (radius * 1.3))
+				roll := float64((int64(bx*31+by*17+bz*7)+s.worldAge)%100) / 100.0
+				if roll > breakChance {
+					continue
+				}
+				// Chain TNT.
+				if name == "minecraft:tnt" {
+					s.activateTNT(bx, by, bz, &changes)
+					continue
+				}
+				s.world.SetBlock(bx, by, bz, coreworld.Air)
+				changes = append(changes, coreworld.BlockChange{X: bx, Y: by, Z: bz, Block: coreworld.Air})
+			}
+		}
+	}
+
+	// Damage nearby entities.
+	for _, e := range s.world.Entities.Snapshot() {
+		dx := e.Position.X - cx
+		dy := e.Position.Y - cy
+		dz := e.Position.Z - cz
+		dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+		if dist > radius*2 {
+			continue
+		}
+		damage := float32((1.0 - dist/(radius*2)) * 40)
+		if damage > 0 {
+			s.world.QueueEntityDamageFrom(e.EntityID, damage, cx, cz)
+		}
+	}
+
+	for _, bc := range changes {
+		handler.BroadcastBlockChange(bc, s.sessions)
+	}
+}
+
+// ─── Boat physics ────────────────────────────────────────────────────────────
+
+// tickBoatPhysics updates an unoccupied boat's position each tick.
+// Boats float on the water surface and decelerate from drag.
+func (s *Server) tickBoatPhysics(e *corentity.Entity) {
+	const boatDrag = 0.9
+	const boatGravity = -0.04
+	const minBoatVel = 0.001
+
+	bx := int(math.Floor(e.Position.X))
+	by := int(math.Floor(e.Position.Y))
+	bz := int(math.Floor(e.Position.Z))
+
+	// Check block at boat's Y and one below for water.
+	atBlock := s.world.GetBlock(bx, by, bz)
+	belowBlock := s.world.GetBlock(bx, by-1, bz)
+	inWater := coreworld.IsFluidBlock(atBlock.ResourceLocation())
+	onWater := coreworld.IsFluidBlock(belowBlock.ResourceLocation())
+
+	if inWater || onWater {
+		// Float: nudge Y to sit on the water surface.
+		targetY := float64(by) + 0.0625 // boats sit just above the water block
+		if onWater && !inWater {
+			targetY = float64(by) // sit on top of water block below
+		}
+		diff := targetY - e.Position.Y
+		e.VY = diff * 0.1
+		e.OnGround = false
+	} else if !e.OnGround {
+		// Apply gravity if airborne and not on water.
+		e.VY += boatGravity
+	} else {
+		e.VY = 0
+	}
+
+	e.Position.X += e.VX
+	e.Position.Y += e.VY
+	e.Position.Z += e.VZ
+
+	// Drag.
+	e.VX *= boatDrag
+	e.VZ *= boatDrag
+	if math.Abs(e.VX) < minBoatVel {
+		e.VX = 0
+	}
+	if math.Abs(e.VZ) < minBoatVel {
+		e.VZ = 0
+	}
+
+	// Ground detection (simplified: if boat sinks below a solid block, snap up).
+	groundY := float64(s.world.GroundYAtOrBelow(bx, bz, by+1))
+	if e.Position.Y < groundY+0.5 {
+		e.Position.Y = groundY + 0.5
+		e.VY = 0
+		e.OnGround = true
+	}
+}
+
+// babyGrowUpTicks is how many ticks a baby villager takes to become an adult.
+// 6000 ticks = 5 minutes at 20 TPS.
+const babyGrowUpTicks = 6000
+
+// sleepAnimTicks is the number of ticks the server waits after all players
+// fall asleep before skipping to morning.  At 20 TPS this is 2 seconds —
+// enough for the client to play the lying-down animation before the wake-up.
+const sleepAnimTicks = 40
+
+// tickSleep checks whether all online players are sleeping and, if so, waits
+// sleepAnimTicks for the animation to play, then skips the clock to morning
+// and wakes everyone.
+func (s *Server) tickSleep() {
+	sessions := s.sessions.SnapshotAll()
+	if len(sessions) == 0 {
+		s.sleepAllTick = 0
+		return
+	}
+	tod := s.worldAge % 24000
+	if tod < 12541 || tod > 23459 {
+		// Not night — clear stale sleeping flags.
+		for _, sess := range sessions {
+			if sess.Player != nil {
+				sess.Player.Sleeping = false
+			}
+		}
+		s.sleepAllTick = 0
+		return
+	}
+	total, sleeping := 0, 0
+	for _, sess := range sessions {
+		if sess.Player != nil {
+			total++
+			if sess.Player.Sleeping {
+				sleeping++
+			}
+		}
+	}
+	if total == 0 || sleeping < total {
+		// Not everyone sleeping — reset the timer if it was running.
+		s.sleepAllTick = 0
+		return
+	}
+	// All players are sleeping.
+	if s.sleepAllTick == 0 {
+		// First tick everyone is sleeping — start the animation countdown.
+		s.sleepAllTick = s.worldAge
+		return
+	}
+	if s.worldAge-s.sleepAllTick < sleepAnimTicks {
+		// Still within the animation window — wait.
+		return
+	}
+	// Animation window elapsed: skip night and wake everyone.
+	s.sleepAllTick = 0
+	handler.SkipNightAndWake(s.world, s.sessions)
+	tod2 := s.worldAge % 24000
+	if tod2 < 6000 {
+		s.worldAge += 6000 - tod2
+	} else {
+		s.worldAge += 24000 - tod2 + 6000
+	}
+	handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
+	_ = s.world.DrainTimeSkip()
+}
+
+// tickVillagerAging increments the age of every baby villager each tick and
+// grows them into adults when babyGrowUpTicks is reached.
+// Called by the entity tick goroutine — no locking needed.
+func (s *Server) tickVillagerAging() {
+	for _, e := range s.world.Entities.Snapshot() {
+		if e.Type != corentity.TypeVillager || !e.IsBaby || e.Dead {
+			continue
+		}
+		e.BabyAgeTicks++
+		if e.BabyAgeTicks >= babyGrowUpTicks {
+			e.IsBaby = false
+			e.BabyAgeTicks = 0
+			handler.BroadcastVillagerMetadata(e, s.sessions)
+			slog.Info("baby villager grew up", "id", e.EntityID,
+				"x", e.Position.X, "z", e.Position.Z)
+		}
+	}
+}
+
+// tickVillagerBreeding checks each village cluster and, when there are at least
+// 2 adults and at least one unoccupied bed, spawns a new baby villager.
+// Called every 2400 ticks (~2 minutes).
+func (s *Server) tickVillagerBreeding() {
+	all := s.world.Entities.Snapshot()
+
+	// Group villagers by village center (cluster key).
+	type villageInfo struct {
+		adults   []*corentity.Entity
+		babies   int
+		center   corentity.Entity // representative for center coords
+		occupied map[[3]int32]struct{}
+	}
+	villages := make(map[[2]int]*villageInfo)
+
+	for _, e := range all {
+		if e.Type != corentity.TypeVillager || !e.HasVillageHome || e.Dead {
+			continue
+		}
+		key := [2]int{int(e.VillageCenter.X / 64), int(e.VillageCenter.Z / 64)}
+		info := villages[key]
+		if info == nil {
+			info = &villageInfo{occupied: make(map[[3]int32]struct{})}
+			villages[key] = info
+		}
+		if e.IsBaby {
+			info.babies++
+		} else {
+			info.adults = append(info.adults, e)
+			bedKey := [3]int32{e.VillageBed.X, e.VillageBed.Y, e.VillageBed.Z}
+			info.occupied[bedKey] = struct{}{}
+		}
+	}
+
+	for _, info := range villages {
+		if len(info.adults) < 2 {
+			continue
+		}
+		// Cap babies at 1/3 of adults.
+		if info.babies*3 >= len(info.adults) {
+			continue
+		}
+		// Find an unoccupied bed among the adults' known beds.
+		var freeBed corentity.Entity
+		_ = freeBed
+		var parent *corentity.Entity
+		for _, adult := range info.adults {
+			// Check if a neighbouring bed slot is free.
+			bedKey := [3]int32{adult.VillageBed.X, adult.VillageBed.Y, adult.VillageBed.Z}
+			// Try adjacent X position for second-bed slot.
+			altKey := [3]int32{bedKey[0] + 2, bedKey[1], bedKey[2]}
+			if _, taken := info.occupied[altKey]; !taken {
+				parent = adult
+				break
+			}
+			altKey2 := [3]int32{bedKey[0] - 2, bedKey[1], bedKey[2]}
+			if _, taken := info.occupied[altKey2]; !taken {
+				parent = adult
+				break
+			}
+		}
+		if parent == nil {
+			parent = info.adults[s.spawnRNG.Intn(len(info.adults))]
+		}
+
+		// Spawn the baby near the parent.
+		id := s.game.NextEntityID()
+		uuid := newRandomUUID()
+		bx := parent.Position.X + (s.spawnRNG.Float64()-0.5)*4
+		bz := parent.Position.Z + (s.spawnRNG.Float64()-0.5)*4
+		by := parent.Position.Y
+		baby := corentity.New(id, uuid, corentity.TypeVillager, bx, by, bz)
+		baby.VillagerVariant = parent.VillagerVariant
+		baby.VillagerProfession = corentity.VillagerProfessionNone // babies have no profession
+		baby.VillagerLevel = 1
+		baby.HasVillageHome = parent.HasVillageHome
+		baby.VillageHome = parent.VillageHome
+		baby.VillageCenter = parent.VillageCenter
+		baby.VillageBed = parent.VillageBed
+		baby.VillageWorkstation = parent.VillageWorkstation
+		baby.IsBaby = true
+		baby.OnGround = true
+		s.world.Entities.Add(baby)
+		handler.BroadcastSpawnMob(baby, s.sessions)
+		slog.Info("villager baby born", "id", id,
+			"x", bx, "z", bz,
+			"centerX", parent.VillageCenter.X, "centerZ", parent.VillageCenter.Z,
+			"adults", len(info.adults), "babies", info.babies)
+	}
 }
 
 // Shutdown closes the listener immediately.

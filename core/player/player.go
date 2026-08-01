@@ -69,6 +69,21 @@ type Player struct {
 	// It is assigned by the game core when the player joins.
 	EntityID int32
 
+	// VehicleEntityID is the entity ID of the vehicle the player is currently
+	// riding, or 0 if the player is on foot.
+	VehicleEntityID int32
+
+	// SpawnPoint is the player's individual respawn position (set by sleeping in
+	// a bed).  HasSpawnPoint is false until the player has slept in a bed, in
+	// which case the world spawn is used on death.
+	SpawnPoint    spatial.BlockPos
+	HasSpawnPoint bool
+
+	// Sleeping is true while the player is in the sleep-request state (they
+	// right-clicked a bed at night).  The server tick checks this to decide
+	// when all players are sleeping and the night can be skipped.
+	Sleeping bool
+
 	// Inventory holds the player's item slots.
 	// See the InventorySize / HotbarStart constants for the slot layout.
 	Inventory [InventorySize]ItemStack

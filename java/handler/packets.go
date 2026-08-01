@@ -99,6 +99,7 @@ var (
 	packetIDUpdateMobEffect        = protocoldata.MustCB("play", "minecraft:update_mob_effect")
 	packetIDUpdateAttributes       = protocoldata.MustCB("play", "minecraft:update_attributes")
 	packetIDUpdateRecipes          = protocoldata.MustCB("play", "minecraft:update_recipes")
+	packetIDSetPassengers          = protocoldata.MustCB("play", "minecraft:set_passengers")
 )
 
 // ── Play state — serverbound (C→S) ───────────────────────────────────────────
@@ -122,4 +123,7 @@ var (
 	packetIDInteract                     = protocoldata.MustSB("play", "minecraft:interact")
 	packetIDContainerClick               = protocoldata.MustSB("play", "minecraft:container_click")
 	packetIDContainerClose               = protocoldata.MustSB("play", "minecraft:container_close")
+	packetIDMoveVehicle                  = protocoldata.MustSB("play", "minecraft:move_vehicle")
+	packetIDPlayerInput                  = protocoldata.MustSB("play", "minecraft:player_input")
+	packetIDPlayerCommand                = protocoldata.MustSB("play", "minecraft:player_command")
 )

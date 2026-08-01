@@ -164,10 +164,16 @@ type villageBuilding struct {
 // residents, ensuring every spawned villager refers to a generated house.
 func (g *OverworldGenerator) villageLayout(v VillageCenter) []villageBuilding {
 	state := v.Hash
-	buildingCount := 4 + int(nextRandom(&state)*4)
+	buildingCount := 10 + int(nextRandom(&state)*6) // 10–15 buildings per village
 	offsets := [][2]int{
+		// Inner ring — 4 cardinal, 4 diagonal
 		{14, 0}, {-14, 0}, {0, 14}, {0, -14},
 		{12, 12}, {-12, 12}, {12, -12}, {-12, -12},
+		// Outer ring — more houses further from center
+		{22, 0}, {-22, 0}, {0, 22}, {0, -22},
+		{20, 10}, {-20, 10}, {20, -10}, {-20, -10},
+		{10, 20}, {-10, 20}, {10, -20}, {-10, -20},
+		{28, 6}, {-28, 6}, {28, -6}, {-28, -6},
 	}
 	buildings := make([]villageBuilding, 0, buildingCount)
 	for i := 0; i < buildingCount && i < len(offsets); i++ {
@@ -183,11 +189,11 @@ func (g *OverworldGenerator) villageLayout(v VillageCenter) []villageBuilding {
 			continue
 		}
 		building := villageBuilding{centerX: x, groundY: y, centerZ: z, width: 7, depth: 5, variant: i}
-		switch i % 5 {
+		switch i % 6 {
 		case 0:
 			building.farm = true
-		case 4:
-			building.width, building.depth = 9, 7
+		case 3:
+			building.width, building.depth = 9, 7 // larger house fits 2 beds comfortably
 		}
 		buildings = append(buildings, building)
 	}
@@ -218,7 +224,7 @@ func (g *OverworldGenerator) VillageResidents(v VillageCenter) []VillageResident
 			houses = append(houses, building)
 		}
 	}
-	residents := make([]VillageResident, 0, len(houses))
+	residents := make([]VillageResident, 0, len(houses)*2)
 	for i, house := range houses {
 		hw, hd := house.width/2, house.depth/2
 		workstation := spatial.BlockPos{X: int32(house.centerX + hw - 1), Y: int32(house.groundY + 1), Z: int32(house.centerZ - hd + 1)}
@@ -228,14 +234,29 @@ func (g *OverworldGenerator) VillageResidents(v VillageCenter) []VillageResident
 			profession = entity.VillagerProfessionFarmer
 			workstation = spatial.BlockPos{X: int32(farm.centerX + 2), Y: int32(farm.groundY), Z: int32(farm.centerZ + 2)}
 		}
+		center := spatial.BlockPos{X: int32(v.WorldX), Y: int32(g.SurfaceHeight(v.WorldX, v.WorldZ) + 1), Z: int32(v.WorldZ)}
+		home := spatial.BlockPos{X: int32(house.centerX), Y: int32(house.groundY + 1), Z: int32(house.centerZ)}
+		spawnPos := spatial.BlockPos{X: int32(house.centerX), Y: int32(g.SurfaceHeight(house.centerX, house.centerZ+hd+1) + 1), Z: int32(house.centerZ + hd + 1)}
+
+		// Resident 1 — left bed
+		bed1 := spatial.BlockPos{X: int32(house.centerX - hw + 2), Y: int32(house.groundY + 1), Z: int32(house.centerZ + hd - 1)}
 		residents = append(residents, VillageResident{
-			Home:        spatial.BlockPos{X: int32(house.centerX), Y: int32(house.groundY + 1), Z: int32(house.centerZ)},
-			Center:      spatial.BlockPos{X: int32(v.WorldX), Y: int32(g.SurfaceHeight(v.WorldX, v.WorldZ) + 1), Z: int32(v.WorldZ)},
-			Spawn:       spatial.BlockPos{X: int32(house.centerX), Y: int32(g.SurfaceHeight(house.centerX, house.centerZ+hd+1) + 1), Z: int32(house.centerZ + hd + 1)},
-			Bed:         spatial.BlockPos{X: int32(house.centerX - hw + 2), Y: int32(house.groundY + 1), Z: int32(house.centerZ + hd - 2)},
-			Workstation: workstation,
-			Profession:  profession,
+			Home: home, Center: center, Spawn: spawnPos,
+			Bed: bed1, Workstation: workstation, Profession: profession,
 		})
+
+		// Resident 2 — right bed (only present when house is wide enough)
+		if hw >= 3 {
+			bed2 := spatial.BlockPos{X: int32(house.centerX + hw - 2), Y: int32(house.groundY + 1), Z: int32(house.centerZ + hd - 1)}
+			profession2 := villageProfessionForVariant(house.variant + 1)
+			residents = append(residents, VillageResident{
+				Home: home, Center: center,
+				Spawn:       spatial.BlockPos{X: spawnPos.X + 2, Y: spawnPos.Y, Z: spawnPos.Z},
+				Bed:         bed2,
+				Workstation: workstation,
+				Profession:  profession2,
+			})
+		}
 	}
 	return residents
 }
@@ -276,6 +297,33 @@ func (g *OverworldGenerator) addVillageStructures(c *Chunk) {
 			}
 		}
 	}
+}
+
+// addBedBlockEntity appends a bed block entity record to c so the Java client
+// renders the correct bed model. Beds require a block entity with their dye
+// color in NBT (color=14 for red).
+//
+// Network NBT format for a red bed:
+//
+//	TAG_Compound '' { color: TAG_Int(14) }
+func addBedBlockEntity(c *Chunk, wx, y, wz int) {
+	// Network NBT (1.20.2+): root compound has NO name field — just type byte
+	// then payload. Format: TAG_Compound(0x0a) | TAG_Int "color"=14 | TAG_End.
+	nbt := []byte{
+		0x0a,                               // TAG_Compound (root, no name in network NBT)
+		0x03,                               // TAG_Int type
+		0x00, 0x05,                         // name length=5
+		'c', 'o', 'l', 'o', 'r',           // "color"
+		0x00, 0x00, 0x00, 0x0e,             // value=14 (red, big-endian)
+		0x00,                               // TAG_End
+	}
+	c.BlockEntities = append(c.BlockEntities, BlockEntity{
+		X:    wx,
+		Y:    y,
+		Z:    wz,
+		Type: "minecraft:bed",
+		Data: nbt,
+	})
 }
 
 // setVB places block b at world coordinates (wx, y, wz), skipping if outside c.
@@ -426,15 +474,24 @@ func (g *OverworldGenerator) placeVillageHouse(c *Chunk, cx, gy, cz, width, dept
 		setVB(c, cx, ridgeY, z, style.roof)
 	}
 
-	// Every house has a bed and a profession workstation. The server's current
-	// villager trading remains intentionally simple, but the generated village
-	// now has the job-site blocks expected by vanilla village layouts.
-	bedX := cx - hw + 2
-	bedFootZ := cz + hd - 1
+	// Each house has two beds (one per side of the back wall) so that two
+	// villagers can share a home, and a workstation near the front corner.
 	bedFoot := blockProps("red_bed", "facing", "north", "occupied", "false", "part", "foot")
 	bedHead := blockProps("red_bed", "facing", "north", "occupied", "false", "part", "head")
-	setVB(c, bedX, gy+1, bedFootZ, bedFoot)
-	setVB(c, bedX, gy+1, bedFootZ-1, bedHead)
+	// Bed 1 — left side of the back wall
+	bed1X := cx - hw + 2
+	setVB(c, bed1X, gy+1, cz+hd-1, bedFoot)
+	setVB(c, bed1X, gy+1, cz+hd-2, bedHead)
+	addBedBlockEntity(c, bed1X, gy+1, cz+hd-1)
+	addBedBlockEntity(c, bed1X, gy+1, cz+hd-2)
+	// Bed 2 — right side of the back wall (only fits when width >= 7)
+	if hw >= 3 {
+		bed2X := cx + hw - 2
+		setVB(c, bed2X, gy+1, cz+hd-1, bedFoot)
+		setVB(c, bed2X, gy+1, cz+hd-2, bedHead)
+		addBedBlockEntity(c, bed2X, gy+1, cz+hd-1)
+		addBedBlockEntity(c, bed2X, gy+1, cz+hd-2)
+	}
 
 	workstation := villageWorkstation(variant)
 	setVB(c, cx+hw-1, gy+1, cz-hd+1, workstation)

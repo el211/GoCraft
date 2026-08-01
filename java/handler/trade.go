@@ -21,6 +21,7 @@ import (
 	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
+	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
 )
 
@@ -100,7 +101,7 @@ var defaultVillagerTrades = []tradeOffer{
 //
 // If the targeted entity is a villager and the interaction is INTERACT with the
 // main hand, the trading UI is opened.
-func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, conn *network.ClientConn) error {
+func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, conn *network.ClientConn, mgr *session.Manager) error {
 	r := pkt.Reader()
 
 	entityID, err := protocol.ReadVarInt(r)
@@ -159,7 +160,20 @@ func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.W
 	}
 
 	entity, ok := w.Entities.Get(entityID)
-	if !ok || entity.Type != corentity.TypeVillager {
+	if !ok {
+		return nil
+	}
+
+	// Boat boarding: right-clicking a boat mounts the player.
+	if corentity.IsBoat(entity.Type) {
+		if p.VehicleEntityID == 0 {
+			MountPlayer(p, entity.EntityID, w, mgr)
+			slog.Info("player boarded boat", "player", p.Username, "boatID", entity.EntityID)
+		}
+		return nil
+	}
+
+	if entity.Type != corentity.TypeVillager {
 		return nil
 	}
 

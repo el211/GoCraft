@@ -53,7 +53,7 @@ const keepAliveTimeout = 30 * time.Second
 //	C→S  Confirm Teleport (ID 1)   (0x00)
 //	S→C  Level Chunk With Light    (0x28) × (2·viewRadius+1)² — initial burst
 //	     … keep-alive / movement / play loop …
-func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, sender *javaworld.Sender, mgr *session.Manager, cmds *Dispatcher, reg registry.Provider, worldSeed int64, viewDistance, preGenerateRadius int32) error {
+func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, sender *javaworld.Sender, mgr *session.Manager, cmds *Dispatcher, reg registry.Provider, worldSeed int64, worldAge func() int64, viewDistance, preGenerateRadius int32, nextEntityID func() int32) error {
 	// ── Initial burst ────────────────────────────────────────────────────────
 	if viewDistance < 2 {
 		viewDistance = 2
@@ -113,6 +113,11 @@ func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, 
 	if err := conn.WritePacket(buildCommandsPacket()); err != nil {
 		return fmt.Errorf("play: %w", err)
 	}
+	// Send the current time so the client shows the correct sky/lighting immediately.
+	age := worldAge()
+	if err := conn.WritePacket(buildSetTime(age, age%24000)); err != nil {
+		return fmt.Errorf("play: set time: %w", err)
+	}
 
 	slog.Info("player entered play state",
 		"remote", conn.RemoteAddr(),
@@ -120,7 +125,7 @@ func HandlePlay(conn *network.ClientConn, p *player.Player, w *coreworld.World, 
 		"uuid", p.UUID,
 	)
 
-	return playLoop(conn, p, teleportID, w, sender, mgr, cmds, viewDistance, preGenerateRadius)
+	return playLoop(conn, p, teleportID, w, sender, mgr, cmds, viewDistance, preGenerateRadius, nextEntityID)
 }
 
 // ── Clientbound packet helpers ────────────────────────────────────────────────
@@ -426,7 +431,7 @@ func sendForgetChunk(conn *network.ClientConn, cx, cz int32) error {
 //     chunk boundary.
 //
 // On exit the session is removed from mgr and all other players are notified.
-func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32, w *coreworld.World, sender *javaworld.Sender, mgr *session.Manager, cmds *Dispatcher, viewRadius, preGenerateRadius int32) error {
+func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32, w *coreworld.World, sender *javaworld.Sender, mgr *session.Manager, cmds *Dispatcher, viewRadius, preGenerateRadius int32, nextEntityID func() int32) error {
 	// Must receive Confirm Teleport for the spawn position before anything else.
 	if err := readConfirmTeleport(conn, spawnTeleportID); err != nil {
 		return fmt.Errorf("play loop: %w", err)
@@ -542,9 +547,27 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 			return fmt.Errorf("play loop: reading packet: %w", err)
 		}
 
+		// Save position before the packet mutates it so we can revert if needed.
+		prevX, prevY, prevZ := p.Position.X, p.Position.Y, p.Position.Z
+
 		posChanged, err := handlePlayPacket(pkt, p, &pendingAliveID)
 		if err != nil {
 			return fmt.Errorf("play loop: packet 0x%02X: %w", pkt.ID, err)
+		}
+
+		// If the player moved into a chunk the client hasn't received yet,
+		// bounce them back to their previous position.  This matches vanilla's
+		// "Loading terrain…" behaviour: movement is gated on chunk delivery.
+		if posChanged {
+			destCX := int32(posToChunk(p.Position.X))
+			destCZ := int32(posToChunk(p.Position.Z))
+			if _, alreadySent := sentChunks[[2]int32{destCX, destCZ}]; !alreadySent {
+				p.Position.X, p.Position.Y, p.Position.Z = prevX, prevY, prevZ
+				_ = sendSyncPosition(conn, p, 0)
+				// Queue the ahead chunks so they arrive as fast as possible.
+				w.QueuePregeneration(destCX, destCZ, 2)
+				posChanged = false
+			}
 		}
 
 		// Broadcast position/rotation to all other sessions on every movement.
@@ -561,15 +584,32 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 
 		// Block interaction needs both the world and the session manager.
 		if pkt.ID == packetIDPlayerAction || pkt.ID == packetIDUseItemOn {
-			if err := handleBlockPacket(pkt, p, w, mgr, conn); err != nil {
+			if err := handleBlockPacket(pkt, p, w, mgr, conn, nextEntityID); err != nil {
 				slog.Warn("block interaction error", "player", p.Username, "err", err)
 			}
 		}
 
-		// Entity interaction (right-click mob) — used for villager trading.
+		// Entity interaction (right-click mob) — villager trading + boat mount.
 		if pkt.ID == packetIDInteract {
-			if err := handleInteractPacket(pkt, p, w, conn); err != nil {
+			if err := handleInteractPacket(pkt, p, w, conn, mgr); err != nil {
 				slog.Warn("interact error", "player", p.Username, "err", err)
+			}
+		}
+
+		// Boat / vehicle packets.
+		if pkt.ID == packetIDMoveVehicle {
+			if err := HandleMoveVehiclePacket(pkt, p, w, conn, mgr); err != nil {
+				slog.Warn("move_vehicle error", "player", p.Username, "err", err)
+			}
+		}
+		if pkt.ID == packetIDPlayerInput {
+			if err := HandlePlayerInputPacket(pkt, p, w, conn, mgr); err != nil {
+				slog.Warn("player_input error", "player", p.Username, "err", err)
+			}
+		}
+		if pkt.ID == packetIDPlayerCommand {
+			if err := HandlePlayerCommandPacket(pkt, p, w, conn, mgr); err != nil {
+				slog.Warn("player_command error", "player", p.Username, "err", err)
 			}
 		}
 

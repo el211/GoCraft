@@ -18,11 +18,12 @@ const (
 	sectionTime                            // time-of-day, crop ticks, time-skip drain
 	sectionSpawnPassive                    // passive mob natural spawn loop
 	sectionSpawnHostile                    // hostile mob natural spawn loop
+	sectionBlockPhysics                    // falling blocks + fluid spreading
 	sectionCount
 )
 
 var sectionNames = [sectionCount]string{
-	"damage", "mob-ai", "physics", "broadcast", "time/crops", "spawn-passive", "spawn-hostile",
+	"damage", "mob-ai", "physics", "broadcast", "time/crops", "spawn-passive", "spawn-hostile", "block-physics",
 }
 
 // windowSize is the number of ticks kept in the rolling timing window.
@@ -173,7 +174,7 @@ func (t *tickTimings) Report() string {
 		if avgMs > 0 {
 			pct = sectionAvgMs[s] / avgMs * 100
 		}
-		bar := progressBar(pct, 20)
+		bar := progressBar(pct, 20, sectionAvgMs[s])
 		lines = append(lines, fmt.Sprintf(
 			"  §7%-15s §f%7.3f ms  %s §8%.1f%%",
 			sectionNames[s], sectionAvgMs[s], bar, pct,
@@ -195,24 +196,29 @@ func (t *tickTimings) Report() string {
 	}
 	lines = append(lines, fmt.Sprintf(
 		"  §7%-15s §f%7.3f ms  %s §8%.1f%%",
-		"other/overhead", other, progressBar(otherPct, 20), otherPct,
+		"other/overhead", other, progressBar(otherPct, 20, other), otherPct,
 	))
 
 	lines = append(lines, "§e━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	return strings.Join(lines, "\n")
 }
 
-// progressBar returns a coloured ASCII bar representing pct out of 100.
-func progressBar(pct float64, width int) string {
+// progressBar returns a coloured ASCII bar.
+// Color is based on the absolute millisecond value of the section, not its
+// percentage share, so a dominant-but-fast section stays green.
+//   - green  : absMs < 5 ms   (healthy)
+//   - yellow : absMs < 15 ms  (worth watching)
+//   - red    : absMs >= 15 ms (genuinely slow)
+func progressBar(pct float64, width int, absMs float64) string {
 	filled := int(pct / 100 * float64(width))
 	if filled > width {
 		filled = width
 	}
 	color := "§a"
 	switch {
-	case pct > 60:
+	case absMs >= 15:
 		color = "§c"
-	case pct > 30:
+	case absMs >= 5:
 		color = "§e"
 	}
 	return color + strings.Repeat("|", filled) + "§8" + strings.Repeat("|", width-filled)

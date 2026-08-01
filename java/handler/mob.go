@@ -45,6 +45,11 @@ func buildSpawnMob(e *corentity.Entity) (*protocol.Packet, bool) {
 	vx := velToShort(e.VX)
 	vy := velToShort(e.VY)
 	vz := velToShort(e.VZ)
+	// For falling_block entities the data field carries the block state ID.
+	data := int32(0)
+	if e.Type == corentity.TypeFallingBlock {
+		data = e.FallingBlockStateID
+	}
 	return protocol.NewBuilder(packetIDSpawnEntity).
 		VarInt(e.EntityID).
 		UUID(protocol.UUID(e.UUID)).
@@ -55,7 +60,7 @@ func buildSpawnMob(e *corentity.Entity) (*protocol.Packet, bool) {
 		Byte(degToAngle(e.Pitch)).
 		Byte(degToAngle(e.Yaw)).
 		Byte(degToAngle(e.Yaw)). // head yaw = body yaw at spawn
-		VarInt(0).               // data (type-specific; 0 = default state)
+		VarInt(data).
 		Short(vx).Short(vy).Short(vz).
 		Build(), true
 }
@@ -63,6 +68,7 @@ func buildSpawnMob(e *corentity.Entity) (*protocol.Packet, bool) {
 // buildMobMetadata returns the initial tracked data required for mob variants.
 // In 1.21.4 a villager's data accessor is index 18, serializer 19, followed by
 // registry VarInts for type and profession and a VarInt career level.
+// Pose (index 6, type 21) is included: 9=SLEEPING, 0=STANDING.
 func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 	if e.Type != corentity.TypeVillager {
 		return nil
@@ -73,15 +79,37 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 	} else if level > 5 {
 		level = 5
 	}
-	return protocol.NewBuilder(packetIDSetEntityData).
-		VarInt(e.EntityID).
-		Byte(18).   // DATA_VILLAGER_DATA metadata index
-		VarInt(19). // VILLAGER_DATA serializer ID
+	pose := int32(0) // STANDING
+	if e.Sleeping {
+		pose = 9 // SLEEPING
+	}
+	b := protocol.NewBuilder(packetIDSetEntityData).VarInt(e.EntityID)
+	if e.IsBaby {
+		b = b.Byte(16).VarInt(8).Bool(true) // AgeableMob DATA_BABY_ID (index 16, Boolean type 8)
+	}
+	return b.
+		Byte(6).VarInt(21).VarInt(pose). // Pose
+		Byte(18).                         // DATA_VILLAGER_DATA metadata index
+		VarInt(19).                       // VILLAGER_DATA serializer ID
 		VarInt(villagerVariantProtocolID(e.VillagerVariant)).
 		VarInt(villagerProfessionProtocolID(e.VillagerProfession)).
 		VarInt(level).
 		Byte(0xff). // metadata list terminator
 		Build()
+}
+
+// BroadcastVillagerMetadata sends a Set Entity Data packet for a villager to
+// all connected sessions — used when a baby villager grows into an adult.
+func BroadcastVillagerMetadata(e *corentity.Entity, mgr *session.Manager) {
+	pkt := buildMobMetadata(e)
+	if pkt == nil {
+		return
+	}
+	go func() {
+		for _, s := range mgr.SnapshotAll() {
+			_ = s.Conn.WritePacket(pkt)
+		}
+	}()
 }
 
 func villagerVariantProtocolID(variant corentity.VillagerVariant) int32 {
@@ -294,14 +322,59 @@ func SendPlayerKnockback(conn *network.ClientConn, playerEntityID int32, vx, vy,
 	_ = conn.WritePacket(pkt)
 }
 
+// ── Sleep animation ───────────────────────────────────────────────────────────
+
+// buildPlayerPoseMetadata builds a Set Entity Data packet that changes a
+// player entity's pose.  In 1.21.4 the Pose field is metadata index 6,
+// serializer type 21 (Pose enum), encoded as a VarInt.
+//
+// Canonical pose values:
+//
+//	0 = STANDING
+//	9 = SLEEPING
+func buildPlayerPoseMetadata(entityID int32, pose int32) *protocol.Packet {
+	return protocol.NewBuilder(packetIDSetEntityData).
+		VarInt(entityID).
+		Byte(6).    // index 6 = Pose
+		VarInt(21). // type 21 = Pose (VarInt enum)
+		VarInt(pose).
+		Byte(0xFF). // metadata terminator
+		Build()
+}
+
+// BroadcastPlayerSleeping sends the SLEEPING pose (9) for the given entity to
+// all connected sessions, including the sleeping player themselves — the client
+// shows the lying-in-bed animation when it sees its own pose change.
+func BroadcastPlayerSleeping(entityID int32, mgr *session.Manager) {
+	pkt := buildPlayerPoseMetadata(entityID, 9)
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// BroadcastPlayerWaking sends the STANDING pose (0) for the given entity to
+// all connected sessions, ending the sleep animation.
+func BroadcastPlayerWaking(entityID int32, mgr *session.Manager) {
+	pkt := buildPlayerPoseMetadata(entityID, 0)
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// buildSetTime builds a Set Time (minecraft:set_time) packet.
+// age = world age (total ticks), dayTime = time of day (0–23999).
+func buildSetTime(age, dayTime int64) *protocol.Packet {
+	return protocol.NewBuilder(packetIDSetTime).
+		Long(age).
+		Long(dayTime).
+		Bool(true). // time_of_day_increasing — server controls the clock
+		Build()
+}
+
 // DispatchWorldTime synchronizes the Java client day/night cycle with the
 // simulation clock without blocking the entity tick on socket writes.
 func DispatchWorldTime(age, dayTime int64, mgr *session.Manager) {
-	pkt := protocol.NewBuilder(packetIDSetTime).
-		Long(age).
-		Long(dayTime).
-		Bool(true).
-		Build()
+	pkt := buildSetTime(age, dayTime)
 	go func() {
 		for _, session := range mgr.SnapshotAll() {
 			_ = session.Conn.WritePacket(pkt)

@@ -126,6 +126,16 @@ func buildCommandsPacket() *protocol.Packet {
 		rootChildren = append(rootChildren, addLiteral(command, false, speedValue(), speedReset()))
 	}
 
+	timeSetValue := addArgument("value", parserInteger, true, integerBounds(0, 23999))
+	timeSetLiteral := addLiteral("set", false, timeSetValue)
+	rootChildren = append(rootChildren,
+		addLiteral("time", true,
+			addLiteral("day", true),
+			addLiteral("night", true),
+			timeSetLiteral,
+		),
+	)
+
 	nodes[0].children = rootChildren
 
 	b := protocol.NewBuilder(packetIDCommands).VarInt(int32(len(nodes)))

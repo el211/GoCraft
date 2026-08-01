@@ -78,7 +78,30 @@ const (
 	TypeTropicalFish    EntityType = "minecraft:tropical_fish"
 	TypeTurtle          EntityType = "minecraft:turtle"
 	TypeVillager        EntityType = "minecraft:villager"
+	TypeFallingBlock    EntityType = "minecraft:falling_block"
+	TypePrimedTNT       EntityType = "minecraft:tnt"
 	TypeWanderingTrader EntityType = "minecraft:wandering_trader"
+
+	// ── Boats ────────────────────────────────────────────────────────────────
+	TypeOakBoat       EntityType = "minecraft:oak_boat"
+	TypeSpruceBoat    EntityType = "minecraft:spruce_boat"
+	TypeBirchBoat     EntityType = "minecraft:birch_boat"
+	TypeJungleBoat    EntityType = "minecraft:jungle_boat"
+	TypeAcaciaBoat    EntityType = "minecraft:acacia_boat"
+	TypeDarkOakBoat   EntityType = "minecraft:dark_oak_boat"
+	TypeMangroveBoat  EntityType = "minecraft:mangrove_boat"
+	TypeCherryBoat    EntityType = "minecraft:cherry_boat"
+	TypeBambooRaft    EntityType = "minecraft:bamboo_raft"
+
+	TypeOakChestBoat      EntityType = "minecraft:oak_chest_boat"
+	TypeSpruceChestBoat   EntityType = "minecraft:spruce_chest_boat"
+	TypeBirchChestBoat    EntityType = "minecraft:birch_chest_boat"
+	TypeJungleChestBoat   EntityType = "minecraft:jungle_chest_boat"
+	TypeAcaciaChestBoat   EntityType = "minecraft:acacia_chest_boat"
+	TypeDarkOakChestBoat  EntityType = "minecraft:dark_oak_chest_boat"
+	TypeMangroveChestBoat EntityType = "minecraft:mangrove_chest_boat"
+	TypeCherryChestBoat   EntityType = "minecraft:cherry_chest_boat"
+	TypeBambooChestRaft   EntityType = "minecraft:bamboo_chest_raft"
 	TypeZombieHorse     EntityType = "minecraft:zombie_horse"
 
 	// ── Neutral / tameable mobs ───────────────────────────────────────────────
@@ -169,6 +192,29 @@ type Entity struct {
 	VillageBed         spatial.BlockPos
 	VillageWorkstation spatial.BlockPos
 	Sleeping           bool
+
+	// FallingBlock fields — only used when Type == TypeFallingBlock.
+	// FallingBlockStateID is the Java global block-state ID sent in the Spawn
+	// Entity data field so the client renders the correct block during the fall.
+	// FallingBlockName is the resource location placed when the entity lands.
+	FallingBlockStateID int32
+	FallingBlockName    string
+
+	// PrimedTNT fields — only used when Type == TypePrimedTNT.
+	// FuseTicks counts down from 80 to 0; at 0 the entity explodes.
+	FuseTicks int32
+
+	// Boat / vehicle fields.
+	// RiderEntityID is the entity ID of the passenger currently riding this
+	// entity, or 0 if unoccupied. Only one rider is tracked (vanilla boats
+	// allow two but we implement one for simplicity).
+	RiderEntityID int32
+
+	// IsBaby marks an ageable entity (villager) as a child.
+	// BabyAgeTicks counts upward from 0; the tick goroutine grows the villager
+	// up once BabyAgeTicks reaches BabyGrowUpTicks.
+	IsBaby      bool
+	BabyAgeTicks int32
 	// Spatial state — written only by the entity tick goroutine.
 	Position   spatial.Vec3
 	VX, VY, VZ float64 // velocity in blocks/tick
@@ -298,6 +344,14 @@ func defaultMaxHealth(t EntityType) float32 {
 	case TypeVillager:
 		return 20
 
+	// Boats
+	case TypeOakBoat, TypeSpruceBoat, TypeBirchBoat, TypeJungleBoat,
+		TypeAcaciaBoat, TypeDarkOakBoat, TypeMangroveBoat, TypeCherryBoat,
+		TypeBambooRaft, TypeOakChestBoat, TypeSpruceChestBoat, TypeBirchChestBoat,
+		TypeJungleChestBoat, TypeAcaciaChestBoat, TypeDarkOakChestBoat,
+		TypeMangroveChestBoat, TypeCherryChestBoat, TypeBambooChestRaft:
+		return 40
+
 	default:
 		return 20
 	}
@@ -331,3 +385,16 @@ func (e *Entity) Heal(amount float32) {
 
 // IsAlive reports whether the entity has not yet died.
 func (e *Entity) IsAlive() bool { return !e.Dead }
+
+// IsBoat reports whether this entity is any boat or raft variant.
+func IsBoat(t EntityType) bool {
+	switch t {
+	case TypeOakBoat, TypeSpruceBoat, TypeBirchBoat, TypeJungleBoat,
+		TypeAcaciaBoat, TypeDarkOakBoat, TypeMangroveBoat, TypeCherryBoat,
+		TypeBambooRaft, TypeOakChestBoat, TypeSpruceChestBoat, TypeBirchChestBoat,
+		TypeJungleChestBoat, TypeAcaciaChestBoat, TypeDarkOakChestBoat,
+		TypeMangroveChestBoat, TypeCherryChestBoat, TypeBambooChestRaft:
+		return true
+	}
+	return false
+}

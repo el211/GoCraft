@@ -60,6 +60,12 @@ type World struct {
 	// Container block entities share canonical contents across Java sessions.
 	containerMu sync.RWMutex
 
+	// BlockPhysics schedules falling-block and fluid-spread block ticks.
+	BlockPhysics *BlockPhysics
+
+	// Redstone propagates redstone signal through the world.
+	Redstone *RedstoneEngine
+
 	// worldTime is the current time-of-day (0–23999) published by the server
 	// tick goroutine once per second so handler code can read it atomically.
 	worldTime atomic.Int64
@@ -111,7 +117,9 @@ func New(gen Generator, storage Storage, villagersEnabled bool) *World {
 		villageJobs:          make(map[spatial.BlockPos]entity.VillagerProfession),
 		spawnedVillageHomes:  make(map[spatial.BlockPos]struct{}),
 		spawnedVillageGuards: make(map[[2]int]struct{}),
+		BlockPhysics: newBlockPhysics(),
 	}
+	w.Redstone = newRedstoneEngine(w)
 	const workers = 2
 	w.pregenWG.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -782,6 +790,130 @@ func (w *World) SetBlock(x, y, z int, block Block) {
 	w.dirty[key] = struct{}{}
 	w.trimChunksLocked()
 	w.mu.Unlock()
+
+	// Schedule physics updates for affected neighbours.
+	// worldAge 0 = "fire next tick" (drainDue uses <= comparison).
+	w.scheduleBlockNeighborUpdates(x, y, z, block)
+}
+
+// setBlockNoPhysics writes a block directly without scheduling physics updates.
+// Used by the redstone engine and other internal systems to avoid feedback loops.
+func (w *World) setBlockNoPhysics(x, y, z int, block Block) {
+	if y < WorldMinY || y > WorldMaxY {
+		return
+	}
+	cx := int32(math.Floor(float64(x) / SectionSize))
+	cz := int32(math.Floor(float64(z) / SectionSize))
+	c := w.Chunk(cx, cz)
+	relY := y - WorldMinY
+	sIdx := relY / SectionSize
+	lx := x - int(cx)*SectionSize
+	ly := relY % SectionSize
+	lz := z - int(cz)*SectionSize
+	if c.Sections[sIdx] == nil {
+		c.Sections[sIdx] = NewSection()
+	}
+	c.Sections[sIdx].Set(lx, ly, lz, block)
+	w.mu.Lock()
+	key := [2]int32{cx, cz}
+	w.chunks[key] = c
+	w.touchChunkLocked(key)
+	w.dirty[key] = struct{}{}
+	w.trimChunksLocked()
+	w.mu.Unlock()
+}
+
+// scheduleBlockNeighborUpdates schedules physics ticks when a block is placed
+// or removed.  worldAge is unknown here so we schedule at due=0 (fires on the
+// very next drain regardless of current age).
+func (w *World) scheduleBlockNeighborUpdates(x, y, z int, placed Block) {
+	age := w.WorldTime() // close enough — physics fires within a few ticks
+	placedName := placed.ResourceLocation()
+
+	// 1. If we just removed a block (placed = air), the gravity block directly
+	//    above might now be unsupported.
+	if placed.IsAir() {
+		above := w.GetBlock(x, y+1, z)
+		aboveName := above.ResourceLocation()
+		if IsGravityBlock(aboveName) {
+			w.BlockPhysics.ScheduleFall(x, y+1, z, age, 2)
+		}
+		// Adjacent fluid blocks may now be able to spread into the new air.
+		for _, d := range [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}} {
+			nb := w.GetBlock(x+d[0], y, z+d[1])
+			if IsFluidBlock(nb.ResourceLocation()) {
+				w.BlockPhysics.ScheduleFluid(x+d[0], y, z+d[1], age, 5)
+			}
+		}
+		// Fluid from above may fall in.
+		above2 := w.GetBlock(x, y+1, z)
+		if IsFluidBlock(above2.ResourceLocation()) {
+			w.BlockPhysics.ScheduleFluid(x, y+1, z, age, 1)
+		}
+		// Log removed — schedule leaf decay for all adjacent leaves.
+		if IsLogBlock(aboveName) || IsLogBlock(placedName) {
+			w.scheduleNearbyLeafDecay(x, y, z, age)
+		}
+	}
+
+	// 2. If we placed a gravity block, check immediately whether it has support.
+	if IsGravityBlock(placedName) {
+		w.BlockPhysics.ScheduleFall(x, y, z, age, 2)
+	}
+
+	// 3. If we placed a fluid, schedule spreading.
+	if IsFluidBlock(placedName) {
+		w.BlockPhysics.ScheduleFluid(x, y, z, age, 5)
+	}
+
+	// 4. If a log was removed (now air), schedule leaf decay.
+	// (Handled above for the air case, but also check if old block was log.)
+	// We detect this by checking if adjacent leaves exist after any removal.
+	if placed.IsAir() {
+		w.scheduleNearbyLeafDecay(x, y, z, age)
+	}
+
+	// 5. If fire was placed, schedule fire spread.
+	if IsFireBlock(placedName) {
+		w.BlockPhysics.ScheduleFire(x, y, z, age, 20)
+	}
+
+	// 6. If ice was placed, schedule potential melt.
+	if IsIceBlock(placedName) {
+		w.BlockPhysics.ScheduleIce(x, y, z, age, IceMeltDelay)
+	}
+
+	// 7. Notify redstone engine of any change near redstone components.
+	if IsRedstoneConductor(placedName) || IsRedstoneSource(placedName) || IsRedstoneLoad(placedName) ||
+		placed.IsAir() {
+		w.Redstone.NotifyChange(x, y, z)
+	}
+}
+
+// scheduleNearbyLeafDecay schedules decay checks for all leaf blocks within
+// LeafDecayRadius of (x, y, z). Called when a log is removed.
+func (w *World) scheduleNearbyLeafDecay(x, y, z int, age int64) {
+	r := LeafDecayRadius
+	for dx := -r; dx <= r; dx++ {
+		for dy := -r; dy <= r; dy++ {
+			for dz := -r; dz <= r; dz++ {
+				nx, ny, nz := x+dx, y+dy, z+dz
+				nb := w.GetBlock(nx, ny, nz)
+				if IsLeafBlock(nb.ResourceLocation()) {
+					// Stagger by Manhattan distance so outer leaves decay last.
+					delay := int64(abs(dx)+abs(dy)+abs(dz)) + 5
+					w.BlockPhysics.ScheduleLeafDecay(nx, ny, nz, age, delay)
+				}
+			}
+		}
+	}
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
 // GetBlock returns the canonical Block at absolute world coordinates.

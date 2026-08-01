@@ -70,13 +70,14 @@ func RegisterBuiltins(d *Dispatcher) {
 	d.Register("flyyspeed", cmdFlySpeed) // compatibility with the commonly typed spelling
 	d.Register("kick", cmdKick)
 	d.Register("seed", cmdSeed)
+	d.Register("spawnboat", cmdSpawnBoat)
 }
 
 // ── /help ─────────────────────────────────────────────────────────────────────
 
 func cmdHelp(ctx CommandContext) error {
 	_ = sendSystemMessage(ctx.Conn,
-		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /tps /timings /help")
+		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /spawnboat /time /tps /timings /help")
 	return nil
 }
 
@@ -88,6 +89,45 @@ func cmdSeed(ctx CommandContext) error {
 	}
 	seed := ctx.World.Seed()
 	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("World seed: %d", seed))
+	return nil
+}
+
+// ── /spawnboat ────────────────────────────────────────────────────────────────
+
+// cmdSpawnBoat spawns a boat at the player's current position.
+// Usage: /spawnboat [wood_type]   e.g. /spawnboat oak (default) or /spawnboat spruce
+func cmdSpawnBoat(ctx CommandContext) error {
+	if ctx.Player == nil || ctx.World == nil || ctx.Manager == nil {
+		return fmt.Errorf("world state is unavailable")
+	}
+	if ctx.NextEntityID == nil {
+		return fmt.Errorf("entity allocator is unavailable")
+	}
+
+	woodType := "oak"
+	if len(ctx.Args) >= 1 {
+		woodType = strings.ToLower(strings.TrimPrefix(ctx.Args[0], "minecraft:"))
+	}
+	entityTypeName := corentity.EntityType("minecraft:" + woodType + "_boat")
+	if !corentity.IsBoat(entityTypeName) {
+		entityTypeName = corentity.TypeOakBoat
+	}
+
+	var uuid [16]byte
+	if _, err := rand.Read(uuid[:]); err != nil {
+		return fmt.Errorf("creating boat UUID: %w", err)
+	}
+	boat := corentity.New(
+		ctx.NextEntityID(),
+		uuid,
+		entityTypeName,
+		ctx.Player.Position.X,
+		ctx.Player.Position.Y,
+		ctx.Player.Position.Z,
+	)
+	ctx.World.Entities.Add(boat)
+	BroadcastSpawnMob(boat, ctx.Manager)
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("Spawned %s at your position. Right-click to board, sneak to dismount.", entityTypeName))
 	return nil
 }
 

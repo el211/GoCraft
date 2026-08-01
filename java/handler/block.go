@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"strings"
 
+	corentity "GoCraft/core/entity"
 	"GoCraft/core/player"
 	"GoCraft/core/spatial"
 	coreworld "GoCraft/core/world"
@@ -68,12 +69,12 @@ const (
 
 // handleBlockPacket dispatches an incoming block-interaction packet.
 // Called from the play loop for packets that need the world and session manager.
-func handleBlockPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn) error {
+func handleBlockPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn, nextEntityID func() int32) error {
 	switch pkt.ID {
 	case packetIDPlayerAction:
 		return handlePlayerAction(pkt, p, w, mgr)
 	case packetIDUseItemOn:
-		return handleUseItemOn(pkt, p, w, mgr, conn)
+		return handleUseItemOn(pkt, p, w, mgr, conn, nextEntityID)
 	}
 	return nil
 }
@@ -395,7 +396,7 @@ func blockDropItem(blockName string) (string, int) {
 //	Bool      inside_block (player head is inside a block)
 //	Bool      world_border_hit
 //	VarInt    sequence
-func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn) error {
+func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn, nextEntityID func() int32) error {
 	r := pkt.Reader()
 
 	hand, err := protocol.ReadVarInt(r)
@@ -457,7 +458,7 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 	}
 	// Bed right-click: sleeping interaction.
 	if isBedBlock(targetBlock.ResourceLocation()) {
-		handleBedInteract(w)
+		handleBedInteract(p, int(bx), int(by), int(bz), w, conn, mgr)
 		sendAcknowledgeBlockChange(mgr, p, seq)
 		return nil
 	}
@@ -476,9 +477,23 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 		return sendOpenScreen(conn, 1, menuType, title)
 	}
 
+	// Boat items: right-clicking water (or any surface) with a boat item spawns
+	// a boat entity instead of placing a block.
+	held := p.HeldItem()
+	if !held.IsEmpty() && isBoatItem(held.ItemID) && nextEntityID != nil &&
+		p.GameMode != player.GameModeAdventure && p.GameMode != player.GameModeSpectator {
+		if boat := spawnBoatFromItem(held.ItemID, int(bx), int(by), int(bz), int(face), w, nextEntityID); boat != nil {
+			BroadcastSpawnMob(boat, mgr)
+			sendAcknowledgeBlockChange(mgr, p, seq)
+			slog.Info("player placed boat", "player", p.Username, "type", boat.Type)
+		} else {
+			sendAcknowledgeBlockChange(mgr, p, seq)
+		}
+		return nil
+	}
+
 	// Resolve the held block before choosing whether a replaceable target is
 	// overwritten or the adjacent face receives the placement.
-	held := p.HeldItem()
 	if held.IsEmpty() || !javaworld.IsPlaceableAsBlock(held.ItemID) ||
 		p.GameMode == player.GameModeAdventure || p.GameMode == player.GameModeSpectator {
 		sendAcknowledgeBlockChange(mgr, p, seq)
@@ -709,13 +724,72 @@ func breakLinkedBedHalf(x, y, z int, broken coreworld.Block, w *coreworld.World,
 }
 
 // handleBedInteract is called when a player right-clicks a bed block.
-// At night it requests a time skip to morning; during the day it does nothing.
-func handleBedInteract(w *coreworld.World) {
-	// Night: time 12541–23459 (mobs can spawn).
+//
+// Spawn-point is ALWAYS updated (like vanilla), regardless of time.
+// Sleeping / time-skip only triggers at night (tod 12541–23459).
+func handleBedInteract(p *player.Player, bx, by, bz int, w *coreworld.World, conn *network.ClientConn, mgr *session.Manager) {
+	// ── Always: set personal respawn point at the bed ─────────────────────
+	p.SpawnPoint = spatial.BlockPos{X: int32(bx), Y: int32(by), Z: int32(bz)}
+	p.HasSpawnPoint = true
+	// Send Set Default Spawn Position so the compass points at the bed.
+	packed := (int64(bx)&0x3FFFFFF)<<38 | (int64(bz)&0x3FFFFFF)<<12 | (int64(by) & 0xFFF)
+	_ = conn.WritePacket(buildPackedSpawnPosition(packed))
+	// ── Night only: enter sleep and potentially skip to morning ───────────
 	tod := w.WorldTime()
-	if tod >= 12541 || tod == 0 {
-		w.RequestTimeSkip()
+	// Night window: 12541–23459 (matches vanilla mob-spawn / sleep window).
+	// Confirm spawn point in chat (always visible, never overwritten).
+	_ = conn.WritePacket(buildSystemChatMessage("Respawn point set", false))
+	if tod < 12541 || tod > 23459 {
+		_ = conn.WritePacket(buildSystemChatMessage("You can only sleep at night.", false))
+		return
 	}
+	if p.Sleeping {
+		return // already waiting
+	}
+
+	// Mark player as sleeping and broadcast the lying-down animation.
+	// The server tick goroutine (tickSleep) will handle the actual time skip
+	// after a short delay so the client has time to play the animation.
+	p.Sleeping = true
+	BroadcastPlayerSleeping(p.EntityID, mgr)
+
+	// Show waiting count in the action bar.
+	sessions := mgr.SnapshotAll()
+	total, sleeping := 0, 0
+	for _, s := range sessions {
+		if s.Player != nil {
+			total++
+			if s.Player.Sleeping {
+				sleeping++
+			}
+		}
+	}
+	if total > 1 {
+		_ = conn.WritePacket(buildSystemChatMessage(
+			fmt.Sprintf("Sleeping... (%d/%d players)", sleeping, total), true))
+	}
+}
+
+// SkipNightAndWake requests a time skip to morning, broadcasts the stand-up
+// (wake) animation for every sleeping player, and clears the sleeping flag.
+// Called when all online players are sleeping.
+func SkipNightAndWake(w *coreworld.World, mgr *session.Manager) {
+	w.RequestTimeSkip()
+	for _, s := range mgr.SnapshotAll() {
+		if s.Player == nil || !s.Player.Sleeping {
+			continue
+		}
+		s.Player.Sleeping = false
+		// Broadcast the STANDING pose so all clients see the wake animation.
+		BroadcastPlayerWaking(s.Player.EntityID, mgr)
+		_ = sendSystemMessage(s.Conn, "Good morning! The night has passed.")
+	}
+}
+
+// buildPackedSpawnPosition builds a Set Default Spawn Position packet with a
+// pre-packed 64-bit block position (X<<38 | Z<<12 | Y) and angle 0.
+func buildPackedSpawnPosition(packed int64) *protocol.Packet {
+	return protocol.NewBuilder(packetIDSpawnPosition).Long(packed).Float(0).Build()
 }
 
 func isHoe(item string) bool {
@@ -879,3 +953,66 @@ func containerTitle(blockName string) string {
 		return "Container"
 	}
 }
+
+// ── Boat item placement ───────────────────────────────────────────────────────
+
+// boatItemToType maps boat item resource locations to entity types.
+var boatItemToType = map[string]corentity.EntityType{
+	"minecraft:oak_boat":           corentity.TypeOakBoat,
+	"minecraft:spruce_boat":        corentity.TypeSpruceBoat,
+	"minecraft:birch_boat":         corentity.TypeBirchBoat,
+	"minecraft:jungle_boat":        corentity.TypeJungleBoat,
+	"minecraft:acacia_boat":        corentity.TypeAcaciaBoat,
+	"minecraft:dark_oak_boat":      corentity.TypeDarkOakBoat,
+	"minecraft:mangrove_boat":      corentity.TypeMangroveBoat,
+	"minecraft:cherry_boat":        corentity.TypeCherryBoat,
+	"minecraft:bamboo_raft":        corentity.TypeBambooRaft,
+	"minecraft:oak_chest_boat":     corentity.TypeOakChestBoat,
+	"minecraft:spruce_chest_boat":  corentity.TypeSpruceChestBoat,
+	"minecraft:birch_chest_boat":   corentity.TypeBirchChestBoat,
+	"minecraft:jungle_chest_boat":  corentity.TypeJungleChestBoat,
+	"minecraft:acacia_chest_boat":  corentity.TypeAcaciaChestBoat,
+	"minecraft:dark_oak_chest_boat": corentity.TypeDarkOakChestBoat,
+	"minecraft:mangrove_chest_boat": corentity.TypeMangroveChestBoat,
+	"minecraft:cherry_chest_boat":  corentity.TypeCherryChestBoat,
+	"minecraft:bamboo_chest_raft":  corentity.TypeBambooChestRaft,
+}
+
+// isBoatItem reports whether an item resource location is a placeable boat item.
+func isBoatItem(itemID string) bool {
+	_, ok := boatItemToType[itemID]
+	return ok
+}
+
+// spawnBoatFromItem creates a boat entity at the target surface position.
+// The boat is placed at the clicked block's top face (or water surface).
+// Returns nil if the item doesn't map to a boat type.
+func spawnBoatFromItem(itemID string, bx, by, bz, face int, w *coreworld.World, nextEntityID func() int32) *corentity.Entity {
+	eType, ok := boatItemToType[itemID]
+	if !ok {
+		return nil
+	}
+
+	// Spawn position: top of clicked block, or on water surface.
+	spawnX := float64(bx) + 0.5
+	spawnZ := float64(bz) + 0.5
+	spawnY := float64(by + 1) // top face of clicked block by default
+
+	// If clicking on water, float on the water surface.
+	clickedBlock := w.GetBlock(bx, by, bz)
+	if coreworld.IsFluidBlock(clickedBlock.ResourceLocation()) {
+		spawnY = float64(by) + 0.5
+	} else if face == 1 { // top face
+		spawnY = float64(by + 1)
+	}
+
+	var uuid [16]byte
+	for i := range uuid {
+		uuid[i] = byte(nextEntityID() & 0xff) // cheap non-crypto UUID — good enough for entity IDs
+	}
+
+	boat := corentity.New(nextEntityID(), uuid, eType, spawnX, spawnY, spawnZ)
+	w.Entities.Add(boat)
+	return boat
+}
+

@@ -55,7 +55,7 @@ func (w *World) discoverLoadedVillagePopulation(chunk *Chunk) {
 			continue
 		}
 		nearBeds := villagePositionsNearSet(w.villageBeds, bed, 48)
-		if len(nearBeds) < 2 {
+		if len(nearBeds) < 1 {
 			continue
 		}
 		nearDoors := villageDoorPositionsNear(w.villageDoors, bed, 48)
@@ -143,7 +143,7 @@ func (w *World) discoverLoadedVillagePopulation(chunk *Chunk) {
 	}
 	w.villagePOIMu.Unlock()
 
-	for _, resident := range residents {
+	for i, resident := range residents {
 		id := w.nextVillagerID.Add(1) + 10_000_000
 		villager := entity.New(id, villageEntityUUID(resident.bed, 0x7265736964656e74), entity.TypeVillager,
 			float64(resident.spawn.X)+0.5, float64(resident.spawn.Y), float64(resident.spawn.Z)+0.5)
@@ -156,10 +156,15 @@ func (w *World) discoverLoadedVillagePopulation(chunk *Chunk) {
 		villager.VillageBed = resident.bed
 		villager.VillageWorkstation = resident.workstation
 		villager.OnGround = true
+		// Spawn 1 baby for every 4 adults — gives the village a lived-in feel.
+		if i%4 == 3 {
+			villager.IsBaby = true
+		}
 		w.addGeneratedVillageEntity(villager)
 		slog.Info("village resident discovered and spawned",
 			"id", id, "x", resident.spawn.X, "y", resident.spawn.Y, "z", resident.spawn.Z,
-			"profession", resident.profession, "centerX", resident.center.X, "centerZ", resident.center.Z)
+			"profession", resident.profession, "centerX", resident.center.X, "centerZ", resident.center.Z,
+			"baby", villager.IsBaby)
 	}
 	for _, center := range guards {
 		id := w.nextVillagerID.Add(1) + 10_000_000
