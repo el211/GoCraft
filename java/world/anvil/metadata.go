@@ -20,6 +20,10 @@ type LevelMetadata struct {
 	Hardcore      bool
 	AllowCommands bool
 	VersionName   string
+	// DayTime is the time-of-day tick stored in level.dat (0–23999).
+	// Time is the total world age in ticks.
+	DayTime int64
+	Time    int64
 }
 
 // LoadLevelMetadata reads the gzip-compressed level.dat in worldDir.
@@ -58,5 +62,7 @@ func LoadLevelMetadata(worldDir string) (LevelMetadata, error) {
 		Hardcore:      data.Get("hardcore").Byte() != 0,
 		AllowCommands: data.Get("allowCommands").Byte() != 0,
 		VersionName:   version.Get("Name").Str(),
+		DayTime:       data.Get("DayTime").Long(),
+		Time:          data.Get("Time").Long(),
 	}, nil
 }

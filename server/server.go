@@ -23,7 +23,11 @@ import (
 	"log/slog"
 	"math"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof" // registers /debug/pprof handlers on the default mux
 	"os"
+	"runtime"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,6 +90,9 @@ type Server struct {
 	// worldAge is advanced only by the entity tick goroutine.
 	worldAge int64
 	spawnRNG *rand.Rand
+
+	// timings collects per-subsystem tick durations for /timings and /tps.
+	timings *tickTimings
 }
 
 // mobAI holds the wander state for a passive mob.
@@ -122,10 +129,16 @@ func New(cfg *config.Config) (*Server, error) {
 	// for the seed and spawn so generated fallback chunks do not form seams.
 	var storage coreworld.Storage
 	spawnX, spawnZ := 0, 0
+	var initialWorldAge int64
 	if cfg.WorldStorage == config.WorldStorageDisk {
 		if metadata, metadataErr := anvil.LoadLevelMetadata(cfg.WorldDir); metadataErr == nil {
 			cfg.WorldSeed = metadata.Seed
 			spawnX, spawnZ = int(metadata.SpawnX), int(metadata.SpawnZ)
+			// Resume the world clock from where the vanilla server left off so
+			// the day/night cycle continues naturally across restarts.
+			if metadata.Time > 0 {
+				initialWorldAge = metadata.Time
+			}
 			slog.Info("server: loaded Java level.dat",
 				"world", metadata.LevelName,
 				"dataVersion", metadata.DataVersion,
@@ -134,10 +147,18 @@ func New(cfg *config.Config) (*Server, error) {
 				"spawnX", metadata.SpawnX,
 				"spawnY", metadata.SpawnY,
 				"spawnZ", metadata.SpawnZ,
+				"time", metadata.Time,
+				"dayTime", metadata.DayTime,
 			)
 		} else if !errors.Is(metadataErr, os.ErrNotExist) {
 			slog.Warn("server: could not parse level.dat", "worldDir", cfg.WorldDir, "err", metadataErr)
 		}
+
+		// Resolve the world seed: seed=0 means "random".
+		// We persist the chosen seed in world/seed.txt so that restarting the
+		// server always regenerates the exact same world (no chunk seams).
+		cfg.WorldSeed = resolveWorldSeed(cfg.WorldSeed, cfg.WorldDir)
+
 		st, err := anvil.NewStorage(cfg.WorldDir)
 		if err != nil {
 			return nil, fmt.Errorf("server: opening Anvil storage %s: %w", cfg.WorldDir, err)
@@ -145,6 +166,8 @@ func New(cfg *config.Config) (*Server, error) {
 		storage = st
 		slog.Info("server: opened Anvil world", "worldDir", cfg.WorldDir, "storage", "disk")
 	} else {
+		// In-memory world: resolve seed without persisting.
+		cfg.WorldSeed = resolveWorldSeed(cfg.WorldSeed, "")
 		slog.Info("server: using memory-only world storage", "storage", "memory")
 	}
 
@@ -155,8 +178,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 	bus := intent.NewBus(64, 512)
 
+	slog.Info("server: world seed resolved", "seed", cfg.WorldSeed)
 	worldInstance := coreworld.New(coreworld.NewOverworldGenerator(cfg.WorldSeed), storage, cfg.Villagers)
 	worldInstance.SetMaxCachedChunks(cfg.MaxCachedChunks)
+
+	timings := newTickTimings()
 
 	s := &Server{
 		cfg:         cfg,
@@ -173,7 +199,26 @@ func New(cfg *config.Config) (*Server, error) {
 		intentBus:   bus,
 		mobAIs:      make(map[int32]*mobAI),
 		spawnRNG:    rand.New(rand.NewSource(cfg.WorldSeed ^ 0x4d6f624372616674)),
+		worldAge:    initialWorldAge,
+		timings:     timings,
 	}
+
+	// Register server-state commands as closures after s is initialised.
+	cmds.Register("timings", func(ctx handler.CommandContext) error {
+		return handler.SendSystemMessage(ctx.Conn, timings.Report())
+	})
+	cmds.Register("tps", func(ctx handler.CommandContext) error {
+		tps, avgMs := timings.TPS()
+		color := "§a"
+		switch {
+		case tps < 15:
+			color = "§c"
+		case tps < 18:
+			color = "§e"
+		}
+		return handler.SendSystemMessage(ctx.Conn,
+			fmt.Sprintf("TPS: %s%.1f§r  Avg tick: §f%.2fms", color, tps, avgMs))
+	})
 	// Warm spawn immediately; login-time streaming will reuse this cache.
 	s.world.QueuePregeneration(int32(math.Floor(float64(spawnX)/16)), int32(math.Floor(float64(spawnZ)/16)), int32(cfg.PreGenerateRadius))
 	s.loginHandler = handler.NewLoginHandler(cfg, privKey, pubKeyDER)
@@ -208,6 +253,17 @@ func (s *Server) Run(ctx context.Context) error {
 
 	// Spawn a small set of passive mobs near the world spawn for testing.
 	s.spawnTestMobs()
+
+	// pprof profiling endpoint — http://localhost:6060/debug/pprof/
+	// Use: go tool pprof http://localhost:6060/debug/pprof/goroutine
+	//      go tool pprof http://localhost:6060/debug/pprof/heap
+	go func() {
+		pprofAddr := "localhost:6060"
+		slog.Info("pprof profiling server listening", "addr", pprofAddr)
+		if err := http.ListenAndServe(pprofAddr, nil); err != nil {
+			slog.Warn("pprof server stopped", "err", err)
+		}
+	}()
 
 	var wg sync.WaitGroup
 
@@ -374,6 +430,7 @@ func (s *Server) tickEntities() {
 		deadIDs      []int32             // entity IDs removed from the world this tick
 	)
 
+	endDamage := s.timings.measure(sectionDamage)
 	for entityID, event := range s.world.DrainEntityDamage() {
 		entity, ok := s.world.Entities.Get(entityID)
 		if !ok || entity.Dead {
@@ -395,6 +452,7 @@ func (s *Server) tickEntities() {
 		slog.Info("entity damaged", "type", entity.Type, "id", entityID,
 			"damage", event.Amount, "health", entity.Health)
 	}
+	endDamage()
 
 	for _, e := range s.world.Entities.Snapshot() {
 		// ── Dead entity cleanup ───────────────────────────────────────────────
@@ -407,12 +465,16 @@ func (s *Server) tickEntities() {
 		}
 
 		// ── Mob AI (wander / hostile) ─────────────────────────────────────────
+		endAI := s.timings.measure(sectionAI)
 		if isPassiveMob(e.Type) {
 			s.tickPassiveMobAI(e)
 		} else if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
 			s.tickGolemAI(e)
 		}
+		endAI()
 
+		// ── Gravity + physics ─────────────────────────────────────────────────
+		endPhys := s.timings.measure(sectionPhysics)
 		// ── Gravity ───────────────────────────────────────────────────────────
 		if !e.OnGround {
 			e.VY += gravity
@@ -421,33 +483,50 @@ func (s *Server) tickEntities() {
 		// ── Position integration with step-up ────────────────────────────────
 		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
 		nextX := e.Position.X + e.VX
-		if s.world.CanEntityOccupy(nextX, e.Position.Y, e.Position.Z) {
+		if canX, xLoaded := s.world.CanEntityOccupyIfLoaded(nextX, e.Position.Y, e.Position.Z); xLoaded && canX {
 			e.Position.X = nextX
-		} else if e.OnGround && e.VX != 0 &&
-			s.world.CanEntityOccupy(nextX, e.Position.Y+1, e.Position.Z) {
-			// Step up over a 1-block obstacle.
-			e.Position.X = nextX
-			e.Position.Y = math.Floor(e.Position.Y) + 1
-			e.VY = 0
-		} else {
+		} else if xLoaded && e.OnGround && e.VX != 0 {
+			if canXUp, xUpLoaded := s.world.CanEntityOccupyIfLoaded(nextX, e.Position.Y+1, e.Position.Z); xUpLoaded && canXUp {
+				// Step up over a 1-block obstacle.
+				e.Position.X = nextX
+				e.Position.Y = math.Floor(e.Position.Y) + 1
+				e.VY = 0
+			} else if xUpLoaded {
+				e.VX = 0
+			}
+			// If chunk not loaded, preserve velocity and let entity try next tick.
+		} else if xLoaded {
 			e.VX = 0
 		}
 		e.Position.Y += e.VY
 		nextZ := e.Position.Z + e.VZ
-		if s.world.CanEntityOccupy(e.Position.X, e.Position.Y, nextZ) {
+		if canZ, zLoaded := s.world.CanEntityOccupyIfLoaded(e.Position.X, e.Position.Y, nextZ); zLoaded && canZ {
 			e.Position.Z = nextZ
-		} else if e.OnGround && e.VZ != 0 &&
-			s.world.CanEntityOccupy(e.Position.X, e.Position.Y+1, nextZ) {
-			// Step up over a 1-block obstacle.
-			e.Position.Z = nextZ
-			e.Position.Y = math.Floor(e.Position.Y) + 1
-			e.VY = 0
-		} else {
+		} else if zLoaded && e.OnGround && e.VZ != 0 {
+			if canZUp, zUpLoaded := s.world.CanEntityOccupyIfLoaded(e.Position.X, e.Position.Y+1, nextZ); zUpLoaded && canZUp {
+				// Step up over a 1-block obstacle.
+				e.Position.Z = nextZ
+				e.Position.Y = math.Floor(e.Position.Y) + 1
+				e.VY = 0
+			} else if zUpLoaded {
+				e.VZ = 0
+			}
+			// If chunk not loaded, preserve velocity and let entity try next tick.
+		} else if zLoaded {
 			e.VZ = 0
 		}
 
 		// ── Ground detection (generated or loaded terrain) ───────────────────────
-		groundY := float64(s.world.GroundYAtOrBelow(int(math.Floor(e.Position.X)), int(math.Floor(e.Position.Z)), int(math.Floor(math.Max(prevY, e.Position.Y)))) + 1)
+		// Only run the ground check when the chunk under the entity is cached;
+		// skip the expensive GroundYAtOrBelow call that would trigger disk I/O.
+		ex, ez := int(math.Floor(e.Position.X)), int(math.Floor(e.Position.Z))
+		ecx, ecz := coreworld.ChunkCoordsFor(ex, ez)
+		var groundY float64
+		if s.world.IsChunkLoaded(ecx, ecz) {
+			groundY = float64(s.world.GroundYAtOrBelow(ex, ez, int(math.Floor(math.Max(prevY, e.Position.Y)))) + 1)
+		} else {
+			groundY = prevY // freeze Y until chunk loads to prevent falling through unloaded terrain
+		}
 		if e.Position.Y <= groundY {
 			e.Position.Y = groundY
 			e.VY = 0
@@ -470,26 +549,70 @@ func (s *Server) tickEntities() {
 		if e.Position.X != prevX || e.Position.Y != prevY || e.Position.Z != prevZ {
 			moved = append(moved, e)
 		}
+		endPhys()
 	}
 
 	// Build packets and dispatch network I/O off the tick goroutine.
 	// DispatchTickBroadcast reads entity fields here (tick goroutine, sole
 	// writer) to build immutable packets before spawning the send goroutine.
+	endBcast := s.timings.measure(sectionBroadcast)
 	handler.DispatchTickBroadcast(moved, hurtEntities, deadIDs, s.sessions)
+	endBcast()
+
+	// Publish time-of-day for handler code (e.g. bed sleep check).
+	endTime := s.timings.measure(sectionTime)
+	s.world.SetWorldTime(s.worldAge % 24000)
+	// Drain a player-requested time skip (sleeping in a bed at night).
+	if s.world.DrainTimeSkip() {
+		tod := s.worldAge % 24000
+		if tod < 6000 {
+			s.worldAge += 6000 - tod
+		} else {
+			s.worldAge += 24000 - tod + 6000
+		}
+		handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
+	}
 	if s.worldAge%20 == 0 {
 		handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
 		for _, change := range s.world.TickCrops(s.worldAge, 64) {
 			handler.BroadcastBlockChange(change, s.sessions)
 		}
 	}
-	if s.worldAge%200 == 0 {
+	endTime()
+
+	if s.worldAge%80 == 0 {
+		endSpawnP := s.timings.measure(sectionSpawnPassive)
 		s.spawnPassiveMobsNearPlayers()
+		endSpawnP()
 	}
+	if s.worldAge%100 == 0 && s.cfg.Difficulty != "peaceful" {
+		endSpawnH := s.timings.measure(sectionSpawnHostile)
+		s.spawnHostileMobsNearPlayers()
+		endSpawnH()
+	}
+	// Every 5 minutes: force a GC cycle and return freed pages to the OS.
+	// Go's runtime retains freed heap pages by default; this keeps RSS in check.
+	if s.worldAge%6000 == 0 && s.worldAge > 0 {
+		go func() {
+			runtime.GC()
+			debug.FreeOSMemory()
+		}()
+	}
+
+	// Record this tick into the rolling timing window.
+	elapsed := time.Since(start)
+	s.timings.commit(elapsed)
 
 	// Warn when the CPU work in a tick exceeds the tick budget.
 	// Network I/O is off-goroutine and does not count toward this budget.
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		slog.Warn("entity tick overrun", "elapsed", elapsed)
+	if elapsed > 50*time.Millisecond {
+		tps, avgMs := s.timings.TPS()
+		slog.Warn("entity tick overrun",
+			"elapsed", elapsed.Round(time.Millisecond),
+			"tps", fmt.Sprintf("%.1f", tps),
+			"avg_ms", fmt.Sprintf("%.2f", avgMs),
+			"entities", len(s.world.Entities.Snapshot()),
+		)
 	}
 }
 
@@ -520,37 +643,151 @@ func (s *Server) spawnTestMobs() {
 	}
 }
 
-// spawnPassiveMobsNearPlayers provides a small, capped natural-spawn loop.
-// It intentionally implements only common surface animals for now.
+// spawnPassiveMobsNearPlayers provides a natural-spawn loop for passive mobs.
+// Cap scales with player count (10 per player, min 15) like vanilla.
 func (s *Server) spawnPassiveMobsNearPlayers() {
+	playerCount := 0
+	s.game.OnlinePlayers(func(_ *player.Player) { playerCount++ })
+	if playerCount == 0 {
+		return
+	}
+	cap := 10 * playerCount
+	if cap < 15 {
+		cap = 15
+	}
+
 	animals := 0
 	for _, e := range s.world.Entities.Snapshot() {
 		if e.Type != corentity.TypeVillager && isPassiveMob(e.Type) {
 			animals++
 		}
 	}
-	if animals >= 24 {
+	if animals >= cap {
 		return
 	}
-	types := [...]corentity.EntityType{corentity.TypeCow, corentity.TypePig, corentity.TypeSheep, corentity.TypeChicken}
+
+	passiveTypes := []corentity.EntityType{
+		corentity.TypeCow, corentity.TypeCow,
+		corentity.TypePig, corentity.TypeSheep, corentity.TypeSheep,
+		corentity.TypeChicken, corentity.TypeChicken,
+		corentity.TypeRabbit, corentity.TypeFox,
+	}
+
 	s.game.OnlinePlayers(func(p *player.Player) {
-		if animals >= 24 {
+		if animals >= cap {
 			return
 		}
+		// Spawn a group of 2-4 animals near the player.
+		groupSize := 2 + s.spawnRNG.Intn(3)
+		mobType := passiveTypes[s.spawnRNG.Intn(len(passiveTypes))]
 		angle := s.spawnRNG.Float64() * 2 * math.Pi
-		distance := 12 + s.spawnRNG.Float64()*12
-		x := p.Position.X + math.Cos(angle)*distance
-		z := p.Position.Z + math.Sin(angle)*distance
-		y := float64(s.world.SurfaceY(int(math.Floor(x)), int(math.Floor(z))) + 1)
-		if !s.world.CanEntityOccupy(x, y, z) {
+		distance := 24 + s.spawnRNG.Float64()*40
+		cx := p.Position.X + math.Cos(angle)*distance
+		cz := p.Position.Z + math.Sin(angle)*distance
+		for i := 0; i < groupSize && animals < cap; i++ {
+			ox := cx + (s.spawnRNG.Float64()-0.5)*6
+			oz := cz + (s.spawnRNG.Float64()-0.5)*6
+			sy, syLoaded := s.world.SurfaceYIfLoaded(int(math.Floor(ox)), int(math.Floor(oz)))
+			if !syLoaded {
+				continue // don't trigger disk I/O on the tick goroutine
+			}
+			y := float64(sy + 1)
+			if canOccupy, occLoaded := s.world.CanEntityOccupyIfLoaded(ox, y, oz); !occLoaded || !canOccupy {
+				continue
+			}
+			e := corentity.New(s.game.NextEntityID(), newRandomUUID(), mobType, ox, y, oz)
+			e.OnGround = true
+			s.world.Entities.Add(e)
+			handler.BroadcastSpawnMob(e, s.sessions)
+			animals++
+			slog.Debug("passive mob spawned", "type", e.Type, "id", e.EntityID, "x", ox, "y", y, "z", oz)
+		}
+	})
+}
+
+// spawnHostileMobsNearPlayers spawns hostile mobs at night or underground.
+// Skipped entirely on peaceful difficulty.
+func (s *Server) spawnHostileMobsNearPlayers() {
+	playerCount := 0
+	s.game.OnlinePlayers(func(_ *player.Player) { playerCount++ })
+	if playerCount == 0 {
+		return
+	}
+
+	// Hostile cap: 70 per player in vanilla; we use 15 per player (scaled).
+	cap := 15 * playerCount
+	if cap < 20 {
+		cap = 20
+	}
+	hostiles := 0
+	for _, e := range s.world.Entities.Snapshot() {
+		if !isPassiveMob(e.Type) && e.Type != corentity.TypeVillager &&
+			e.Type != corentity.TypeIronGolem && e.Type != corentity.TypeSnowGolem {
+			hostiles++
+		}
+	}
+	if hostiles >= cap {
+		return
+	}
+
+	// Vanilla spawns surface hostiles only at night (time 13000-23000).
+	// We allow underground spawning regardless of time.
+	timeOfDay := s.worldAge % 24000
+	isNight := timeOfDay >= 13000 && timeOfDay <= 23000
+
+	// Difficulty-based extra spawn weight.
+	extraChance := 0.0
+	switch s.cfg.Difficulty {
+	case "easy":
+		extraChance = 0.5
+	case "normal":
+		extraChance = 1.0
+	case "hard":
+		extraChance = 1.5
+	}
+
+	surfaceHostiles := []corentity.EntityType{
+		corentity.TypeZombie, corentity.TypeZombie,
+		corentity.TypeSkeleton, corentity.TypeSkeleton,
+		corentity.TypeCreeper,
+		corentity.TypeSpider,
+		corentity.TypeEnderman,
+		corentity.TypeWitch,
+	}
+
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if hostiles >= cap {
 			return
 		}
-		e := corentity.New(s.game.NextEntityID(), newRandomUUID(), types[s.spawnRNG.Intn(len(types))], x, y, z)
-		e.OnGround = true
-		s.world.Entities.Add(e)
-		handler.BroadcastSpawnMob(e, s.sessions)
-		animals++
-		slog.Info("passive mob spawned", "type", e.Type, "id", e.EntityID, "x", x, "y", y, "z", z)
+		if !isNight && s.spawnRNG.Float64() > extraChance*0.3 {
+			// During the day only a small fraction spawn (caves/shade).
+			return
+		}
+		// Spawn 1-3 hostiles per player per call.
+		groupSize := 1 + s.spawnRNG.Intn(3)
+		mobType := surfaceHostiles[s.spawnRNG.Intn(len(surfaceHostiles))]
+		angle := s.spawnRNG.Float64() * 2 * math.Pi
+		distance := 24 + s.spawnRNG.Float64()*56
+		cx := p.Position.X + math.Cos(angle)*distance
+		cz := p.Position.Z + math.Sin(angle)*distance
+		for i := 0; i < groupSize && hostiles < cap; i++ {
+			ox := cx + (s.spawnRNG.Float64()-0.5)*8
+			oz := cz + (s.spawnRNG.Float64()-0.5)*8
+			sy, syLoaded := s.world.SurfaceYIfLoaded(int(math.Floor(ox)), int(math.Floor(oz)))
+			if !syLoaded {
+				continue // don't trigger disk I/O on the tick goroutine
+			}
+			y := float64(sy + 1)
+			if canOccupy, occLoaded := s.world.CanEntityOccupyIfLoaded(ox, y, oz); !occLoaded || !canOccupy {
+				continue
+			}
+			e := corentity.New(s.game.NextEntityID(), newRandomUUID(), mobType, ox, y, oz)
+			e.OnGround = true
+			s.world.Entities.Add(e)
+			handler.BroadcastSpawnMob(e, s.sessions)
+			hostiles++
+			slog.Debug("hostile mob spawned", "type", e.Type, "id", e.EntityID, "x", ox, "y", y, "z", oz)
+		}
 	})
 }
 
@@ -777,9 +1014,34 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 		ai.attackCooldown--
 	}
 
-	if dist <= 2.0 {
+	if dist <= 2.5 {
 		// In melee range — stop and swing.
 		e.VX, e.VZ = 0, 0
+		if ai.attackCooldown == 0 {
+			ai.attackCooldown = 20 // 1-second cooldown between hits
+			// Find the nearest player and knock them back.
+			for _, sess := range s.sessions.SnapshotAll() {
+				if sess.Player == nil {
+					continue
+				}
+				pdx := sess.Player.Position.X - e.Position.X
+				pdz := sess.Player.Position.Z - e.Position.Z
+				if math.Hypot(pdx, pdz) > 2.5 {
+					continue
+				}
+				// Knockback velocity away from golem.
+				kbDist := math.Hypot(pdx, pdz)
+				var kbX, kbZ float64
+				if kbDist > 0 {
+					kbX = pdx / kbDist * 0.8
+					kbZ = pdz / kbDist * 0.8
+				}
+				handler.SendPlayerKnockback(sess.Conn, sess.Player.EntityID, kbX, 0.4, kbZ)
+				handler.BroadcastSoundAt(s.sessions, "minecraft:entity.iron_golem.attack", handler.SoundCategoryHostile,
+					e.Position.X, e.Position.Y+1, e.Position.Z, 1, 1)
+				handler.BroadcastHurtAnimation(sess.Player.EntityID, 0, s.sessions)
+			}
+		}
 		return
 	}
 

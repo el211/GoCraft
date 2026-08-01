@@ -125,7 +125,14 @@ func (s *Section) At(x, y, z int) Block {
 // Set places a block at section-local coordinates.
 // Uses Block.Key() for deduplication so blocks with identical properties are
 // always treated as the same palette entry regardless of map insertion order.
+// If the paletteIndex was freed by Finalize it is rebuilt lazily here.
 func (s *Section) Set(x, y, z int, block Block) {
+	if s.paletteIndex == nil {
+		s.paletteIndex = make(map[string]uint16, len(s.blockPalette))
+		for i, b := range s.blockPalette {
+			s.paletteIndex[b.Key()] = uint16(i)
+		}
+	}
 	gridIdx := y*256 + z*16 + x
 	key := block.Key()
 
@@ -157,6 +164,16 @@ func (s *Section) updateNonAir(old, new uint16) {
 	}
 }
 
+// Finalize drops the palette deduplication maps after a section has been fully
+// loaded and is not expected to be written to immediately. This recovers the
+// heap used by paletteIndex and biomeIndex (~5-15 KB per surface section with
+// many distinct block states). The maps are lazily rebuilt by Set the first
+// time a block write occurs in this section.
+func (s *Section) Finalize() {
+	s.paletteIndex = nil
+	s.biomeIndex = nil
+}
+
 // BlockPalette returns the canonical Block palette for this section.
 // The Java encoder maps each Block to a Java global state ID via its own registry.
 // A future Bedrock encoder will map to Bedrock runtime IDs independently.
@@ -186,7 +203,11 @@ func (s *Section) SetBiomeCell(x, y, z int, biome string) {
 		biome = "minecraft:plains"
 	}
 	if s.biomeIndex == nil {
-		s.SetUniformBiome(s.Biome)
+		// Rebuild biomeIndex from the current palette (may have been freed by Finalize).
+		s.biomeIndex = make(map[string]uint16, len(s.biomePalette))
+		for i, b := range s.biomePalette {
+			s.biomeIndex[b] = uint16(i)
+		}
 	}
 	index, ok := s.biomeIndex[biome]
 	if !ok {

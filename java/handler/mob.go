@@ -271,6 +271,29 @@ func BroadcastRemoveEntity(entityID int32, mgr *session.Manager) {
 	}
 }
 
+// BroadcastHurtAnimation sends a Hurt Animation packet for entityID to all
+// connected sessions. yaw is the attack source direction in degrees.
+func BroadcastHurtAnimation(entityID int32, yaw float32, mgr *session.Manager) {
+	pkt := buildHurtAnimation(entityID, yaw)
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// SendPlayerKnockback sends a Set Entity Motion packet addressed to playerEntityID
+// to the player's own connection, applying a knockback impulse the client physics
+// engine will integrate. This is the standard mechanism for server-side knockback
+// delivered to the player themselves.
+func SendPlayerKnockback(conn *network.ClientConn, playerEntityID int32, vx, vy, vz float64) {
+	pkt := protocol.NewBuilder(packetIDSetEntityMotion).
+		VarInt(playerEntityID).
+		Short(velToShort(vx)).
+		Short(velToShort(vy)).
+		Short(velToShort(vz)).
+		Build()
+	_ = conn.WritePacket(pkt)
+}
+
 // DispatchWorldTime synchronizes the Java client day/night cycle with the
 // simulation clock without blocking the entity tick on socket writes.
 func DispatchWorldTime(age, dayTime int64, mgr *session.Manager) {

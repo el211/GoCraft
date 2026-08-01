@@ -85,6 +85,11 @@ type Config struct {
 	// chunks remain pinned so unsaved changes are never silently discarded.
 	MaxCachedChunks int `yaml:"max_cached_chunks"`
 
+	// Difficulty controls hostile-mob behaviour and spawning.
+	// Valid values: peaceful, easy, normal, hard.  Default: normal.
+	// On peaceful no hostile mobs are spawned and existing ones are removed.
+	Difficulty string `yaml:"difficulty"`
+
 	// Combat timing and knockback settings.
 	Combat CombatConfig `yaml:"combat"`
 
@@ -107,8 +112,9 @@ func defaults() *Config {
 		WorldStorage:      WorldStorageDisk,
 		WorldDir:          "world",
 		ViewDistance:      8,
-		PreGenerateRadius: 12,
-		MaxCachedChunks:   768,
+		PreGenerateRadius: 8,
+		MaxCachedChunks:   256,
+		Difficulty: "normal",
 		Combat: CombatConfig{
 			AttackCooldown:      false,
 			KnockbackHorizontal: 0.4,
@@ -186,6 +192,12 @@ func (c *Config) validate() error {
 	if c.MaxCachedChunks < 128 || c.MaxCachedChunks > 65536 {
 		return fmt.Errorf("max_cached_chunks %d must be between 128 and 65536", c.MaxCachedChunks)
 	}
+	c.Difficulty = strings.ToLower(strings.TrimSpace(c.Difficulty))
+	switch c.Difficulty {
+	case "peaceful", "easy", "normal", "hard":
+	default:
+		return fmt.Errorf("difficulty %q must be peaceful, easy, normal, or hard", c.Difficulty)
+	}
 	if c.Combat.KnockbackHorizontal < 0 || c.Combat.KnockbackHorizontal > 4 {
 		return fmt.Errorf("combat.knockback_horizontal %.3f must be between 0 and 4", c.Combat.KnockbackHorizontal)
 	}
@@ -217,6 +229,7 @@ func (c *Config) validate() error {
 //	GOCRAFT_VIEW_DISTANCE     Java chunk view radius        (default: 8)
 //	GOCRAFT_PREGENERATE_RADIUS Background generation radius (default: 12)
 //	GOCRAFT_MAX_CACHED_CHUNKS Clean chunk cache limit       (default: 768)
+//	GOCRAFT_DIFFICULTY        peaceful/easy/normal/hard    (default: normal)
 //	GOCRAFT_BEDROCK_ENABLED   "true"/"false"              (default: false)
 //	GOCRAFT_BEDROCK_ADDR      Bedrock UDP address         (default: 0.0.0.0:19132)
 //	GOCRAFT_BEDROCK_ONLINE_MODE Xbox Live auth required   (default: true)
@@ -289,6 +302,9 @@ func (c *Config) ApplyEnvOverrides() error {
 		}
 		c.MaxCachedChunks = n
 	}
+	if v := os.Getenv("GOCRAFT_DIFFICULTY"); v != "" {
+		c.Difficulty = strings.ToLower(strings.TrimSpace(v))
+	}
 	if v := os.Getenv("GOCRAFT_ATTACK_COOLDOWN"); v != "" {
 		value, err := strconv.ParseBool(v)
 		if err != nil {
@@ -350,6 +366,7 @@ func logEnvOverrides(c *Config) {
 		{"GOCRAFT_VIEW_DISTANCE", os.Getenv("GOCRAFT_VIEW_DISTANCE")},
 		{"GOCRAFT_PREGENERATE_RADIUS", os.Getenv("GOCRAFT_PREGENERATE_RADIUS")},
 		{"GOCRAFT_MAX_CACHED_CHUNKS", os.Getenv("GOCRAFT_MAX_CACHED_CHUNKS")},
+		{"GOCRAFT_DIFFICULTY", os.Getenv("GOCRAFT_DIFFICULTY")},
 		{"GOCRAFT_ATTACK_COOLDOWN", os.Getenv("GOCRAFT_ATTACK_COOLDOWN")},
 		{"GOCRAFT_KNOCKBACK_HORIZONTAL", os.Getenv("GOCRAFT_KNOCKBACK_HORIZONTAL")},
 		{"GOCRAFT_KNOCKBACK_VERTICAL", os.Getenv("GOCRAFT_KNOCKBACK_VERTICAL")},

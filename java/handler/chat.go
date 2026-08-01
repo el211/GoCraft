@@ -133,6 +133,12 @@ func sendSystemMessage(conn *network.ClientConn, text string) error {
 	return conn.WritePacket(buildSystemChatMessage(text, false))
 }
 
+// SendSystemMessage is the exported variant of sendSystemMessage for use by
+// server-level code that registers commands as closures outside this package.
+func SendSystemMessage(conn *network.ClientConn, text string) error {
+	return sendSystemMessage(conn, text)
+}
+
 // buildSystemChatMessage constructs a System Chat Message (S→C) packet.
 //
 // Wire layout (1.21.4):

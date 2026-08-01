@@ -57,6 +57,14 @@ func buildSoundAt(name string, category int32, x, y, z float64, volume, pitch fl
 		Build()
 }
 
+// SoundCategoryHostile is the sound category for hostile mobs.
+const SoundCategoryHostile int32 = 5
+
+// BroadcastSoundAt plays a positioned sound event to all connected players.
+func BroadcastSoundAt(mgr *session.Manager, name string, category int32, x, y, z float64, volume, pitch float32) {
+	broadcastSoundAt(mgr, name, category, x, y, z, volume, pitch)
+}
+
 func broadcastSoundAt(mgr *session.Manager, name string, category int32, x, y, z float64, volume, pitch float32) {
 	pkt := buildSoundAt(name, category, x, y, z, volume, pitch)
 	if pkt == nil {

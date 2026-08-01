@@ -69,13 +69,25 @@ func RegisterBuiltins(d *Dispatcher) {
 	d.Register("flyspeed", cmdFlySpeed)
 	d.Register("flyyspeed", cmdFlySpeed) // compatibility with the commonly typed spelling
 	d.Register("kick", cmdKick)
+	d.Register("seed", cmdSeed)
 }
 
 // ── /help ─────────────────────────────────────────────────────────────────────
 
 func cmdHelp(ctx CommandContext) error {
 	_ = sendSystemMessage(ctx.Conn,
-		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /help")
+		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /tps /timings /help")
+	return nil
+}
+
+// ── /seed ─────────────────────────────────────────────────────────────────────
+
+func cmdSeed(ctx CommandContext) error {
+	if ctx.World == nil {
+		return fmt.Errorf("world state is unavailable")
+	}
+	seed := ctx.World.Seed()
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("World seed: %d", seed))
 	return nil
 }
 

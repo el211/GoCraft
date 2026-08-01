@@ -122,20 +122,29 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 			"mode", p.GameMode, "status", status)
 		applyBlockChange(int(bx), int(by), int(bz), coreworld.Air, w, mgr)
 		breakLinkedPlantHalf(int(bx), int(by), int(bz), broken, w, mgr)
+		breakLinkedBedHalf(int(bx), int(by), int(bz), broken, w, mgr)
 		unlinkChestPartner(int(bx), int(by), int(bz), broken, w, mgr)
 		broadcastSoundAt(mgr, blockBreakSound(broken.ResourceLocation()), soundCategoryBlocks,
 			float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 0.8)
 
 		// Give drop to player in survival/adventure mode.
+		inventoryChanged := false
 		if p.GameMode != player.GameModeCreative && p.GameMode != player.GameModeSpectator {
+			// Chest contents: give stored items to the player before clearing.
+			if isChestBlock(broken.ResourceLocation()) {
+				for _, item := range w.ContainerItems(int(bx), int(by), int(bz)) {
+					if item.ItemID != "" && item.Count > 0 {
+						if p.GiveItem(player.ItemStack{ItemID: item.ItemID, Count: item.Count}) {
+							inventoryChanged = true
+						}
+					}
+				}
+			}
+
 			dropName, dropCount := blockDropItem(broken.ResourceLocation())
 			if dropName != "" && dropCount > 0 {
 				if p.GiveItem(player.ItemStack{ItemID: dropName, Count: dropCount}) {
-					// Sync updated inventory to the client.
-					sess, ok := mgr.Get(p.UUID)
-					if ok {
-						_ = sendSetContainerContent(sess.Conn, p, 1)
-					}
+					inventoryChanged = true
 					// GoCraft does not yet spawn experience-orb entities, but
 					// experience-bearing ores still provide vanilla pickup feedback.
 					if rewardsExperience(broken.ResourceLocation()) {
@@ -143,6 +152,16 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 							float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 0.2, 1)
 					}
 				}
+			}
+		}
+		// Clear orphaned container data regardless of game mode.
+		if isChestBlock(broken.ResourceLocation()) {
+			w.SetContainerItems(int(bx), int(by), int(bz), broken.ResourceLocation(), nil)
+		}
+		// Sync inventory once if anything was added.
+		if inventoryChanged {
+			if sess, ok := mgr.Get(p.UUID); ok {
+				_ = sendSetContainerContent(sess.Conn, p, 1)
 			}
 		}
 	}
@@ -436,6 +455,13 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 		sendAcknowledgeBlockChange(mgr, p, seq)
 		return nil
 	}
+	// Bed right-click: sleeping interaction.
+	if isBedBlock(targetBlock.ResourceLocation()) {
+		handleBedInteract(w)
+		sendAcknowledgeBlockChange(mgr, p, seq)
+		return nil
+	}
+
 	if menuType := containerMenuType(targetBlock.ResourceLocation()); menuType >= 0 {
 		title := containerTitle(targetBlock.ResourceLocation())
 		slog.Info("container opened", "player", p.Username, "block", targetBlock.ResourceLocation())
@@ -486,10 +512,16 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 	block := javaworld.ItemIDToBlock(held.ItemID)
 	slog.Info("block place", "player", p.Username,
 		"block", block.ResourceLocation(), "x", px, "y", py, "z", pz)
-	switch block.ResourceLocation() {
-	case "minecraft:chest", "minecraft:trapped_chest":
+	switch {
+	case block.ResourceLocation() == "minecraft:chest" || block.ResourceLocation() == "minecraft:trapped_chest":
 		placeChestBlock(p, px, py, pz, block.ResourceLocation(), w, mgr)
 		w.SetContainerItems(px, py, pz, block.ResourceLocation(), nil)
+	case isBedBlock(block.ResourceLocation()):
+		if !placeBedBlock(p, px, py, pz, block.ResourceLocation(), w, mgr) {
+			// No room for the head half — cancel placement entirely.
+			sendAcknowledgeBlockChange(mgr, p, seq)
+			return nil
+		}
 	default:
 		applyBlockChange(px, py, pz, block, w, mgr)
 	}
@@ -576,6 +608,114 @@ func useHoeOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.Pl
 		}
 	}
 	return true
+}
+
+func isChestBlock(blockName string) bool {
+	return blockName == "minecraft:chest" || blockName == "minecraft:trapped_chest"
+}
+
+// isBedBlock reports whether a resource location is one of the 16 bed colours.
+func isBedBlock(name string) bool {
+	switch name {
+	case "minecraft:white_bed", "minecraft:orange_bed", "minecraft:magenta_bed",
+		"minecraft:light_blue_bed", "minecraft:yellow_bed", "minecraft:lime_bed",
+		"minecraft:pink_bed", "minecraft:gray_bed", "minecraft:light_gray_bed",
+		"minecraft:cyan_bed", "minecraft:purple_bed", "minecraft:blue_bed",
+		"minecraft:brown_bed", "minecraft:green_bed", "minecraft:red_bed",
+		"minecraft:black_bed":
+		return true
+	}
+	return false
+}
+
+// bedFacingFromYaw returns the facing direction a placed bed should use,
+// matching chest logic: the bed faces in the direction the player is looking.
+func bedFacingFromYaw(yaw float32) string {
+	// Normalise to (-180, 180].
+	for yaw > 180 {
+		yaw -= 360
+	}
+	for yaw <= -180 {
+		yaw += 360
+	}
+	switch {
+	case yaw >= -45 && yaw < 45:
+		return "south"
+	case yaw >= 45 && yaw < 135:
+		return "west"
+	case yaw >= -135 && yaw < -45:
+		return "east"
+	default:
+		return "north"
+	}
+}
+
+// bedHeadOffset returns the (dx, dz) offset from the foot to the head for a
+// given facing direction.
+func bedHeadOffset(facing string) (int, int) {
+	switch facing {
+	case "north":
+		return 0, -1
+	case "south":
+		return 0, 1
+	case "east":
+		return 1, 0
+	default: // west
+		return -1, 0
+	}
+}
+
+// placeBedBlock places both halves of a bed at (fx, fy, fz) facing the player.
+func placeBedBlock(p *player.Player, fx, fy, fz int, kind string, w *coreworld.World, mgr *session.Manager) bool {
+	facing := bedFacingFromYaw(p.Rotation.Yaw)
+	dx, dz := bedHeadOffset(facing)
+	hx, hz := fx+dx, fz+dz
+
+	// Both positions must be free.
+	if !placementReplaceable(w.GetBlock(hx, fy, hz).ResourceLocation()) {
+		return false
+	}
+	ns, name, _ := strings.Cut(kind, ":")
+
+	footProps := map[string]string{"facing": facing, "occupied": "false", "part": "foot"}
+	headProps := map[string]string{"facing": facing, "occupied": "false", "part": "head"}
+
+	applyBlockChange(fx, fy, fz, coreworld.Block{Namespace: ns, Name: name, Properties: footProps}, w, mgr)
+	applyBlockChange(hx, fy, hz, coreworld.Block{Namespace: ns, Name: name, Properties: headProps}, w, mgr)
+	return true
+}
+
+// breakLinkedBedHalf removes the other half of a bed when one half is broken.
+func breakLinkedBedHalf(x, y, z int, broken coreworld.Block, w *coreworld.World, mgr *session.Manager) {
+	if !isBedBlock(broken.ResourceLocation()) {
+		return
+	}
+	part := broken.Properties["part"]
+	facing := broken.Properties["facing"]
+	if part == "" || facing == "" {
+		return
+	}
+	dx, dz := bedHeadOffset(facing)
+	var ox, oz int
+	if part == "foot" {
+		ox, oz = x+dx, z+dz // foot → head is in facing direction
+	} else {
+		ox, oz = x-dx, z-dz // head → foot is opposite of facing direction
+	}
+	other := w.GetBlock(ox, y, oz)
+	if other.ResourceLocation() == broken.ResourceLocation() {
+		applyBlockChange(ox, y, oz, coreworld.Air, w, mgr)
+	}
+}
+
+// handleBedInteract is called when a player right-clicks a bed block.
+// At night it requests a time skip to morning; during the day it does nothing.
+func handleBedInteract(w *coreworld.World) {
+	// Night: time 12541–23459 (mobs can spawn).
+	tod := w.WorldTime()
+	if tod >= 12541 || tod == 0 {
+		w.RequestTimeSkip()
+	}
 }
 
 func isHoe(item string) bool {
