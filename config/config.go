@@ -20,7 +20,7 @@ type BedrockConfig struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Address is the UDP listen address for RakNet connections.
-	// The standard Bedrock port is 19132.
+	// GoCraft defaults to the deployment's requested Bedrock UDP port 19106.
 	Address string `yaml:"address"`
 
 	// OnlineMode requires connecting players to authenticate with Xbox Live.
@@ -40,6 +40,36 @@ type CombatConfig struct {
 	AttackCooldown      bool    `yaml:"attack_cooldown"`
 	KnockbackHorizontal float64 `yaml:"knockback_horizontal"`
 	KnockbackVertical   float64 `yaml:"knockback_vertical"`
+}
+
+// ItemTooltipConfig controls the extra information GoCraft adds to item
+// tooltips. Vanilla attributes can be hidden independently because a legacy
+// no-cooldown attack-speed override would otherwise appear as an ugly 1024.
+type ItemTooltipConfig struct {
+	ShowDurability        bool `yaml:"show_durability"`
+	ShowAttributes        bool `yaml:"show_attributes"`
+	HideVanillaAttributes bool `yaml:"hide_vanilla_attributes"`
+}
+
+type ClearLagTargets struct {
+	DroppedItems   bool `yaml:"dropped_items"`
+	ExperienceOrbs bool `yaml:"experience_orbs"`
+	Projectiles    bool `yaml:"projectiles"`
+	PrimedTNT      bool `yaml:"primed_tnt"`
+	FallingBlocks  bool `yaml:"falling_blocks"`
+	Boats          bool `yaml:"boats"`
+	PassiveMobs    bool `yaml:"passive_mobs"`
+	HostileMobs    bool `yaml:"hostile_mobs"`
+}
+
+type ClearLagConfig struct {
+	Enabled                 bool            `yaml:"enabled"`
+	IntervalSeconds         int             `yaml:"interval_seconds"`
+	MinimumEntityAgeSeconds int             `yaml:"minimum_entity_age_seconds"`
+	WarningSeconds          []int           `yaml:"warning_seconds"`
+	WarningMessage          string          `yaml:"warning_message"`
+	CompleteMessage         string          `yaml:"complete_message"`
+	Remove                  ClearLagTargets `yaml:"remove"`
 }
 
 // Config holds all server configuration values.
@@ -90,8 +120,18 @@ type Config struct {
 	// On peaceful no hostile mobs are spawned and existing ones are removed.
 	Difficulty string `yaml:"difficulty"`
 
+	DefaultGameMode string `yaml:"default_gamemode"`
+
+	// Operators bootstraps named operators. Runtime /op changes are persisted
+	// separately in ops.json, matching the vanilla server convention.
+	Operators []string
+
 	// Combat timing and knockback settings.
 	Combat CombatConfig `yaml:"combat"`
+
+	ItemTooltips ItemTooltipConfig `yaml:"item_tooltips"`
+
+	ClearLag ClearLagConfig `yaml:"clear_lag"`
 
 	// Bedrock Edition UDP listener settings.
 	Bedrock BedrockConfig `yaml:"bedrock"`
@@ -114,15 +154,36 @@ func defaults() *Config {
 		ViewDistance:      8,
 		PreGenerateRadius: 8,
 		MaxCachedChunks:   256,
-		Difficulty: "normal",
+		Difficulty:        "normal",
+		DefaultGameMode:   "survival",
 		Combat: CombatConfig{
 			AttackCooldown:      false,
 			KnockbackHorizontal: 0.4,
 			KnockbackVertical:   0.4,
 		},
+		ItemTooltips: ItemTooltipConfig{
+			ShowDurability:        true,
+			ShowAttributes:        true,
+			HideVanillaAttributes: true,
+		},
+		ClearLag: ClearLagConfig{
+			Enabled:                 false,
+			IntervalSeconds:         300,
+			MinimumEntityAgeSeconds: 30,
+			WarningSeconds:          []int{60, 30, 10, 5, 4, 3, 2, 1},
+			WarningMessage:          "[ClearLag] Removing old entities in {seconds}s",
+			CompleteMessage:         "[ClearLag] Removed {count} old entities",
+			Remove: ClearLagTargets{
+				DroppedItems:   true,
+				ExperienceOrbs: true,
+				Projectiles:    true,
+				PrimedTNT:      true,
+				FallingBlocks:  true,
+			},
+		},
 		Bedrock: BedrockConfig{
 			Enabled:    false,
-			Address:    "0.0.0.0:19132",
+			Address:    "0.0.0.0:19106",
 			OnlineMode: true,
 		},
 	}
@@ -198,11 +259,28 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("difficulty %q must be peaceful, easy, normal, or hard", c.Difficulty)
 	}
+	c.DefaultGameMode = strings.ToLower(strings.TrimSpace(c.DefaultGameMode))
+	switch c.DefaultGameMode {
+	case "survival", "creative", "adventure", "spectator":
+	default:
+		return fmt.Errorf("default_gamemode %q must be survival, creative, adventure, or spectator", c.DefaultGameMode)
+	}
 	if c.Combat.KnockbackHorizontal < 0 || c.Combat.KnockbackHorizontal > 4 {
 		return fmt.Errorf("combat.knockback_horizontal %.3f must be between 0 and 4", c.Combat.KnockbackHorizontal)
 	}
 	if c.Combat.KnockbackVertical < 0 || c.Combat.KnockbackVertical > 4 {
 		return fmt.Errorf("combat.knockback_vertical %.3f must be between 0 and 4", c.Combat.KnockbackVertical)
+	}
+	if c.ClearLag.IntervalSeconds < 10 {
+		return errors.New("clear_lag.interval_seconds must be at least 10")
+	}
+	if c.ClearLag.MinimumEntityAgeSeconds < 0 {
+		return errors.New("clear_lag.minimum_entity_age_seconds must be >= 0")
+	}
+	for _, seconds := range c.ClearLag.WarningSeconds {
+		if seconds <= 0 || seconds >= c.ClearLag.IntervalSeconds {
+			return fmt.Errorf("clear_lag warning %d must be between 1 and interval_seconds-1", seconds)
+		}
 	}
 	if c.Bedrock.Enabled && c.Bedrock.Address == "" {
 		return errors.New("bedrock.address must not be empty when bedrock is enabled")
@@ -231,7 +309,7 @@ func (c *Config) validate() error {
 //	GOCRAFT_MAX_CACHED_CHUNKS Clean chunk cache limit       (default: 768)
 //	GOCRAFT_DIFFICULTY        peaceful/easy/normal/hard    (default: normal)
 //	GOCRAFT_BEDROCK_ENABLED   "true"/"false"              (default: false)
-//	GOCRAFT_BEDROCK_ADDR      Bedrock UDP address         (default: 0.0.0.0:19132)
+//	GOCRAFT_BEDROCK_ADDR      Bedrock UDP address         (default: 0.0.0.0:19106)
 //	GOCRAFT_BEDROCK_ONLINE_MODE Xbox Live auth required   (default: true)
 func (c *Config) ApplyEnvOverrides() error {
 	if v := os.Getenv("GOCRAFT_JAVA_HOST"); v != "" {

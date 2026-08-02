@@ -17,8 +17,8 @@ import (
 	"log/slog"
 	"strings"
 
-	coreworld "GoCraft/core/world"
 	"GoCraft/core/player"
+	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
 	"GoCraft/java/session"
@@ -126,10 +126,14 @@ func broadcastSystemMessage(mgr *session.Manager, text string) {
 	for _, s := range mgr.SnapshotAll() {
 		_ = s.Conn.WritePacket(pkt)
 	}
+	mgr.ObserveMessage(text)
 }
 
 // sendSystemMessage sends a plain-text System Chat Message to one connection.
 func sendSystemMessage(conn *network.ClientConn, text string) error {
+	if conn == nil {
+		return nil
+	}
 	return conn.WritePacket(buildSystemChatMessage(text, false))
 }
 
@@ -167,22 +171,36 @@ func nbtTextComponent(text string) []byte {
 	var buf bytes.Buffer
 
 	buf.WriteByte(0x0A) // TAG_Compound root
+	writeNBTStringEntry(&buf, "text", text)
+	buf.WriteByte(0x00) // TAG_End
+	return buf.Bytes()
+}
 
-	// TAG_String entry: type + name + value
+// nbtLoreTextComponent encodes an explicitly styled lore line. Item lore is
+// dark-purple and italic by default, so both fields must be present to produce
+// the compact vanilla-like tooltip used by GoCraft.
+func nbtLoreTextComponent(text, color string) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(0x0A) // TAG_Compound root
+	writeNBTStringEntry(&buf, "text", text)
+	writeNBTStringEntry(&buf, "color", color)
+	buf.WriteByte(0x01) // TAG_Byte
+	writeNBTString(&buf, "italic")
+	buf.WriteByte(0) // false
+	buf.WriteByte(0x00)
+	return buf.Bytes()
+}
+
+func writeNBTStringEntry(buf *bytes.Buffer, name, value string) {
 	buf.WriteByte(0x08) // TAG_String
+	writeNBTString(buf, name)
+	writeNBTString(buf, value)
+}
 
-	nameBytes := []byte("text")
+func writeNBTString(buf *bytes.Buffer, value string) {
+	nameBytes := []byte(value)
 	var nameLen [2]byte
 	binary.BigEndian.PutUint16(nameLen[:], uint16(len(nameBytes)))
 	buf.Write(nameLen[:])
 	buf.Write(nameBytes)
-
-	textBytes := []byte(text)
-	var textLen [2]byte
-	binary.BigEndian.PutUint16(textLen[:], uint16(len(textBytes)))
-	buf.Write(textLen[:])
-	buf.Write(textBytes)
-
-	buf.WriteByte(0x00) // TAG_End
-	return buf.Bytes()
 }

@@ -29,3 +29,26 @@ func TestGiveItemFailureIsAtomic(t *testing.T) {
 		t.Fatalf("failed GiveItem mutated stack to %d", got)
 	}
 }
+
+func TestHealFullRestoresLivingSurvivalState(t *testing.T) {
+	p := New([16]byte{}, `healer`, ClientEditionJava)
+	p.Health = 3
+	p.Food = 4
+	p.Saturation = 0
+	p.LastDamageCause = `test damage`
+	if !p.HealFull() {
+		t.Fatal(`HealFull rejected a living player`)
+	}
+	health, food, saturation, dead := p.HealthSnapshot()
+	if health != 20 || food != 20 || saturation != 5 || dead {
+		t.Fatalf(`healed state = health %.1f food %d saturation %.1f dead %v`, health, food, saturation, dead)
+	}
+}
+
+func TestHealFullDoesNotReviveDeadPlayer(t *testing.T) {
+	p := New([16]byte{}, `dead`, ClientEditionJava)
+	p.ApplyDamage(20, `test damage`)
+	if p.HealFull() {
+		t.Fatal(`HealFull revived a dead player`)
+	}
+}

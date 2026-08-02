@@ -13,10 +13,21 @@ import (
 	"math"
 
 	corentity "GoCraft/core/entity"
+	"GoCraft/core/player"
+	"GoCraft/core/spatial"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
 	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
+)
+
+const (
+	entityMetadataPoseIndex              byte  = 6
+	livingEntityMetadataSleepingPosIndex byte  = 14
+	metadataTypeOptionalBlockPos         int32 = 11
+	metadataTypePose                     int32 = 21
+	entityPoseStanding                   int32 = 0
+	entityPoseSleeping                   int32 = 2
 )
 
 // ── Packet builders ───────────────────────────────────────────────────────────
@@ -49,6 +60,8 @@ func buildSpawnMob(e *corentity.Entity) (*protocol.Packet, bool) {
 	data := int32(0)
 	if e.Type == corentity.TypeFallingBlock {
 		data = e.FallingBlockStateID
+	} else if corentity.IsProjectile(e.Type) && e.OwnerEntityID != 0 {
+		data = e.OwnerEntityID + 1
 	}
 	return protocol.NewBuilder(packetIDSpawnEntity).
 		VarInt(e.EntityID).
@@ -68,8 +81,20 @@ func buildSpawnMob(e *corentity.Entity) (*protocol.Packet, bool) {
 // buildMobMetadata returns the initial tracked data required for mob variants.
 // In 1.21.4 a villager's data accessor is index 18, serializer 19, followed by
 // registry VarInts for type and profession and a VarInt career level.
-// Pose (index 6, type 21) is included: 9=SLEEPING, 0=STANDING.
+// Pose (index 6, type 21) and the LivingEntity sleeping position (index 14,
+// type 11) are included so sleeping villagers render on their assigned bed.
 func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
+	if e.Type == corentity.TypeItem {
+		if e.ItemID == "" || e.ItemCount <= 0 {
+			return nil
+		}
+		b := protocol.NewBuilder(packetIDSetEntityData).
+			VarInt(e.EntityID).
+			Byte(8).  // ItemEntity DATA_ITEM metadata index
+			VarInt(7) // ItemStack metadata serializer
+		encodeSlot(b, player.ItemStack{ItemID: e.ItemID, Count: e.ItemCount, Damage: e.ItemDamage})
+		return b.Byte(0xff).Build()
+	}
 	if e.Type != corentity.TypeVillager {
 		return nil
 	}
@@ -79,18 +104,14 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 	} else if level > 5 {
 		level = 5
 	}
-	pose := int32(0) // STANDING
-	if e.Sleeping {
-		pose = 9 // SLEEPING
-	}
 	b := protocol.NewBuilder(packetIDSetEntityData).VarInt(e.EntityID)
+	b = appendLivingEntitySleepMetadata(b, e.Sleeping, e.VillageBed)
 	if e.IsBaby {
 		b = b.Byte(16).VarInt(8).Bool(true) // AgeableMob DATA_BABY_ID (index 16, Boolean type 8)
 	}
 	return b.
-		Byte(6).VarInt(21).VarInt(pose). // Pose
-		Byte(18).                         // DATA_VILLAGER_DATA metadata index
-		VarInt(19).                       // VILLAGER_DATA serializer ID
+		Byte(18).   // DATA_VILLAGER_DATA metadata index
+		VarInt(19). // VILLAGER_DATA serializer ID
 		VarInt(villagerVariantProtocolID(e.VillagerVariant)).
 		VarInt(villagerProfessionProtocolID(e.VillagerProfession)).
 		VarInt(level).
@@ -108,6 +129,23 @@ func BroadcastVillagerMetadata(e *corentity.Entity, mgr *session.Manager) {
 	go func() {
 		for _, s := range mgr.SnapshotAll() {
 			_ = s.Conn.WritePacket(pkt)
+		}
+	}()
+}
+
+// BroadcastVillagerSleepState sends position before pose metadata so the
+// sleeping renderer anchors the villager to the assigned bed rather than the
+// last point reached by pathfinding.
+func BroadcastVillagerSleepState(e *corentity.Entity, mgr *session.Manager) {
+	teleport := buildTeleportMob(e)
+	metadata := buildMobMetadata(e)
+	if metadata == nil {
+		return
+	}
+	go func() {
+		for _, s := range mgr.SnapshotAll() {
+			_ = s.Conn.WritePacket(teleport)
+			_ = s.Conn.WritePacket(metadata)
 		}
 	}()
 }
@@ -188,7 +226,6 @@ func buildTeleportMob(e *corentity.Entity) *protocol.Packet {
 		Double(e.VZ).
 		Float(e.Yaw).
 		Float(e.Pitch).
-		Int(0). // relative movement flags
 		Bool(e.OnGround).
 		Build()
 }
@@ -198,6 +235,23 @@ func buildHurtAnimation(entityID int32, yaw float32) *protocol.Packet {
 	return protocol.NewBuilder(packetIDHurtAnimation).
 		VarInt(entityID).
 		Float(yaw).
+		Build()
+}
+
+// buildEntityEvent constructs ClientboundEntityEventPacket. Status 3 starts
+// the standard living-entity death animation on the vanilla client.
+func buildEntityEvent(entityID int32, status byte) *protocol.Packet {
+	return protocol.NewBuilder(packetIDEntityEvent).
+		Int(entityID).
+		Byte(status).
+		Build()
+}
+
+func buildCollectItem(itemEntityID, collectorEntityID int32, count int) *protocol.Packet {
+	return protocol.NewBuilder(packetIDTakeItemEntity).
+		VarInt(itemEntityID).
+		VarInt(collectorEntityID).
+		VarInt(int32(count)).
 		Build()
 }
 
@@ -308,6 +362,42 @@ func BroadcastHurtAnimation(entityID int32, yaw float32, mgr *session.Manager) {
 	}
 }
 
+// BroadcastDeathAnimation starts the vanilla red/rotating death animation.
+func BroadcastDeathAnimation(entityID int32, mgr *session.Manager) {
+	pkt := buildEntityEvent(entityID, 3)
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// BroadcastCollectItem animates a dropped stack flying into its collector.
+func BroadcastCollectItem(itemEntityID, collectorEntityID int32, count int, mgr *session.Manager) {
+	pkt := buildCollectItem(itemEntityID, collectorEntityID, count)
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
+// BroadcastCreeperSwell updates the creeper swell direction tracked value.
+// Creeper inherits Mob metadata through index 15; index 16 is its VarInt swell
+// state (-1 idle, 1 fusing) in protocol 769.
+func BroadcastCreeperSwell(entityID int32, swelling bool, mgr *session.Manager) {
+	state := int32(-1)
+	if swelling {
+		state = 1
+	}
+	pkt := protocol.NewBuilder(packetIDSetEntityData).
+		VarInt(entityID).
+		Byte(16).
+		VarInt(1).
+		VarInt(state).
+		Byte(0xff).
+		Build()
+	for _, sess := range mgr.SnapshotAll() {
+		_ = sess.Conn.WritePacket(pkt)
+	}
+}
+
 // SendPlayerKnockback sends a Set Entity Motion packet addressed to playerEntityID
 // to the player's own connection, applying a knockback impulse the client physics
 // engine will integrate. This is the standard mechanism for server-side knockback
@@ -324,38 +414,55 @@ func SendPlayerKnockback(conn *network.ClientConn, playerEntityID int32, vx, vy,
 
 // ── Sleep animation ───────────────────────────────────────────────────────────
 
+// appendLivingEntitySleepMetadata writes the two tracked values vanilla changes
+// when a living entity enters or leaves a bed. Protocol 769 uses Pose index 6
+// with serializer 21, and Optional BlockPos index 14 with serializer 11.
+// Entity flags at index 0 do not contain a sleeping bit.
+func appendLivingEntitySleepMetadata(b *protocol.Builder, sleeping bool, bedPos spatial.BlockPos) *protocol.Builder {
+	pose := entityPoseStanding
+	if sleeping {
+		pose = entityPoseSleeping
+	}
+	b = b.
+		Byte(entityMetadataPoseIndex).
+		VarInt(metadataTypePose).
+		VarInt(pose).
+		Byte(livingEntityMetadataSleepingPosIndex).
+		VarInt(metadataTypeOptionalBlockPos).
+		Bool(sleeping)
+	if sleeping {
+		b = b.Long(bedPos.Encode())
+	}
+	return b
+}
+
 // buildPlayerPoseMetadata builds a Set Entity Data packet that changes a
-// player entity's pose.  In 1.21.4 the Pose field is metadata index 6,
-// serializer type 21 (Pose enum), encoded as a VarInt.
+// player's pose and optional sleeping position together.
 //
 // Canonical pose values:
 //
 //	0 = STANDING
-//	9 = SLEEPING
-func buildPlayerPoseMetadata(entityID int32, pose int32) *protocol.Packet {
-	return protocol.NewBuilder(packetIDSetEntityData).
-		VarInt(entityID).
-		Byte(6).    // index 6 = Pose
-		VarInt(21). // type 21 = Pose (VarInt enum)
-		VarInt(pose).
-		Byte(0xFF). // metadata terminator
+//	2 = SLEEPING
+func buildPlayerPoseMetadata(entityID int32, sleeping bool, bedPos spatial.BlockPos) *protocol.Packet {
+	b := protocol.NewBuilder(packetIDSetEntityData).VarInt(entityID)
+	return appendLivingEntitySleepMetadata(b, sleeping, bedPos).
+		Byte(0xFF).
 		Build()
 }
 
-// BroadcastPlayerSleeping sends the SLEEPING pose (9) for the given entity to
-// all connected sessions, including the sleeping player themselves — the client
-// shows the lying-in-bed animation when it sees its own pose change.
-func BroadcastPlayerSleeping(entityID int32, mgr *session.Manager) {
-	pkt := buildPlayerPoseMetadata(entityID, 9)
+// BroadcastPlayerSleeping sends the SLEEPING pose and bed position for the
+// given entity to all connected sessions, including the sleeping player.
+func BroadcastPlayerSleeping(entityID int32, bedPos spatial.BlockPos, mgr *session.Manager) {
+	pkt := buildPlayerPoseMetadata(entityID, true, bedPos)
 	for _, s := range mgr.SnapshotAll() {
 		_ = s.Conn.WritePacket(pkt)
 	}
 }
 
-// BroadcastPlayerWaking sends the STANDING pose (0) for the given entity to
-// all connected sessions, ending the sleep animation.
+// BroadcastPlayerWaking sends the STANDING pose and clears the sleeping
+// position for the given entity, ending the sleep animation.
 func BroadcastPlayerWaking(entityID int32, mgr *session.Manager) {
-	pkt := buildPlayerPoseMetadata(entityID, 0)
+	pkt := buildPlayerPoseMetadata(entityID, false, spatial.BlockPos{})
 	for _, s := range mgr.SnapshotAll() {
 		_ = s.Conn.WritePacket(pkt)
 	}
@@ -394,8 +501,16 @@ func DispatchWorldTime(age, dayTime int64, mgr *session.Manager) {
 // All packets are built synchronously before the goroutine is spawned.
 // The goroutine therefore only reads from immutable []byte packet buffers —
 // it never touches entity fields, so there is no data race with the next tick.
-func DispatchTickBroadcast(moved []*corentity.Entity, hurtEntities []*corentity.Entity, deadIDs []int32, mgr *session.Manager) {
-	pkts := make([]*protocol.Packet, 0, len(moved)+len(hurtEntities)+len(deadIDs))
+func DispatchTickBroadcast(moved []*corentity.Entity, hurtEntities []*corentity.Entity, deathIDs, deadIDs []int32, spawned []*corentity.Entity, mgr *session.Manager) {
+	pkts := make([]*protocol.Packet, 0, len(moved)+len(hurtEntities)+len(deathIDs)+len(deadIDs)+len(spawned)*2)
+	for _, e := range spawned {
+		if spawn, ok := buildSpawnMob(e); ok {
+			pkts = append(pkts, spawn)
+			if metadata := buildMobMetadata(e); metadata != nil {
+				pkts = append(pkts, metadata)
+			}
+		}
+	}
 	for _, e := range moved {
 		pkts = append(pkts, buildTeleportMob(e))
 	}
@@ -404,6 +519,9 @@ func DispatchTickBroadcast(moved []*corentity.Entity, hurtEntities []*corentity.
 		if sound := buildEntitySound(hurtSound(e), soundCategoryNeutral, e.EntityID, 1, 1); sound != nil {
 			pkts = append(pkts, sound)
 		}
+	}
+	for _, id := range deathIDs {
+		pkts = append(pkts, buildEntityEvent(id, 3))
 	}
 	for _, id := range deadIDs {
 		pkts = append(pkts, buildRemoveEntities(id))

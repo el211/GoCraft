@@ -18,6 +18,7 @@ import (
 	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
+	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
 )
 
@@ -50,6 +51,41 @@ var summonableMobNames = []string{
 
 // RegisterBuiltins registers all built-in GoCraft commands with d.
 func RegisterBuiltins(d *Dispatcher) {
+	d.Register(`help`, cmdHelp)
+	d.Register(`list`, cmdList)
+	d.Register(`xyz`, cmdXYZ)
+	d.Register(`version`, cmdVersion)
+	d.Register(`ver`, cmdVersion)
+	// /op performs its own permission check so an empty, newly-created server
+	// can bootstrap its first operator with /op @s.
+	d.Register(`op`, cmdOp)
+
+	d.RegisterOperator(`heal`, cmdHeal)
+	d.RegisterOperator(`effect`, cmdEffect)
+	d.RegisterOperator(`gamemode`, cmdGameMode)
+	d.RegisterOperator(`gm`, cmdGameMode)
+	d.RegisterOperator(`tp`, cmdTp)
+	d.RegisterOperator(`locate`, cmdLocate)
+	d.RegisterOperator(`summon`, cmdSummon)
+	d.RegisterOperator(`give`, cmdGive)
+	d.RegisterOperator(`get`, cmdGet)
+	d.RegisterOperator(`fly`, cmdFly)
+	d.RegisterOperator(`god`, cmdGod)
+	d.RegisterOperator(`ungod`, cmdUngod)
+	d.RegisterOperator(`potioneffect`, cmdPotionEffect)
+	d.RegisterOperator(`walkspeed`, cmdWalkSpeed)
+	d.RegisterOperator(`walkspeen`, cmdWalkSpeed)
+	d.RegisterOperator(`flyspeed`, cmdFlySpeed)
+	d.RegisterOperator(`flyyspeed`, cmdFlySpeed)
+	d.RegisterOperator(`kick`, cmdKick)
+	d.RegisterOperator(`kill`, cmdKill)
+	d.RegisterOperator(`seed`, cmdSeed)
+	d.RegisterOperator(`spawnboat`, cmdSpawnBoat)
+}
+
+func registerBuiltinsWithoutPermissions(d *Dispatcher) {
+	d.Register(`heal`, cmdHeal)
+	d.Register(`effect`, cmdEffect)
 	d.Register("help", cmdHelp)
 	d.Register("list", cmdList)
 	d.Register("gamemode", cmdGameMode)
@@ -69,6 +105,7 @@ func RegisterBuiltins(d *Dispatcher) {
 	d.Register("flyspeed", cmdFlySpeed)
 	d.Register("flyyspeed", cmdFlySpeed) // compatibility with the commonly typed spelling
 	d.Register("kick", cmdKick)
+	d.Register("kill", cmdKill)
 	d.Register("seed", cmdSeed)
 	d.Register("spawnboat", cmdSpawnBoat)
 }
@@ -77,7 +114,7 @@ func RegisterBuiltins(d *Dispatcher) {
 
 func cmdHelp(ctx CommandContext) error {
 	_ = sendSystemMessage(ctx.Conn,
-		"Commands: /gamemode /tp /xyz /locate /summon /give /get /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /spawnboat /time /tps /timings /help")
+		"Commands: /gamemode /tp /xyz /locate /summon /give /get /kill /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /spawnboat /time /tps /timings /help")
 	return nil
 }
 
@@ -397,6 +434,19 @@ func cmdTp(ctx CommandContext) error {
 
 	// Player-name teleport.
 	targetName := ctx.Args[0]
+	if ctx.FindPlayer != nil {
+		if target := ctx.FindPlayer(targetName); target != nil {
+			pos := target.Position
+			if ctx.TeleportTo == nil {
+				return fmt.Errorf(`teleport service is unavailable`)
+			}
+			if err := ctx.TeleportTo(pos.X, pos.Y, pos.Z); err != nil {
+				return fmt.Errorf(`teleporting: %w`, err)
+			}
+			_ = sendCommandMessage(ctx, fmt.Sprintf(`Teleported to %s`, target.Username))
+			return nil
+		}
+	}
 	for _, s := range ctx.Manager.SnapshotAll() {
 		if strings.EqualFold(s.Player.Username, targetName) {
 			pos := s.Player.Position
@@ -488,6 +538,18 @@ func findOnlinePlayer(ctx CommandContext, name string) (*player.Player, *network
 }
 
 func cmdFly(ctx CommandContext) error {
+	if ctx.SyncAbilities != nil {
+		defer ctx.SyncAbilities(ctx.Player)
+	}
+	if ctx.Reply != nil {
+		defer func() {
+			state := `disabled`
+			if ctx.Player != nil && ctx.Player.Flying {
+				state = `enabled`
+			}
+			_ = ctx.Reply(`Flight ` + state)
+		}()
+	}
 	if len(ctx.Args) != 0 {
 		return fmt.Errorf("usage: /fly")
 	}
@@ -581,6 +643,38 @@ func cmdPotionEffect(ctx CommandContext) error {
 	return nil
 }
 
+func cmdEffect(ctx CommandContext) error {
+	if len(ctx.Args) != 3 {
+		return fmt.Errorf(`usage: /effect <player> <potion_effect> <duration_seconds>`)
+	}
+	return cmdPotionEffect(ctx)
+}
+
+func cmdHeal(ctx CommandContext) error {
+	if len(ctx.Args) > 1 {
+		return fmt.Errorf(`usage: /heal [player]`)
+	}
+	targetName := `@s`
+	if len(ctx.Args) == 1 {
+		targetName = ctx.Args[0]
+	}
+	target, targetConn, err := findOnlinePlayer(ctx, targetName)
+	if err != nil {
+		return err
+	}
+	if !target.HealFull() {
+		return fmt.Errorf(`%s is dead and must respawn before being healed`, target.Username)
+	}
+	if err := sendUpdateHealth(targetConn, target); err != nil {
+		return fmt.Errorf(`syncing %s health: %w`, target.Username, err)
+	}
+	_ = sendSystemMessage(ctx.Conn, fmt.Sprintf(`Healed %s to full health`, target.Username))
+	if target != ctx.Player {
+		_ = sendSystemMessage(targetConn, `You were healed to full health`)
+	}
+	return nil
+}
+
 // -- /kick -----------------------------------------------------------------
 func cmdKick(ctx CommandContext) error {
 	if len(ctx.Args) < 1 {
@@ -605,6 +699,37 @@ func cmdKick(ctx CommandContext) error {
 		}
 	}
 	return fmt.Errorf("player not found: %s", targetName)
+}
+
+// -- /kill -----------------------------------------------------------------
+
+func cmdKill(ctx CommandContext) error {
+	if len(ctx.Args) > 1 {
+		return fmt.Errorf("usage: /kill [player]")
+	}
+	var target *session.Session
+	if len(ctx.Args) == 0 {
+		for _, candidate := range ctx.Manager.SnapshotAll() {
+			if candidate.Player == ctx.Player {
+				target = candidate
+				break
+			}
+		}
+	} else {
+		for _, candidate := range ctx.Manager.SnapshotAll() {
+			if candidate.Player != nil && strings.EqualFold(candidate.Player.Username, ctx.Args[0]) {
+				target = candidate
+				break
+			}
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("player not found")
+	}
+	if !KillPlayer(target, "fell out of the world", ctx.Manager) {
+		return fmt.Errorf("%s is already dead", target.Player.Username)
+	}
+	return nil
 }
 
 // buildDisconnectPlay constructs a Disconnect (Play) S→C packet.

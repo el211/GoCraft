@@ -24,7 +24,7 @@ A vanilla Minecraft: Java Edition 1.21.4 client can connect, authenticate, compl
 | Minecraft: Java Edition 1.21.4 | Active development target |
 | Java protocol 769 | Implemented |
 | Other Java Edition versions | Not supported |
-| Minecraft: Bedrock Edition 1.26.30 / protocol 1001 | Early adapter scaffold: RakNet/login and a flat test world only; not supported for normal gameplay or cross-play |
+| Minecraft: Bedrock Edition 1.26.30 / protocol 1001 | Beta native adapter with canonical-world and Java/Bedrock cross-play support |
 
 Changing `version_name` or `protocol_version` in `server.yml` changes the advertised status metadata only; it does not add protocol compatibility.
 
@@ -127,7 +127,7 @@ Changing `version_name` or `protocol_version` in `server.yml` changes the advert
 
 ### Not implemented
 
-Complete survival simulation, vanilla-complete block hardness and tool validation, player-versus-player combat, advanced inventory click modes, timed furnace/smoker/blast-furnace processing, double chests, dynamic special recipe execution, complete entity AI/pathfinding, permissions, and trading transactions are not implemented. Paper plugin compatibility, production Bedrock gameplay, and cross-play are not supported.
+Some vanilla systems remain incomplete: advanced Bedrock crafting/container transactions, timed furnace/smoker/blast-furnace processing, complete entity AI/pathfinding, permissions, and every edition-specific sound/particle are not implemented. Java and Bedrock players do share the canonical world, players, mobs, chat, combat, drops, time, movement, equipment, health/death/respawn, and basic block/inventory interactions. Paper plugin compatibility is not supported.
 
 ## Architecture
 
@@ -149,8 +149,8 @@ Java Edition client ───▶ │ Java protocol adapter    │
                          └──────────────┬───────────┘
                                         │ canonical Block / Chunk
                          ┌──────────────▼───────────┐
-Bedrock client ─ ─ ─ ─ ▶ │ Experimental Bedrock      │
-                         │ bedrock/world (flat test)│
+Bedrock client ─ ─ ─ ─ ▶ │ Native Bedrock adapter    │
+                         │ bedrock/world + sync     │
                          └──────────────────────────┘
 ```
 
@@ -195,7 +195,7 @@ type Provider interface {
 
 - **GoCraft core (`core/`)** owns the edition-neutral game state: blocks, chunks, world, entities, players, inventories, and spatial types. It never imports `java/` or `bedrock/`.
 - **Java adapter (`java/`)** reads from `core/` and produces native Java Edition packets: TCP framing, login auth, encryption, chunk encoding, and play-state management. It does not know Bedrock exists.
-- **Bedrock adapter (`bedrock/`)** is an early scaffold using RakNet/UDP and Xbox authentication. It currently serves minimal flat test chunks and posts limited intents to the core; canonical-world encoding, normal gameplay, and cross-play remain future work.
+- **Bedrock adapter (`bedrock/`)** uses RakNet/UDP and optional Xbox authentication, translates canonical chunks to Bedrock block hashes, posts gameplay intents to the core, and synchronizes shared players/entities back to every Bedrock session.
 - **Server layer (`server/`)** wires configuration, the core, and the active adapters into the executable.
 
 ## Development status
@@ -217,7 +217,7 @@ type Provider interface {
 | 13 — Data-driven registries | Complete | Load block state IDs, item IDs, entity-type IDs, and biome IDs from versioned JSON (`blocks.json`, `items.json`, `registries.json`); embedded via go:embed; hardcoded Go maps replaced; unknown IDs warn once via sync.Map |
 | 13.1 — Data-driven packet IDs | Complete | Semantic packet names (minecraft:login etc.) in versioned JSON; internal/protocoldata MustCB/MustSB panic at startup on missing names; all handler hex constants removed; validation test suite (7 distinct invariants); GitHub Actions CI on ubuntu-latest |
 | Experimental gameplay extensions | In progress | Full recipe catalog, basic crafting execution, persistent single chests, farming, configurable legacy-style mob combat, village residents and guards |
-| 14 — Bedrock adapter | In progress | RakNet/UDP, Xbox auth, and minimal flat test chunks exist; canonical-world encoding and cross-play remain future work |
+| 14 — Bedrock adapter | Beta | RakNet/UDP, Xbox auth, canonical chunk encoding, shared simulation, inventory basics, and bidirectional Java/Bedrock visibility |
 | 15 — Go plugin API | Future work | Event bus, command registration, scheduler, permission nodes; plugins are compiled Go packages |
 
 Detailed records for completed milestones are kept in [`logs/`](logs/).
@@ -279,7 +279,7 @@ pregenerate_radius: 12
 max_cached_chunks: 768
 bedrock:
   enabled: false
-  address: 0.0.0.0:19132
+  address: 0.0.0.0:19106
   online_mode: true
 ```
 
@@ -303,7 +303,7 @@ bedrock:
 | `view_distance` | Java chunk radius sent to each client (`2`-`32`) |
 | `pregenerate_radius` | Larger background cache radius (`view_distance`-`64`) |
 | `max_cached_chunks` | Maximum clean chunks retained in RAM (`128`-`65536`); default `768` |
-| `bedrock.*` | Enables/configures the early Bedrock listener; it currently provides only experimental flat-world connectivity, not supported gameplay or cross-play |
+| `bedrock.*` | Enables/configures the Bedrock UDP listener, Xbox authentication, and shared-world Java/Bedrock play; `address` may use any available UDP port, including `19106` |
 
 Disk mode creates `world_dir/region` at startup, keeps a bounded hot-chunk cache in RAM, commits generated and modified chunks to Anvil region files every 30 seconds, and flushes again on clean shutdown. Memory mode performs no disk reads or writes, so its world changes are lost on restart. Go may retain freed heap pages for reuse, so panel-reported RAM does not always fall immediately even when cached chunks are evicted.
 
@@ -333,7 +333,7 @@ Stop the server with <kbd>Ctrl</kbd>+<kbd>C</kbd>. The default listener is `0.0.
 GoCraft/
 ├── bedrock/
 │   ├── listener.go            # Experimental RakNet/login and limited Bedrock play loop
-│   └── world/                 # Minimal flat test sub-chunk encoder
+│   └── world/                 # Canonical block-hash and sub-chunk encoder
 ├── config/
 │   └── config.go              # YAML loading, defaults, and validation
 ├── core/
@@ -392,9 +392,9 @@ GoCraft/
 
 A Go-native plugin API is planned, but **no plugin system is implemented today**. The intended direction includes events, scheduling, commands, permissions, and extension points built for GoCraft's own core. Paper, Bukkit, and Spigot plugin compatibility is not supported and should not be assumed.
 
-## Bedrock and cross-play plans
+## Bedrock and cross-play
 
-Milestone 14 is in progress. GoCraft has an experimental Bedrock listener and minimal flat test-chunk encoder, but it does not yet encode the canonical GoCraft world or provide usable Java/Bedrock cross-play.
+GoCraft has a native Bedrock listener backed by the same canonical simulation as Java Edition. It indexes the current Bedrock block registry, encodes requested canonical chunks, and synchronizes Java and Bedrock players, mobs, dropped items, boats, projectiles, equipment, chat, block changes, time, health, death, respawn, sleeping, and basic inventories/interactions in both directions.
 
 ### What "adapter" means here
 
@@ -416,9 +416,7 @@ GoCraft is **not** a protocol translator like Geyser. The Bedrock adapter does n
          Java client                       Bedrock client
 ```
 
-The intended end state is for Java and Bedrock clients to observe the same `core/world.World`, with each adapter converting canonical state into its own protocol independently. The current Bedrock flat test world does **not** do that yet. Completing canonical Bedrock block/runtime-ID encoding is required before cross-play can work.
-
-The current `bedrock/` package can accept RakNet connections, perform Bedrock login, start a session, and serve a minimal flat test world. Canonical terrain, shared entities/inventories, block interaction, and working cross-play do not exist yet.
+Both clients now observe the same `core/world.World`, with each adapter converting canonical state into its own protocol independently. The Bedrock implementation is still beta: complex crafting/container stack requests, the full creative catalogue, exact biome palettes, and complete parity for every vanilla UI, sound, particle, and specialised entity behaviour remain future work.
 
 ## Contributing
 

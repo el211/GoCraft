@@ -9,7 +9,7 @@ package handler
 // Relevant packets (Java 1.21.4 / protocol 769):
 //   CB  set_passengers  (0x55 = 85)  — tells client who is riding what
 //   SB  move_vehicle    (0x1B = 27)  — client updates boat position while riding
-//   SB  player_input    (0x20 = 32)  — forward/sideways/flags; sneak flag = dismount
+//   SB  player_input    (0x20 = 32)  — one-byte input flags; shift = dismount
 //   SB  player_command  (0x19 = 25)  — action 8 = leave vehicle
 
 import (
@@ -123,26 +123,18 @@ func HandleMoveVehiclePacket(pkt *protocol.Packet, p *coreplayer.Player, w *core
 }
 
 // HandlePlayerInputPacket parses a SB Player Input packet.
-// Sneak flag (bit 1) = exit vehicle.
+// Shift flag (bit 5) = exit vehicle.
 //
 // Wire layout (1.21.4):
 //
-//	Float  sideways
-//	Float  forward
-//	Byte   flags  (bit 0=jump, bit 1=sneak)
+//	Unsigned Byte inputs (forward, backward, left, right, jump, shift, sprint)
 func HandlePlayerInputPacket(pkt *protocol.Packet, p *coreplayer.Player, w *coreworld.World, conn *network.ClientConn, mgr *session.Manager) error {
 	r := pkt.Reader()
-	if _, err := protocol.ReadFloat(r); err != nil {
-		return fmt.Errorf("player_input: sideways: %w", err)
-	}
-	if _, err := protocol.ReadFloat(r); err != nil {
-		return fmt.Errorf("player_input: forward: %w", err)
-	}
 	flags, err := protocol.ReadByte(r)
 	if err != nil {
 		return fmt.Errorf("player_input: flags: %w", err)
 	}
-	if flags&0x02 != 0 && p.VehicleEntityID != 0 {
+	if flags&0x20 != 0 && p.VehicleEntityID != 0 {
 		DismountPlayer(p, w, conn, mgr)
 	}
 	return nil
@@ -172,6 +164,10 @@ func HandlePlayerCommandPacket(pkt *protocol.Packet, p *coreplayer.Player, w *co
 			BroadcastPlayerWaking(p.EntityID, mgr)
 			_ = sendSystemMessage(conn, "You left your bed.")
 		}
+	case 3: // START_SPRINTING
+		p.Sprinting = true
+	case 4: // STOP_SPRINTING
+		p.Sprinting = false
 	case 8: // LEAVE_VEHICLE
 		if p.VehicleEntityID != 0 {
 			DismountPlayer(p, w, conn, mgr)

@@ -8,10 +8,32 @@ protocol_version: 769
 online_mode: false
 villagers: true
 difficulty: normal
+default_gamemode: survival
+operators: []
 combat:
     attack_cooldown: false
     knockback_horizontal: 0.4
     knockback_vertical: 0.4
+item_tooltips:
+    show_durability: true
+    show_attributes: true
+    hide_vanilla_attributes: true
+clear_lag:
+    enabled: false
+    interval_seconds: 300
+    minimum_entity_age_seconds: 30
+    warning_seconds: [60, 30, 10, 5, 4, 3, 2, 1]
+    warning_message: "[ClearLag] Removing old entities in {seconds}s"
+    complete_message: "[ClearLag] Removed {count} old entities"
+    remove:
+        dropped_items: true
+        experience_orbs: true
+        projectiles: true
+        primed_tnt: true
+        falling_blocks: true
+        boats: false
+        passive_mobs: false
+        hostile_mobs: false
 world_storage: disk
 world_dir: world
 world_seed: 0
@@ -19,6 +41,6 @@ view_distance: 8
 pregenerate_radius: 8
 max_cached_chunks: 256
 bedrock:
-    enabled: false
-    address: 0.0.0.0:19132
+    enabled: true
+    address: 0.0.0.0:19106
     online_mode: true

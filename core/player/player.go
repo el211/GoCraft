@@ -4,6 +4,7 @@
 package player
 
 import (
+	"sync"
 	"time"
 
 	"GoCraft/core/spatial"
@@ -36,6 +37,8 @@ const (
 // owned by the edition adapter, which holds a *Player and updates it as
 // packets arrive.
 type Player struct {
+	healthMu sync.Mutex
+
 	// UUID is the player's unique identifier (edition-agnostic).
 	UUID [16]byte
 	// Username is the player's display name.
@@ -53,6 +56,11 @@ type Player struct {
 	// GameMode is the current game mode.
 	GameMode GameMode
 
+	// Operator grants access to administrative slash commands. GodMode blocks
+	// ordinary survival damage until an operator disables it with /ungod.
+	Operator bool
+	GodMode  bool
+
 	// Flying and movement-speed settings are protocol-independent player
 	// preferences controlled by the built-in flight and speed commands.
 	AllowFlying bool
@@ -62,8 +70,33 @@ type Player struct {
 
 	// AttackCooldown selects modern timed attacks when true. LastAttack is
 	// canonical combat timing state shared by every protocol adapter.
-	AttackCooldown bool
-	LastAttack     time.Time
+	AttackCooldown      bool
+	LastAttack          time.Time
+	KnockbackHorizontal float64
+	KnockbackVertical   float64
+
+	// Survival state is authoritative on the server. Health is measured in
+	// half-hearts (20 is the normal ten-heart maximum).
+	Health            float32
+	MaxHealth         float32
+	Food              int32
+	Saturation        float32
+	Dead              bool
+	LastDamageCause   string
+	InvulnerableUntil time.Time
+	// OnDeath is installed by the owning server and runs once when health first
+	// reaches zero. It is used for edition-neutral world effects such as
+	// dropping the survival inventory.
+	OnDeath func(*Player)
+
+	// FallDistance accumulates downward travel while airborne. Sprinting is
+	// tracked from the client command packet and is used by legacy knockback.
+	FallDistance          float64
+	Sprinting             bool
+	UsingItemID           string
+	UsingItemSince        time.Time
+	LastEnvironmentDamage time.Time
+	UnderwaterSince       time.Time
 
 	// EntityID is the server-assigned entity ID used in packets.
 	// It is assigned by the game core when the player joins.
@@ -78,6 +111,7 @@ type Player struct {
 	// which case the world spawn is used on death.
 	SpawnPoint    spatial.BlockPos
 	HasSpawnPoint bool
+	WorldSpawn    spatial.Vec3
 
 	// Sleeping is true while the player is in the sleep-request state (they
 	// right-clicked a bed at night).  The server tick checks this to decide
@@ -93,21 +127,124 @@ type Player struct {
 
 	// Open-container state is edition-independent inventory state. The Java
 	// adapter maps these slots to the protocol-specific crafting-table layout.
-	OpenContainerID          int32
-	OpenContainerKind        string
-	OpenContainerPos         spatial.BlockPos // right-half pos (slots 0-26) or sole chest
-	OpenContainerPartnerPos  spatial.BlockPos // left-half pos (slots 27-53); zero if single
-	OpenContainerHasPartner  bool
-	ContainerStateID         int32
-	ContainerSlots           []ItemStack
-	CraftingGrid      [9]ItemStack
-	CraftingResult    ItemStack
-	CarriedItem       ItemStack
+	OpenContainerID         int32
+	OpenContainerKind       string
+	OpenContainerPos        spatial.BlockPos // right-half pos (slots 0-26) or sole chest
+	OpenContainerPartnerPos spatial.BlockPos // left-half pos (slots 27-53); zero if single
+	OpenContainerHasPartner bool
+	ContainerStateID        int32
+	ContainerSlots          []ItemStack
+	CraftingGrid            [9]ItemStack
+	CraftingResult          ItemStack
+	CarriedItem             ItemStack
 }
 
 // HeldItem returns the ItemStack in the currently selected hotbar slot.
 func (p *Player) HeldItem() ItemStack {
 	return p.Inventory[HotbarStart+p.HeldSlot]
+}
+
+// ArmorPoints returns the armour HUD value from the four equipped slots.
+func (p *Player) ArmorPoints() int {
+	total := 0
+	for i := 5; i <= 8; i++ {
+		total += ArmorPoints(p.Inventory[i].ItemID)
+	}
+	return total
+}
+
+// ArmorToughness returns the total armour toughness contributed by equipped
+// diamond and netherite armour.
+func (p *Player) ArmorToughness() float32 {
+	var total float32
+	for i := 5; i <= 8; i++ {
+		total += ArmorToughness(p.Inventory[i].ItemID)
+	}
+	return total
+}
+
+// KnockbackResistance returns the equipped armour's vanilla knockback
+// resistance, capped to the attribute's normal range.
+func (p *Player) KnockbackResistance() float32 {
+	var total float32
+	for i := 5; i <= 8; i++ {
+		total += ArmorKnockbackResistance(p.Inventory[i].ItemID)
+	}
+	if total > 1 {
+		return 1
+	}
+	return total
+}
+
+// ApplyDamage atomically subtracts health. It returns the new health and
+// whether this hit caused death.
+func (p *Player) ApplyDamage(amount float32, cause string) (health float32, died bool) {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if amount <= 0 || p.Dead {
+		return p.Health, false
+	}
+	p.Health -= amount
+	if p.Health <= 0 {
+		p.Health = 0
+		p.Dead = true
+		died = true
+	}
+	p.LastDamageCause = cause
+	return p.Health, died
+}
+
+// HealthSnapshot returns a consistent copy of the client-visible survival
+// state.
+func (p *Player) HealthSnapshot() (health float32, food int32, saturation float32, dead bool) {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.Health, p.Food, p.Saturation, p.Dead
+}
+
+// HealFull restores a living player to full health and hunger. Dead players
+// must complete the normal respawn handshake before they can be healed.
+func (p *Player) HealFull() bool {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.Dead {
+		return false
+	}
+	if p.MaxHealth <= 0 {
+		p.MaxHealth = 20
+	}
+	p.Health = p.MaxHealth
+	p.Food = 20
+	p.Saturation = 5
+	p.LastDamageCause = ``
+	p.LastEnvironmentDamage = time.Time{}
+	p.UnderwaterSince = time.Time{}
+	return true
+}
+
+// Revive restores a dead player to the standard full survival state.
+func (p *Player) Revive() {
+	p.healthMu.Lock()
+	if p.MaxHealth <= 0 {
+		p.MaxHealth = 20
+	}
+	p.Health = p.MaxHealth
+	p.Food = 20
+	p.Saturation = 5
+	p.Dead = false
+	p.LastDamageCause = ""
+	p.FallDistance = 0
+	p.OnGround = false
+	p.Sleeping = false
+	p.Sprinting = false
+	p.Flying = false
+	p.UsingItemID = ""
+	p.UsingItemSince = time.Time{}
+	p.LastAttack = time.Time{}
+	p.LastEnvironmentDamage = time.Time{}
+	p.UnderwaterSince = time.Time{}
+	p.InvulnerableUntil = time.Now().Add(3 * time.Second)
+	p.healthMu.Unlock()
 }
 
 // GiveItem adds item to the first available inventory slot, merging into an
@@ -118,6 +255,7 @@ func (p *Player) GiveItem(item ItemStack) bool {
 		return true
 	}
 	remaining := item.Count
+	stackLimit := MaxStackSize(item.ItemID)
 	ranges := [][2]int{{HotbarStart, InventorySize}, {9, HotbarStart}}
 
 	// Refuse atomically when the inventory cannot hold the whole request.
@@ -127,9 +265,9 @@ func (p *Player) GiveItem(item ItemStack) bool {
 			slot := p.Inventory[i]
 			switch {
 			case slot.IsEmpty():
-				capacity += 64
-			case slot.ItemID == item.ItemID && slot.Count < 64:
-				capacity += 64 - slot.Count
+				capacity += stackLimit
+			case slot.ItemID == item.ItemID && slot.Damage == item.Damage && slot.Count < stackLimit:
+				capacity += stackLimit - slot.Count
 			}
 		}
 	}
@@ -141,10 +279,10 @@ func (p *Player) GiveItem(item ItemStack) bool {
 	for _, inventoryRange := range ranges {
 		for i := inventoryRange[0]; i < inventoryRange[1] && remaining > 0; i++ {
 			slot := &p.Inventory[i]
-			if slot.ItemID != item.ItemID || slot.Count >= 64 {
+			if slot.ItemID != item.ItemID || slot.Damage != item.Damage || slot.Count >= stackLimit {
 				continue
 			}
-			room := 64 - slot.Count
+			room := stackLimit - slot.Count
 			add := remaining
 			if add > room {
 				add = room
@@ -161,10 +299,10 @@ func (p *Player) GiveItem(item ItemStack) bool {
 				continue
 			}
 			add := remaining
-			if add > 64 {
-				add = 64
+			if add > stackLimit {
+				add = stackLimit
 			}
-			*slot = ItemStack{ItemID: item.ItemID, Count: add}
+			*slot = ItemStack{ItemID: item.ItemID, Count: add, Damage: item.Damage}
 			remaining -= add
 		}
 	}
@@ -172,16 +310,23 @@ func (p *Player) GiveItem(item ItemStack) bool {
 }
 
 // New creates a Player with sensible defaults.
-// Game mode defaults to Creative so that block interaction works out-of-the-box
-// for testing.  A config-driven game-mode option will be added in a later milestone.
+// Core-only callers get Creative for backwards compatibility; the server
+// overrides this with default_gamemode from server.yml when players join.
 func New(uuid [16]byte, username string, edition ClientEdition) *Player {
 	return &Player{
-		UUID:      uuid,
-		Username:  username,
-		Edition:   edition,
-		Position:  spatial.DefaultSpawnPos,
-		GameMode:  GameModeCreative,
-		FlySpeed:  0.05,
-		WalkSpeed: 0.1,
+		UUID:                uuid,
+		Username:            username,
+		Edition:             edition,
+		Position:            spatial.DefaultSpawnPos,
+		WorldSpawn:          spatial.DefaultSpawnPos,
+		GameMode:            GameModeCreative,
+		FlySpeed:            0.05,
+		WalkSpeed:           0.1,
+		Health:              20,
+		MaxHealth:           20,
+		Food:                20,
+		Saturation:          5,
+		KnockbackHorizontal: 0.4,
+		KnockbackVertical:   0.4,
 	}
 }

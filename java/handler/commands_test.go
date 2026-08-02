@@ -308,3 +308,29 @@ func TestCommandArgumentValidation(t *testing.T) {
 		t.Fatal("out-of-range speed was accepted")
 	}
 }
+
+func TestHealAndEffectCommandsAreRegisteredAndCompletable(t *testing.T) {
+	dispatcher := NewDispatcher()
+	RegisterBuiltins(dispatcher)
+	for _, name := range []string{`heal`, `effect`} {
+		if _, ok := dispatcher.cmds[name]; !ok {
+			t.Errorf(`command %q was not registered`, name)
+		}
+	}
+	nodes, root, err := parseCommandTestGraph(buildCommandsPacket().Data)
+	if err != nil {
+		t.Fatalf(`parse Commands packet: %v`, err)
+	}
+	top := commandTestChildrenByName(t, nodes, nodes[root])
+	if top[`heal`].flags&commandExecutable == 0 {
+		t.Error(`/heal is not executable for the issuing player`)
+	}
+	if _, ok := commandTestChildrenByName(t, nodes, top[`heal`])[`player`]; !ok {
+		t.Error(`/heal player target completion is missing`)
+	}
+	effectTarget := commandTestChildrenByName(t, nodes, top[`effect`])[`player`]
+	effects := commandTestChildrenByName(t, nodes, effectTarget)
+	if len(effects) != len(potionEffectNames) {
+		t.Fatalf(`/effect completion count = %d, want %d`, len(effects), len(potionEffectNames))
+	}
+}

@@ -23,7 +23,7 @@ func TestInteractAttackQueuesDamageForTickThread(t *testing.T) {
 		VarInt(1).
 		Bool(false).
 		Build()
-	if err := handleInteractPacket(packet, attacker, world, nil); err != nil {
+	if err := handleInteractPacket(packet, attacker, world, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if mob.Health != mob.MaxHealth {

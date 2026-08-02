@@ -40,6 +40,16 @@ type CommandContext struct {
 	// NextEntityID allocates an ID shared with players and naturally spawned
 	// mobs. It is supplied by the dispatcher for commands such as /summon.
 	NextEntityID func() int32
+
+	// FindPlayer resolves an online player across both Java and Bedrock
+	// adapters. Commands that only need canonical player state should prefer it
+	// over Manager, which contains Java network sessions only.
+	FindPlayer func(name string) *player.Player
+
+	// Reply sends command feedback to the issuing edition. SyncAbilities asks
+	// that edition adapter to publish changed flight/permission state.
+	Reply         func(text string) error
+	SyncAbilities func(*player.Player)
 }
 
 // CommandFunc is the handler signature for a built-in server command.
@@ -47,24 +57,51 @@ type CommandContext struct {
 // system message; it is NOT logged as a server error.
 type CommandFunc func(ctx CommandContext) error
 
+type registeredCommand struct {
+	fn           CommandFunc
+	operatorOnly bool
+}
+
 // Dispatcher maps command names (lower-case) to their implementations.
 // All methods are safe for concurrent use.
 type Dispatcher struct {
 	mu           sync.RWMutex
-	cmds         map[string]CommandFunc
+	cmds         map[string]registeredCommand
 	nextEntityID func() int32
+	findPlayer   func(string) *player.Player
 }
 
 // NewDispatcher returns an empty, ready-to-use Dispatcher.
 func NewDispatcher() *Dispatcher {
-	return &Dispatcher{cmds: make(map[string]CommandFunc)}
+	return &Dispatcher{cmds: make(map[string]registeredCommand)}
 }
 
 // Register adds fn under the given name.  name is lowercased before storage
 // and matched case-insensitively at dispatch time.
 func (d *Dispatcher) Register(name string, fn CommandFunc) {
 	d.mu.Lock()
-	d.cmds[strings.ToLower(name)] = fn
+	d.cmds[strings.ToLower(name)] = registeredCommand{fn: fn}
+	d.mu.Unlock()
+}
+
+// RegisterOperator adds a command that may only be used by server operators.
+func (d *Dispatcher) RegisterOperator(name string, fn CommandFunc) {
+	d.mu.Lock()
+	d.cmds[strings.ToLower(name)] = registeredCommand{fn: fn, operatorOnly: true}
+	d.mu.Unlock()
+}
+
+// RequireOperator upgrades already-registered commands to operator-only.
+func (d *Dispatcher) RequireOperator(names ...string) {
+	d.mu.Lock()
+	for _, name := range names {
+		key := strings.ToLower(name)
+		command, ok := d.cmds[key]
+		if ok {
+			command.operatorOnly = true
+			d.cmds[key] = command
+		}
+	}
 	d.mu.Unlock()
 }
 
@@ -73,6 +110,14 @@ func (d *Dispatcher) Register(name string, fn CommandFunc) {
 func (d *Dispatcher) SetEntityIDAllocator(allocate func() int32) {
 	d.mu.Lock()
 	d.nextEntityID = allocate
+	d.mu.Unlock()
+}
+
+// SetPlayerFinder installs the edition-neutral online-player lookup used by
+// administrative commands such as /op and /god.
+func (d *Dispatcher) SetPlayerFinder(find func(string) *player.Player) {
+	d.mu.Lock()
+	d.findPlayer = find
 	d.mu.Unlock()
 }
 
@@ -94,16 +139,30 @@ func (d *Dispatcher) Dispatch(input string, ctx CommandContext) {
 	ctx.Args = parts[1:]
 
 	d.mu.RLock()
-	fn, ok := d.cmds[name]
+	command, ok := d.cmds[name]
 	allocateEntityID := d.nextEntityID
+	findPlayer := d.findPlayer
 	d.mu.RUnlock()
 	ctx.NextEntityID = allocateEntityID
+	ctx.FindPlayer = findPlayer
 
 	if !ok {
+		if ctx.Reply != nil {
+			_ = ctx.Reply(fmt.Sprintf(`Unknown command: /%s`, name))
+			return
+		}
 		_ = sendSystemMessage(ctx.Conn, fmt.Sprintf("Unknown command: /%s", name))
 		return
 	}
-	if err := fn(ctx); err != nil {
+	if command.operatorOnly && (ctx.Player == nil || !ctx.Player.Operator) {
+		_ = sendCommandMessage(ctx, `You do not have permission to use this command`)
+		return
+	}
+	if err := command.fn(ctx); err != nil {
+		if ctx.Reply != nil {
+			_ = ctx.Reply(`Error: ` + err.Error())
+			return
+		}
 		_ = sendSystemMessage(ctx.Conn, "Error: "+err.Error())
 	}
 }

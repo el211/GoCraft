@@ -112,7 +112,6 @@ func buildTeleportEntity(p *player.Player) *protocol.Packet {
 		Double(0).Double(0).Double(0). // velocity
 		Float(p.Rotation.Yaw).
 		Float(p.Rotation.Pitch).
-		Int(0). // relative movement flags
 		Bool(p.OnGround).
 		Build()
 }
@@ -186,4 +185,53 @@ func broadcastPosition(mgr *session.Manager, p *player.Player) {
 		_ = s.Conn.WritePacket(teleport)
 		_ = s.Conn.WritePacket(headRot)
 	}
+}
+
+// SendExternalPlayerJoin introduces a player owned by another protocol adapter
+// (currently Bedrock) to one Java session.
+func SendExternalPlayerJoin(conn *network.ClientConn, p *player.Player) {
+	_ = conn.WritePacket(buildPlayerInfoUpdatePkt(p))
+	_ = conn.WritePacket(buildSpawnPlayer(p))
+}
+
+// SendExternalPlayerLeave removes a cross-edition player from one Java session.
+func SendExternalPlayerLeave(conn *network.ClientConn, p *player.Player) {
+	_ = conn.WritePacket(buildRemoveEntities(p.EntityID))
+	_ = conn.WritePacket(buildPlayerInfoRemove(p.UUID))
+}
+
+// SendExternalPlayerPosition updates a cross-edition player for one Java viewer.
+func SendExternalPlayerPosition(conn *network.ClientConn, p *player.Player) {
+	_ = conn.WritePacket(buildTeleportEntity(p))
+	_ = conn.WritePacket(buildSetHeadRotation(p))
+}
+
+// SendExternalPlayerEquipment synchronizes a cross-edition player's visible
+// hands and armour. Protocol 769 uses a continuation bit on each equipment slot
+// byte instead of an array length.
+func SendExternalPlayerEquipment(conn *network.ClientConn, p *player.Player) {
+	if conn == nil || p == nil {
+		return
+	}
+	b := protocol.NewBuilder(packetIDSetEquipment).VarInt(p.EntityID)
+	equipment := []struct {
+		slot byte
+		item player.ItemStack
+	}{
+		{0, p.HeldItem()},
+		{1, p.Inventory[45]},
+		{2, p.Inventory[8]},
+		{3, p.Inventory[7]},
+		{4, p.Inventory[6]},
+		{5, p.Inventory[5]},
+	}
+	for index, entry := range equipment {
+		slot := entry.slot
+		if index != len(equipment)-1 {
+			slot |= 0x80
+		}
+		b.Byte(slot)
+		encodeSlot(b, entry.item)
+	}
+	_ = conn.WritePacket(b.Build())
 }

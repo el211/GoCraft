@@ -56,6 +56,26 @@ func (b Block) ResourceLocation() string {
 	return b.Namespace + ":" + b.Name
 }
 
+// DoublePlantPartnerY returns the vertical partner coordinate and expected
+// half for vanilla two-block plants. It is shared by edition adapters so a
+// break from either Java or Bedrock cannot leave a floating half behind.
+func DoublePlantPartnerY(block Block, y int) (partnerY int, partnerHalf string, ok bool) {
+	switch block.ResourceLocation() {
+	case "minecraft:tall_grass", "minecraft:large_fern", "minecraft:sunflower",
+		"minecraft:lilac", "minecraft:rose_bush", "minecraft:peony", "minecraft:pitcher_plant":
+	default:
+		return 0, "", false
+	}
+	switch block.Properties["half"] {
+	case "lower":
+		return y + 1, "upper", true
+	case "upper":
+		return y - 1, "lower", true
+	default:
+		return 0, "", false
+	}
+}
+
 // Equal reports whether b and other represent exactly the same block state,
 // including all properties. Map iteration order does not affect the result.
 func (b Block) Equal(other Block) bool {

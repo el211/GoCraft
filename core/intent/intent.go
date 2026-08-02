@@ -107,11 +107,96 @@ type TeleportIntent struct {
 	X, Y, Z    float64
 }
 
+// BlockInteractIntent carries a Bedrock block break/place prediction to the
+// simulation thread. Action uses protocol-neutral values declared below.
+type BlockInteractIntent struct {
+	PlayerUUID [16]byte
+	Action     uint8
+	Position   spatial.BlockPos
+	Face       int32
+	HotbarSlot int32
+}
+
+const (
+	BlockActionBreak uint8 = iota + 1
+	BlockActionUse
+)
+
+// EntityInteractIntent requests an attack or use against a canonical entity ID.
+type EntityInteractIntent struct {
+	PlayerUUID [16]byte
+	TargetID   int32
+	Attack     bool
+}
+
+// RespawnIntent requests revival after the Bedrock death-screen button.
+type RespawnIntent struct {
+	PlayerUUID [16]byte
+}
+
+type WakeIntent struct {
+	PlayerUUID [16]byte
+}
+
+type HotbarIntent struct {
+	PlayerUUID [16]byte
+	Slot       int32
+}
+
+const (
+	PlayerStateSprinting uint8 = iota + 1
+	PlayerStateFlying
+)
+
+// PlayerStateIntent carries a Bedrock movement-state transition that must be
+// validated by the simulation before it changes canonical player state.
+type PlayerStateIntent struct {
+	PlayerUUID [16]byte
+	State      uint8
+	Enabled    bool
+}
+
+const InventoryCursorSlot int16 = -1
+
+const (
+	InventoryActionMove uint8 = iota + 1
+	InventoryActionSwap
+	InventoryActionDrop
+	InventoryActionDestroy
+)
+
+// InventoryAction describes one protocol-neutral operation in an atomic
+// Bedrock item-stack request. Slots are canonical Player.Inventory indices;
+// InventoryCursorSlot addresses Player.CarriedItem.
+type InventoryAction struct {
+	Kind        uint8
+	Source      int16
+	Destination int16
+	Count       int
+}
+
+type InventoryResult struct {
+	Accepted bool
+}
+
+type InventoryIntent struct {
+	PlayerUUID [16]byte
+	Actions    []InventoryAction
+	Done       chan<- InventoryResult
+}
+
 // Implement sealed interfaces.
-func (JoinIntent) isLifecycle()       {}
-func (DisconnectIntent) isLifecycle() {}
-func (ChatIntent) isGameplay()        {}
-func (TeleportIntent) isGameplay()    {}
+func (JoinIntent) isLifecycle()          {}
+func (DisconnectIntent) isLifecycle()    {}
+func (ChatIntent) isGameplay()           {}
+func (TeleportIntent) isGameplay()       {}
+func (BlockInteractIntent) isGameplay()  {}
+func (EntityInteractIntent) isGameplay() {}
+func (RespawnIntent) isGameplay()        {}
+func (WakeIntent) isGameplay()           {}
+func (HotbarIntent) isGameplay()         {}
+func (PlayerStateIntent) isGameplay()    {}
+func (InventoryIntent) isGameplay()      {}
 
 // ── Bus ───────────────────────────────────────────────────────────────────────
 
@@ -193,6 +278,14 @@ func (b *Bus) PostChat(i ChatIntent) bool {
 func (b *Bus) PostTeleport(i TeleportIntent) bool {
 	return b.tryGameplay(i)
 }
+
+func (b *Bus) PostBlockInteract(i BlockInteractIntent) bool   { return b.tryGameplay(i) }
+func (b *Bus) PostEntityInteract(i EntityInteractIntent) bool { return b.tryGameplay(i) }
+func (b *Bus) PostRespawn(i RespawnIntent) bool               { return b.tryGameplay(i) }
+func (b *Bus) PostWake(i WakeIntent) bool                     { return b.tryGameplay(i) }
+func (b *Bus) PostHotbar(i HotbarIntent) bool                 { return b.tryGameplay(i) }
+func (b *Bus) PostPlayerState(i PlayerStateIntent) bool       { return b.tryGameplay(i) }
+func (b *Bus) PostInventory(i InventoryIntent) bool           { return b.tryGameplay(i) }
 
 func (b *Bus) tryGameplay(i GameplayIntent) bool {
 	select {

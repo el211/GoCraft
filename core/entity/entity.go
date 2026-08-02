@@ -80,18 +80,23 @@ const (
 	TypeVillager        EntityType = "minecraft:villager"
 	TypeFallingBlock    EntityType = "minecraft:falling_block"
 	TypePrimedTNT       EntityType = "minecraft:tnt"
+	TypeItem            EntityType = "minecraft:item"
+	TypeExperienceOrb   EntityType = "minecraft:experience_orb"
+	TypeArrow           EntityType = "minecraft:arrow"
+	TypeSpectralArrow   EntityType = "minecraft:spectral_arrow"
+	TypeTrident         EntityType = "minecraft:trident"
 	TypeWanderingTrader EntityType = "minecraft:wandering_trader"
 
 	// ── Boats ────────────────────────────────────────────────────────────────
-	TypeOakBoat       EntityType = "minecraft:oak_boat"
-	TypeSpruceBoat    EntityType = "minecraft:spruce_boat"
-	TypeBirchBoat     EntityType = "minecraft:birch_boat"
-	TypeJungleBoat    EntityType = "minecraft:jungle_boat"
-	TypeAcaciaBoat    EntityType = "minecraft:acacia_boat"
-	TypeDarkOakBoat   EntityType = "minecraft:dark_oak_boat"
-	TypeMangroveBoat  EntityType = "minecraft:mangrove_boat"
-	TypeCherryBoat    EntityType = "minecraft:cherry_boat"
-	TypeBambooRaft    EntityType = "minecraft:bamboo_raft"
+	TypeOakBoat      EntityType = "minecraft:oak_boat"
+	TypeSpruceBoat   EntityType = "minecraft:spruce_boat"
+	TypeBirchBoat    EntityType = "minecraft:birch_boat"
+	TypeJungleBoat   EntityType = "minecraft:jungle_boat"
+	TypeAcaciaBoat   EntityType = "minecraft:acacia_boat"
+	TypeDarkOakBoat  EntityType = "minecraft:dark_oak_boat"
+	TypeMangroveBoat EntityType = "minecraft:mangrove_boat"
+	TypeCherryBoat   EntityType = "minecraft:cherry_boat"
+	TypeBambooRaft   EntityType = "minecraft:bamboo_raft"
 
 	TypeOakChestBoat      EntityType = "minecraft:oak_chest_boat"
 	TypeSpruceChestBoat   EntityType = "minecraft:spruce_chest_boat"
@@ -102,7 +107,7 @@ const (
 	TypeMangroveChestBoat EntityType = "minecraft:mangrove_chest_boat"
 	TypeCherryChestBoat   EntityType = "minecraft:cherry_chest_boat"
 	TypeBambooChestRaft   EntityType = "minecraft:bamboo_chest_raft"
-	TypeZombieHorse     EntityType = "minecraft:zombie_horse"
+	TypeZombieHorse       EntityType = "minecraft:zombie_horse"
 
 	// ── Neutral / tameable mobs ───────────────────────────────────────────────
 	TypeBee             EntityType = "minecraft:bee"
@@ -210,26 +215,45 @@ type Entity struct {
 	// allow two but we implement one for simplicity).
 	RiderEntityID int32
 
+	// Projectile fields.
+	OwnerEntityID    int32
+	ProjectileDamage float32
+
+	// Dropped-item fields. These are used only when Type == TypeItem and are
+	// encoded as the ItemEntity's tracked ItemStack at metadata index 8.
+	ItemID     string
+	ItemCount  int
+	ItemDamage int
+
 	// IsBaby marks an ageable entity (villager) as a child.
 	// BabyAgeTicks counts upward from 0; the tick goroutine grows the villager
 	// up once BabyAgeTicks reaches BabyGrowUpTicks.
-	IsBaby      bool
+	IsBaby       bool
 	BabyAgeTicks int32
 	// Spatial state — written only by the entity tick goroutine.
 	Position   spatial.Vec3
 	VX, VY, VZ float64 // velocity in blocks/tick
 	Yaw, Pitch float32
 	OnGround   bool
+	AgeTicks   int64
 
 	// Health
 	Health    float32
 	MaxHealth float32
 	Dead      bool
+	// DeathTicks keeps a dead living entity present long enough for the
+	// vanilla 20-tick death animation before it is removed from clients.
+	DeathTicks int
 }
 
 // New creates an entity of the given type at the given position with full health.
 func New(id int32, uuid [16]byte, t EntityType, x, y, z float64) *Entity {
 	maxHP := defaultMaxHealth(t)
+	switch t {
+	case TypeHorse, TypeDonkey, TypeMule, TypeLlama, TypeTraderLlama:
+		roll := uint32(id)*1664525 + 1013904223
+		maxHP = 15 + float32(roll%16)
+	}
 	return &Entity{
 		EntityID:  id,
 		UUID:      uuid,
@@ -245,33 +269,37 @@ func New(id int32, uuid [16]byte, t EntityType, x, y, z float64) *Entity {
 func defaultMaxHealth(t EntityType) float32 {
 	switch t {
 	// Passive — low health
-	case TypeChicken, TypeCod, TypeSalmon, TypeTropicalFish, TypePufferfish:
+	case TypeCod, TypeSalmon, TypeTropicalFish, TypePufferfish:
 		return 3
-	case TypeRabbit, TypeTadpole:
+	case TypeRabbit:
 		return 3
-	case TypeBat:
-		return 6
-	case TypeParrot:
+	case TypeChicken:
+		return 4
+	case TypeBat, TypeParrot, TypeTadpole:
 		return 6
 	case TypeOcelot, TypeCat:
 		return 10
-	case TypeSheep, TypeDolphin:
+	case TypeSheep:
 		return 8
-	case TypeCow, TypeMooshroom, TypePig, TypeDonkey, TypeMule,
-		TypeGlowSquid, TypeSquid, TypeAllay, TypeArmadillo:
+	case TypeCow, TypeMooshroom, TypePig, TypeGlowSquid, TypeSquid,
+		TypeDolphin, TypeFrog:
 		return 10
-	case TypeFox:
+	case TypeFox, TypeGoat:
 		return 10
-	case TypeGoat:
-		return 10
+	case TypeArmadillo:
+		return 12
+	case TypeAllay:
+		return 20
 	case TypePanda:
 		return 20
 	case TypeLlama, TypeTraderLlama:
 		return 22 // average of 15–30 range
-	case TypeHorse, TypeSkeletonHorse, TypeZombieHorse:
+	case TypeHorse, TypeDonkey, TypeMule:
 		return 26 // average of 15–30 range
 	case TypeCamel:
 		return 32
+	case TypeSkeletonHorse, TypeZombieHorse:
+		return 15
 	case TypeSniffer:
 		return 14
 	case TypeTurtle:
@@ -294,23 +322,31 @@ func defaultMaxHealth(t EntityType) float32 {
 		return 20
 
 	// Hostile
-	case TypeZombie, TypeSkeleton, TypeCreeper, TypeEnderman,
-		TypeSpider, TypeHusk, TypeDrowned, TypePhantom, TypeVex,
-		TypePiglin, TypePillager, TypeVindicator, TypeWitch, TypeBlaze,
-		TypeStray, TypeBogged, TypeZombieVillager, TypeZoglin:
+	case TypeZombie, TypeSkeleton, TypeCreeper, TypeHusk, TypeDrowned,
+		TypePhantom, TypeBlaze, TypeStray, TypeZombieVillager:
 		return 20
+	case TypeEnderman, TypeZoglin:
+		return 40
+	case TypeSpider, TypeBogged, TypePiglin:
+		return 16
+	case TypeVex:
+		return 14
+	case TypePillager, TypeVindicator:
+		return 24
+	case TypeWitch:
+		return 26
 	case TypeCaveSpider:
 		return 12
-	case TypeSilverfish, TypeSlime, TypeEndermite:
+	case TypeSilverfish, TypeEndermite:
 		return 8
+	case TypeSlime, TypeMagmaCube:
+		return 1
 	case TypeGuardian:
 		return 30
 	case TypeElderGuardian:
 		return 80
 	case TypeGhast:
 		return 10
-	case TypeMagmaCube:
-		return 16
 	case TypeRavager:
 		return 100
 	case TypeHoglin:
@@ -343,6 +379,8 @@ func defaultMaxHealth(t EntityType) float32 {
 	// Villager
 	case TypeVillager:
 		return 20
+	case TypeItem, TypeExperienceOrb, TypeArrow, TypeSpectralArrow, TypeTrident:
+		return 1
 
 	// Boats
 	case TypeOakBoat, TypeSpruceBoat, TypeBirchBoat, TypeJungleBoat,
@@ -394,6 +432,14 @@ func IsBoat(t EntityType) bool {
 		TypeBambooRaft, TypeOakChestBoat, TypeSpruceChestBoat, TypeBirchChestBoat,
 		TypeJungleChestBoat, TypeAcaciaChestBoat, TypeDarkOakChestBoat,
 		TypeMangroveChestBoat, TypeCherryChestBoat, TypeBambooChestRaft:
+		return true
+	}
+	return false
+}
+
+func IsProjectile(t EntityType) bool {
+	switch t {
+	case TypeArrow, TypeSpectralArrow, TypeTrident:
 		return true
 	}
 	return false

@@ -86,11 +86,21 @@ func buildCommandsPacket() *protocol.Packet {
 	kickTarget := addArgument("player", parserGameProfile, true, nil, kickReason)
 	rootChildren = append(rootChildren, addLiteral("kick", false, kickTarget))
 
+	killTarget := addArgument("player", parserGameProfile, true, nil)
+	rootChildren = append(rootChildren, addLiteral("kill", true, killTarget))
+
 	for _, name := range []string{"help", "list", "xyz", "version", "ver", "fly"} {
 		rootChildren = append(rootChildren, addLiteral(name, true))
 	}
 
 	locateChildren := make([]int32, 0, len(locatableTargets))
+	opTarget := addArgument(`player`, parserGameProfile, true, nil)
+	rootChildren = append(rootChildren, addLiteral(`op`, false, opTarget))
+	for _, name := range []string{`god`, `ungod`} {
+		target := addArgument(`player`, parserGameProfile, true, nil)
+		rootChildren = append(rootChildren, addLiteral(name, true, target))
+	}
+
 	for _, target := range locatableTargets {
 		locateChildren = append(locateChildren, addLiteral(target, true))
 	}
@@ -117,6 +127,10 @@ func buildCommandsPacket() *protocol.Packet {
 	}
 	effectTarget := addArgument("player", parserGameProfile, false, nil, effectChildren...)
 	rootChildren = append(rootChildren, addLiteral("potioneffect", false, effectTarget))
+
+	rootChildren = append(rootChildren, addLiteral(`effect`, false, effectTarget))
+	healTarget := addArgument(`player`, parserGameProfile, true, nil)
+	rootChildren = append(rootChildren, addLiteral(`heal`, true, healTarget))
 
 	speedValue := func() int32 {
 		return addArgument("value", parserFloat, true, floatBounds(0.001, 1))

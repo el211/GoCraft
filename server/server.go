@@ -76,6 +76,7 @@ type Server struct {
 
 	// Bedrock adapter (nil when bedrock.enabled = false).
 	bedrockListener *bedrock.Listener
+	javaCrossKnown  map[[16]byte]map[[16]byte]crossPlayerView
 
 	// intentBus is the cross-adapter simulation command bus.
 	// Both Java (M14.1+) and Bedrock handlers post intents here; the tick
@@ -118,11 +119,27 @@ type mobAI struct {
 	targetX        float64    // hostile AI: current target world X
 	targetZ        float64    // hostile AI: current target world Z
 	attackCooldown int        // ticks until next melee swing
+	fuseTick       int        // creeper fuse progress (30 ticks to detonation)
+}
+
+type crossPlayerView struct {
+	player    *player.Player
+	position  spatial.Vec3
+	rotation  spatial.Rotation
+	inventory [player.InventorySize]player.ItemStack
+	heldSlot  int
+	dead      bool
 }
 
 // New creates a Server with the given configuration.
 // It initialises the game core and generates the RSA keypair for online-mode auth.
 func New(cfg *config.Config) (*Server, error) {
+	handler.ConfigureItemTooltips(
+		cfg.ItemTooltips.ShowDurability,
+		cfg.ItemTooltips.ShowAttributes,
+		cfg.ItemTooltips.HideVanillaAttributes,
+		!cfg.Combat.AttackCooldown,
+	)
 	privKey, err := auth.GenerateKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("server: generating RSA keypair: %w", err)
@@ -185,8 +202,20 @@ func New(cfg *config.Config) (*Server, error) {
 	}
 
 	gameCore := game.New()
+	if err := handler.ConfigureOperators(`ops.json`, cfg.Operators); err != nil {
+		slog.Warn(`server: could not load ops.json`, `err`, err)
+	}
 	cmds := handler.NewDispatcher()
 	cmds.SetEntityIDAllocator(gameCore.NextEntityID)
+	cmds.SetPlayerFinder(func(name string) *player.Player {
+		var found *player.Player
+		gameCore.OnlinePlayers(func(candidate *player.Player) {
+			if found == nil && strings.EqualFold(candidate.Username, name) {
+				found = candidate
+			}
+		})
+		return found
+	})
 	handler.RegisterBuiltins(cmds)
 
 	bus := intent.NewBus(64, 512)
@@ -198,22 +227,23 @@ func New(cfg *config.Config) (*Server, error) {
 	timings := newTickTimings()
 
 	s := &Server{
-		cfg:         cfg,
-		game:        gameCore,
-		privKey:     privKey,
-		pubKeyDER:   pubKeyDER,
-		world:       worldInstance,
-		spawnX:      spawnX,
-		spawnZ:      spawnZ,
-		regProvider: &registry.VanillaProvider{},
-		chunkSender: javaworld.DefaultSender,
-		sessions:    session.NewManager(),
-		cmds:        cmds,
-		intentBus:   bus,
-		mobAIs:      make(map[int32]*mobAI),
-		spawnRNG:    rand.New(rand.NewSource(cfg.WorldSeed ^ 0x4d6f624372616674)),
-		worldAge:    initialWorldAge,
-		timings:     timings,
+		cfg:            cfg,
+		game:           gameCore,
+		privKey:        privKey,
+		pubKeyDER:      pubKeyDER,
+		world:          worldInstance,
+		spawnX:         spawnX,
+		spawnZ:         spawnZ,
+		regProvider:    &registry.VanillaProvider{},
+		chunkSender:    javaworld.DefaultSender,
+		sessions:       session.NewManager(),
+		cmds:           cmds,
+		intentBus:      bus,
+		mobAIs:         make(map[int32]*mobAI),
+		spawnRNG:       rand.New(rand.NewSource(cfg.WorldSeed ^ 0x4d6f624372616674)),
+		worldAge:       initialWorldAge,
+		timings:        timings,
+		javaCrossKnown: make(map[[16]byte]map[[16]byte]crossPlayerView),
 	}
 
 	// Register server-state commands as closures after s is initialised.
@@ -276,13 +306,29 @@ func New(cfg *config.Config) (*Server, error) {
 		return handler.SendSystemMessage(ctx.Conn,
 			fmt.Sprintf("Time set to %d", s.worldAge%24000))
 	})
+	cmds.RequireOperator(`timings`, `tps`, `time`)
 	// Warm spawn immediately; login-time streaming will reuse this cache.
 	s.world.QueuePregeneration(int32(math.Floor(float64(spawnX)/16)), int32(math.Floor(float64(spawnZ)/16)), int32(cfg.PreGenerateRadius))
 	s.loginHandler = handler.NewLoginHandler(cfg, privKey, pubKeyDER)
 	s.listener = network.NewListener(cfg.Addr(), s.handleConn)
 
 	if cfg.Bedrock.Enabled {
-		s.bedrockListener = bedrock.NewListener(cfg.Bedrock, bus)
+		s.bedrockListener = bedrock.NewListener(
+			cfg.Bedrock,
+			bus,
+			worldInstance,
+			gameCore,
+			cfg.WorldSeed,
+			spawnX,
+			spawnZ,
+			configuredGameMode(cfg.DefaultGameMode),
+			difficultyID(cfg.Difficulty),
+		)
+		s.sessions.SetMessageObserver(s.bedrockListener.BroadcastMessage)
+		s.sessions.SetExternalKnockbackHandler(func(p *player.Player, sourceX, sourceZ, horizontal, vertical float64) {
+			s.sendLegacyPlayerKnockback(&session.Session{Player: p}, sourceX, sourceZ, horizontal, vertical)
+		})
+		worldInstance.SetBlockObserver(s.bedrockListener.BroadcastBlockChange)
 	}
 	return s, nil
 }
@@ -389,6 +435,10 @@ func (s *Server) safeTick() {
 	}()
 	s.tickIntents()
 	s.tickEntities()
+	if s.bedrockListener != nil {
+		s.bedrockListener.Sync(uint64(s.worldAge))
+		s.syncBedrockPlayersToJava()
+	}
 	if s.worldAge%600 == 0 {
 		if err := s.world.Flush(); err != nil {
 			slog.Warn("world autosave failed", "err", err)
@@ -419,7 +469,40 @@ func (s *Server) tickIntents() {
 		switch i := g.(type) {
 		case intent.ChatIntent:
 			s.applyChat(i)
+		case intent.BlockInteractIntent:
+			s.applyBedrockBlockInteract(i)
+		case intent.EntityInteractIntent:
+			s.applyBedrockEntityInteract(i)
+		case intent.RespawnIntent:
+			s.applyBedrockRespawn(i)
+		case intent.WakeIntent:
+			if p := s.game.GetPlayer(i.PlayerUUID); p != nil && p.Sleeping {
+				p.Sleeping = false
+				handler.BroadcastPlayerWaking(p.EntityID, s.sessions)
+			}
+		case intent.HotbarIntent:
+			if p := s.game.GetPlayer(i.PlayerUUID); p != nil && i.Slot >= 0 && i.Slot < 9 {
+				p.HeldSlot = int(i.Slot)
+			}
+		case intent.PlayerStateIntent:
+			s.applyBedrockPlayerState(i)
+		case intent.InventoryIntent:
+			s.applyBedrockInventory(i)
 		}
+	}
+}
+
+func (s *Server) applyBedrockPlayerState(i intent.PlayerStateIntent) {
+	p := s.game.GetPlayer(i.PlayerUUID)
+	if p == nil || p.Edition != player.ClientEditionBedrock || p.Dead {
+		return
+	}
+	switch i.State {
+	case intent.PlayerStateSprinting:
+		p.Sprinting = i.Enabled
+	case intent.PlayerStateFlying:
+		allowed := p.AllowFlying || p.GameMode == player.GameModeCreative || p.GameMode == player.GameModeSpectator
+		p.Flying = allowed && i.Enabled
 	}
 }
 
@@ -432,6 +515,19 @@ func (s *Server) applyJoin(i intent.JoinIntent) {
 	}
 
 	p := player.New(i.PlayerUUID, i.Username, edition)
+	p.Operator = handler.IsOperatorName(i.Username)
+	p.InvulnerableUntil = time.Now().Add(3 * time.Second)
+	p.GameMode = configuredGameMode(s.cfg.DefaultGameMode)
+	p.AttackCooldown = s.cfg.Combat.AttackCooldown
+	p.KnockbackHorizontal = s.cfg.Combat.KnockbackHorizontal
+	p.KnockbackVertical = s.cfg.Combat.KnockbackVertical
+	p.OnDeath = s.dropPlayerInventory
+	p.Position = spatial.Vec3{
+		X: float64(s.spawnX) + 0.5,
+		Y: float64(s.world.SurfaceY(s.spawnX, s.spawnZ) + 1),
+		Z: float64(s.spawnZ) + 0.5,
+	}
+	p.WorldSpawn = p.Position
 	if err := s.game.AddPlayer(p); err != nil {
 		slog.Warn("applyJoin: duplicate player UUID",
 			"name", i.Username, "uuid", i.PlayerUUID, "err", err)
@@ -447,7 +543,7 @@ func (s *Server) applyJoin(i intent.JoinIntent) {
 
 	i.Done <- intent.JoinResult{
 		EntityID: p.EntityID,
-		Position: spatial.Vec3{X: 0, Y: 65, Z: 0},
+		Position: p.Position,
 	}
 }
 
@@ -467,15 +563,606 @@ func (s *Server) applyMove(m intent.MoveIntent) {
 	if p == nil {
 		return // player disconnected between intent post and drain
 	}
+	_, _, _, dead := p.HealthSnapshot()
+	if dead {
+		return // death-camera movement must not move the canonical player entity
+	}
+	previousY, previousOnGround := p.Position.Y, p.OnGround
 	p.Position = m.Position
 	p.Rotation = m.Rotation
 	p.OnGround = m.OnGround
+	if p.VehicleEntityID != 0 {
+		if vehicle, ok := s.world.Entities.Get(p.VehicleEntityID); ok && corentity.IsBoat(vehicle.Type) && vehicle.RiderEntityID == p.EntityID {
+			vehicle.Position.X = m.Position.X
+			vehicle.Position.Z = m.Position.Z
+			vehicle.Yaw = m.Rotation.Yaw
+		}
+	}
+	if p.Edition == player.ClientEditionBedrock {
+		s.applyBedrockMovementDamage(p, previousY, previousOnGround)
+	}
+}
+
+// allPlayerSessions adapts every canonical online player to the Java combat
+// helper's lightweight Session shape. Bedrock players intentionally have a nil
+// Conn: health/death remains canonical and their adapter publishes it on Sync.
+func (s *Server) allPlayerSessions() []*session.Session {
+	out := make([]*session.Session, 0, s.game.OnlineCount())
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if javaSession, ok := s.sessions.Get(p.UUID); ok {
+			out = append(out, javaSession)
+			return
+		}
+		out = append(out, &session.Session{Player: p})
+	})
+	return out
+}
+
+func (s *Server) sendLegacyPlayerKnockback(target *session.Session, sourceX, sourceZ, horizontal, vertical float64) {
+	if target == nil || target.Player == nil {
+		return
+	}
+	if target.Conn != nil {
+		handler.SendLegacyKnockback(target, sourceX, sourceZ, horizontal, vertical)
+		return
+	}
+	if s.bedrockListener == nil {
+		return
+	}
+	dx := target.Player.Position.X - sourceX
+	dz := target.Player.Position.Z - sourceZ
+	distance := math.Hypot(dx, dz)
+	if distance < 0.0001 {
+		dx, dz, distance = 0, 1, 1
+	}
+	resistance := 1 - float64(target.Player.KnockbackResistance())
+	s.bedrockListener.SendVelocity(target.Player.UUID, spatial.Vec3{
+		X: dx / distance * horizontal * resistance,
+		Y: vertical * resistance,
+		Z: dz / distance * horizontal * resistance,
+	}, uint64(s.worldAge))
+}
+
+func (s *Server) sendPlayerVelocity(target *session.Session, x, y, z float64) {
+	if target == nil || target.Player == nil {
+		return
+	}
+	resistance := 1 - float64(target.Player.KnockbackResistance())
+	x, y, z = x*resistance, y*resistance, z*resistance
+	if target.Conn != nil {
+		handler.SendPlayerKnockback(target.Conn, target.Player.EntityID, x, y, z)
+		return
+	}
+	if s.bedrockListener != nil {
+		s.bedrockListener.SendVelocity(target.Player.UUID, spatial.Vec3{X: x, Y: y, Z: z}, uint64(s.worldAge))
+	}
+}
+
+func (s *Server) applyBedrockMovementDamage(p *player.Player, previousY float64, previousOnGround bool) {
+	if p == nil || p.Dead || p.GameMode == player.GameModeCreative || p.GameMode == player.GameModeSpectator || p.Flying {
+		if p != nil {
+			p.FallDistance = 0
+		}
+		return
+	}
+	target := &session.Session{Player: p}
+	if !p.OnGround {
+		if drop := previousY - p.Position.Y; drop > 0 {
+			p.FallDistance += drop
+		}
+	} else if !previousOnGround {
+		fallDistance := p.FallDistance
+		p.FallDistance = 0
+		if damage := float32(math.Floor(fallDistance - 3)); damage > 0 {
+			handler.DamagePlayer(target, damage, "hit the ground too hard", s.sessions)
+		}
+	}
+
+	now := time.Now()
+	if p.Position.Y < coreworld.WorldMinY-16 {
+		if now.Sub(p.LastEnvironmentDamage) >= 500*time.Millisecond {
+			p.LastEnvironmentDamage = now
+			handler.DamagePlayer(target, 4, "fell out of the world", s.sessions)
+		}
+		return
+	}
+	x, y, z := int(math.Floor(p.Position.X)), int(math.Floor(p.Position.Y)), int(math.Floor(p.Position.Z))
+	feet := s.world.GetBlock(x, y, z).ResourceLocation()
+	head := s.world.GetBlock(x, int(math.Floor(p.Position.Y+1.62)), z).ResourceLocation()
+	if head == "minecraft:water" {
+		if p.UnderwaterSince.IsZero() {
+			p.UnderwaterSince = now
+		}
+		if now.Sub(p.UnderwaterSince) >= 15*time.Second && now.Sub(p.LastEnvironmentDamage) >= time.Second {
+			p.LastEnvironmentDamage = now
+			handler.DamagePlayer(target, 2, "drowned", s.sessions)
+		}
+	} else {
+		p.UnderwaterSince = time.Time{}
+	}
+	if now.Sub(p.LastEnvironmentDamage) < 500*time.Millisecond {
+		return
+	}
+	switch feet {
+	case "minecraft:lava":
+		p.LastEnvironmentDamage = now
+		handler.DamagePlayer(target, 4, "tried to swim in lava", s.sessions)
+	case "minecraft:fire", "minecraft:soul_fire":
+		p.LastEnvironmentDamage = now
+		handler.DamagePlayer(target, 1, "went up in flames", s.sessions)
+	case "minecraft:cactus", "minecraft:sweet_berry_bush":
+		p.LastEnvironmentDamage = now
+		handler.DamagePlayer(target, 1, "was pricked to death", s.sessions)
+	}
 }
 
 // applyChat broadcasts a chat message to all active Java sessions.
 func (s *Server) applyChat(i intent.ChatIntent) {
+	if strings.HasPrefix(strings.TrimSpace(i.Message), `/`) {
+		p := s.game.GetPlayer(i.PlayerUUID)
+		if p == nil {
+			return
+		}
+		ctx := handler.CommandContext{
+			Player:  p,
+			World:   s.world,
+			Manager: s.sessions,
+		}
+		if s.bedrockListener != nil && p.Edition == player.ClientEditionBedrock {
+			ctx.Reply = func(message string) error {
+				s.bedrockListener.SendMessage(p.UUID, message)
+				return nil
+			}
+			ctx.SyncAbilities = s.bedrockListener.RefreshPlayerAbilities
+			ctx.TeleportTo = func(x, y, z float64) error {
+				p.Position = spatial.Vec3{X: x, Y: y, Z: z}
+				p.FallDistance = 0
+				s.bedrockListener.TeleportPlayer(p, p.Position, uint64(s.worldAge))
+				return nil
+			}
+		}
+		s.cmds.Dispatch(i.Message, ctx)
+		return
+	}
 	msg := fmt.Sprintf("<%s> %s", i.DisplayName, i.Message)
 	handler.BroadcastSystemMessage(s.sessions, msg)
+}
+
+func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
+	p := s.game.GetPlayer(i.PlayerUUID)
+	if p == nil || p.Edition != player.ClientEditionBedrock || p.GameMode == player.GameModeSpectator {
+		return
+	}
+	if i.HotbarSlot >= 0 && i.HotbarSlot < 9 {
+		p.HeldSlot = int(i.HotbarSlot)
+	}
+	center := spatial.Vec3{X: float64(i.Position.X) + 0.5, Y: float64(i.Position.Y) + 0.5, Z: float64(i.Position.Z) + 0.5}
+	if p.Position.Distance(center) > 6.5 {
+		return
+	}
+
+	x, y, z := int(i.Position.X), int(i.Position.Y), int(i.Position.Z)
+	switch i.Action {
+	case intent.BlockActionBreak:
+		block := s.world.GetBlock(x, y, z)
+		if block.IsAir() || block.ResourceLocation() == "minecraft:bedrock" {
+			return
+		}
+		partnerY, partnerHalf, hasPartner := coreworld.DoublePlantPartnerY(block, y)
+		partner := coreworld.Air
+		if hasPartner {
+			partner = s.world.GetBlock(x, partnerY, z)
+			hasPartner = partner.ResourceLocation() == block.ResourceLocation() &&
+				partner.Properties["half"] == partnerHalf
+		}
+		if s.bedrockListener != nil {
+			s.bedrockListener.BroadcastBlockBreakEffect(i.Position, block)
+		}
+		s.world.SetBlock(x, y, z, coreworld.Air)
+		change := coreworld.BlockChange{X: x, Y: y, Z: z, Block: coreworld.Air}
+		handler.BroadcastBlockChange(change, s.sessions)
+		if hasPartner {
+			s.world.SetBlock(x, partnerY, z, coreworld.Air)
+			handler.BroadcastBlockChange(coreworld.BlockChange{X: x, Y: partnerY, Z: z, Block: coreworld.Air}, s.sessions)
+		}
+		if p.GameMode != player.GameModeCreative {
+			drop := player.ItemStack{ItemID: block.ResourceLocation(), Count: 1}
+			if !p.GiveItem(drop) {
+				s.newDroppedItem(drop, p.Position, 0)
+			}
+			s.damageBedrockHeldItem(p, 1)
+		}
+
+	case intent.BlockActionUse:
+		held := p.HeldItem()
+		clicked := s.world.GetBlock(x, y, z)
+		if strings.HasSuffix(clicked.ResourceLocation(), "_bed") {
+			p.SpawnPoint = spatial.BlockPos{X: int32(x), Y: int32(y), Z: int32(z)}
+			p.HasSpawnPoint = true
+			if s.bedrockListener != nil {
+				s.bedrockListener.SendMessage(p.UUID, "Respawn point set")
+			}
+			tod := s.worldAge % 24000
+			if tod < 12541 || tod > 23459 {
+				if s.bedrockListener != nil {
+					s.bedrockListener.SendMessage(p.UUID, "You can only sleep at night.")
+				}
+				return
+			}
+			p.Sleeping = true
+			handler.BroadcastPlayerSleeping(p.EntityID, p.SpawnPoint, s.sessions)
+			return
+		}
+		if boatType, ok := bedrockBoatType(held.ItemID); ok {
+			spawn := spatial.Vec3{X: float64(x) + 0.5, Y: float64(y) + 1, Z: float64(z) + 0.5}
+			boat := corentity.New(s.game.NextEntityID(), newRandomUUID(), boatType, spawn.X, spawn.Y, spawn.Z)
+			boat.Yaw = p.Rotation.Yaw
+			boat.OnGround = true
+			s.world.Entities.Add(boat)
+			if p.GameMode != player.GameModeCreative {
+				slot := player.HotbarStart + p.HeldSlot
+				p.Inventory[slot].Count--
+				if p.Inventory[slot].Count <= 0 {
+					p.Inventory[slot] = player.ItemStack{}
+				}
+			}
+			return
+		}
+		block, ok := placementBlockForItem(held.ItemID)
+		if !ok {
+			return
+		}
+		if !s.world.GetBlock(x, y, z).IsAir() {
+			dx, dy, dz := bedrockFaceOffset(i.Face)
+			x, y, z = x+dx, y+dy, z+dz
+		}
+		if y < coreworld.WorldMinY || y > coreworld.WorldMaxY || !s.world.GetBlock(x, y, z).IsAir() {
+			return
+		}
+		s.world.SetBlock(x, y, z, block)
+		change := coreworld.BlockChange{X: x, Y: y, Z: z, Block: block}
+		handler.BroadcastBlockChange(change, s.sessions)
+		if p.GameMode != player.GameModeCreative {
+			slot := player.HotbarStart + p.HeldSlot
+			p.Inventory[slot].Count--
+			if p.Inventory[slot].Count <= 0 {
+				p.Inventory[slot] = player.ItemStack{}
+			}
+		}
+	}
+}
+
+func (s *Server) applyBedrockEntityInteract(i intent.EntityInteractIntent) {
+	attacker := s.game.GetPlayer(i.PlayerUUID)
+	if attacker == nil {
+		return
+	}
+	if !i.Attack {
+		if i.TargetID == 0 && attacker.VehicleEntityID != 0 {
+			vehicleID := attacker.VehicleEntityID
+			if vehicle, ok := s.world.Entities.Get(vehicleID); ok && vehicle.RiderEntityID == attacker.EntityID {
+				vehicle.RiderEntityID = 0
+			}
+			attacker.VehicleEntityID = 0
+			handler.BroadcastSetPassengers(vehicleID, nil, s.sessions)
+			return
+		}
+		if entity, ok := s.world.Entities.Get(i.TargetID); ok && corentity.IsBoat(entity.Type) && entity.RiderEntityID == 0 && attacker.Position.Distance(entity.Position) <= 4 {
+			entity.RiderEntityID = attacker.EntityID
+			attacker.VehicleEntityID = entity.EntityID
+			attacker.Position = entity.Position
+			handler.BroadcastSetPassengers(entity.EntityID, []int32{attacker.EntityID}, s.sessions)
+		}
+		return
+	}
+	if attacker == nil || attacker.Dead || attacker.GameMode == player.GameModeSpectator {
+		return
+	}
+	damage := player.LegacyAttackDamage(attacker.HeldItem().ItemID)
+	if attacker.AttackCooldown {
+		if value, _, ok := player.AttackAttributes(attacker.HeldItem().ItemID); ok {
+			damage = value
+		}
+		if !attacker.LastAttack.IsZero() && time.Since(attacker.LastAttack) < 625*time.Millisecond {
+			return
+		}
+	}
+
+	var targetPlayer *player.Player
+	s.game.OnlinePlayers(func(candidate *player.Player) {
+		if candidate.EntityID == i.TargetID {
+			targetPlayer = candidate
+		}
+	})
+	if targetPlayer != nil {
+		if targetPlayer == attacker || attacker.Position.Distance(targetPlayer.Position) > 3.25 {
+			return
+		}
+		targetSession, ok := s.sessions.Get(targetPlayer.UUID)
+		if !ok {
+			targetSession = &session.Session{Player: targetPlayer}
+		}
+		if handler.DamagePlayerLegacy(targetSession, damage, "was slain by "+attacker.Username, s.sessions) {
+			attacker.LastAttack = time.Now()
+			s.damageBedrockHeldItem(attacker, 1)
+		}
+		return
+	}
+
+	if entity, ok := s.world.Entities.Get(i.TargetID); ok && !entity.Dead && attacker.Position.Distance(entity.Position) <= 3.25 {
+		if s.world.QueueEntityDamageFrom(entity.EntityID, damage, attacker.Position.X, attacker.Position.Z) {
+			attacker.LastAttack = time.Now()
+			s.damageBedrockHeldItem(attacker, 1)
+		}
+	}
+}
+
+func (s *Server) applyBedrockRespawn(i intent.RespawnIntent) {
+	p := s.game.GetPlayer(i.PlayerUUID)
+	if p == nil || p.Edition != player.ClientEditionBedrock {
+		return
+	}
+	_, _, _, dead := p.HealthSnapshot()
+	if !dead {
+		return
+	}
+	if vehicleID := p.VehicleEntityID; vehicleID != 0 {
+		if vehicle, ok := s.world.Entities.Get(vehicleID); ok && vehicle.RiderEntityID == p.EntityID {
+			vehicle.RiderEntityID = 0
+		}
+		p.VehicleEntityID = 0
+		handler.BroadcastSetPassengers(vehicleID, nil, s.sessions)
+	}
+	p.Revive()
+	if bedSpawn, ok := handler.ResolveBedRespawn(p, s.world); ok {
+		p.Position = bedSpawn
+	} else {
+		p.Position = p.WorldSpawn
+	}
+}
+
+func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
+	accepted := false
+	defer func() {
+		if i.Done != nil {
+			i.Done <- intent.InventoryResult{Accepted: accepted}
+		}
+	}()
+	p := s.game.GetPlayer(i.PlayerUUID)
+	if p == nil || p.Edition != player.ClientEditionBedrock || p.Dead || len(i.Actions) == 0 {
+		return
+	}
+	inventory := p.Inventory
+	carried := p.CarriedItem
+	drops := make([]player.ItemStack, 0)
+	get := func(slot int16) (player.ItemStack, bool) {
+		if slot == intent.InventoryCursorSlot {
+			return carried, true
+		}
+		if slot < 0 || int(slot) >= len(inventory) {
+			return player.ItemStack{}, false
+		}
+		return inventory[slot], true
+	}
+	set := func(slot int16, stack player.ItemStack) bool {
+		if stack.Count <= 0 {
+			stack = player.ItemStack{}
+		}
+		if slot == intent.InventoryCursorSlot {
+			carried = stack
+			return true
+		}
+		if slot < 0 || int(slot) >= len(inventory) || !canPlaceCanonicalInventorySlot(int(slot), stack) {
+			return false
+		}
+		inventory[slot] = stack
+		return true
+	}
+
+	for _, action := range i.Actions {
+		source, ok := get(action.Source)
+		if !ok || source.IsEmpty() {
+			return
+		}
+		switch action.Kind {
+		case intent.InventoryActionMove:
+			if action.Count <= 0 || action.Count > source.Count || action.Source == action.Destination {
+				return
+			}
+			destination, ok := get(action.Destination)
+			if !ok || (!destination.IsEmpty() && (destination.ItemID != source.ItemID || destination.Damage != source.Damage)) {
+				return
+			}
+			newDestination := destination
+			if newDestination.IsEmpty() {
+				newDestination = player.ItemStack{ItemID: source.ItemID, Damage: source.Damage}
+			}
+			newDestination.Count += action.Count
+			limit := player.MaxStackSize(newDestination.ItemID)
+			if action.Destination >= 5 && action.Destination <= 8 {
+				limit = 1
+			}
+			if newDestination.Count > limit || !set(action.Destination, newDestination) {
+				return
+			}
+			source.Count -= action.Count
+			if !set(action.Source, source) {
+				return
+			}
+
+		case intent.InventoryActionSwap:
+			destination, ok := get(action.Destination)
+			if !ok || action.Source == action.Destination || !set(action.Source, destination) || !set(action.Destination, source) {
+				return
+			}
+
+		case intent.InventoryActionDrop:
+			if action.Count <= 0 || action.Count > source.Count {
+				return
+			}
+			drops = append(drops, player.ItemStack{ItemID: source.ItemID, Count: action.Count, Damage: source.Damage})
+			source.Count -= action.Count
+			if !set(action.Source, source) {
+				return
+			}
+
+		case intent.InventoryActionDestroy:
+			if p.GameMode != player.GameModeCreative || action.Count <= 0 || action.Count > source.Count {
+				return
+			}
+			source.Count -= action.Count
+			if !set(action.Source, source) {
+				return
+			}
+
+		default:
+			return
+		}
+	}
+	p.Inventory = inventory
+	p.CarriedItem = carried
+	for index, stack := range drops {
+		if dropped := s.newDroppedItem(stack, p.Position, index); dropped != nil {
+			handler.BroadcastSpawnMob(dropped, s.sessions)
+		}
+	}
+	accepted = true
+}
+
+func canPlaceCanonicalInventorySlot(slot int, stack player.ItemStack) bool {
+	if stack.IsEmpty() || slot < 5 || slot > 8 {
+		return true
+	}
+	name := strings.TrimPrefix(stack.ItemID, "minecraft:")
+	switch slot {
+	case 5:
+		return strings.HasSuffix(name, "_helmet") || name == "turtle_helmet" || name == "carved_pumpkin" || strings.HasSuffix(name, "_head") || strings.HasSuffix(name, "_skull")
+	case 6:
+		return strings.HasSuffix(name, "_chestplate") || name == "elytra"
+	case 7:
+		return strings.HasSuffix(name, "_leggings")
+	case 8:
+		return strings.HasSuffix(name, "_boots")
+	default:
+		return false
+	}
+}
+
+func (s *Server) damageBedrockHeldItem(p *player.Player, amount int) {
+	if p == nil || p.GameMode == player.GameModeCreative || p.GameMode == player.GameModeSpectator {
+		return
+	}
+	slot := player.HotbarStart + p.HeldSlot
+	if player.MaxDurability(p.Inventory[slot].ItemID) != 0 {
+		p.Inventory[slot].ApplyDamage(amount)
+	}
+}
+
+func placementBlockForItem(itemID string) (coreworld.Block, bool) {
+	parts := strings.SplitN(itemID, ":", 2)
+	if len(parts) != 2 || parts[0] != "minecraft" {
+		return coreworld.Block{}, false
+	}
+	block := coreworld.Block{Namespace: parts[0], Name: parts[1]}
+	if block.IsAir() || javaworld.StateID(block) == 0 {
+		return coreworld.Block{}, false
+	}
+	return block, true
+}
+
+func bedrockFaceOffset(face int32) (x, y, z int) {
+	switch face {
+	case 0:
+		return 0, -1, 0
+	case 1:
+		return 0, 1, 0
+	case 2:
+		return 0, 0, -1
+	case 3:
+		return 0, 0, 1
+	case 4:
+		return -1, 0, 0
+	case 5:
+		return 1, 0, 0
+	default:
+		return 0, 0, 0
+	}
+}
+
+func bedrockBoatType(itemID string) (corentity.EntityType, bool) {
+	types := map[string]corentity.EntityType{
+		"minecraft:oak_boat":            corentity.TypeOakBoat,
+		"minecraft:spruce_boat":         corentity.TypeSpruceBoat,
+		"minecraft:birch_boat":          corentity.TypeBirchBoat,
+		"minecraft:jungle_boat":         corentity.TypeJungleBoat,
+		"minecraft:acacia_boat":         corentity.TypeAcaciaBoat,
+		"minecraft:dark_oak_boat":       corentity.TypeDarkOakBoat,
+		"minecraft:mangrove_boat":       corentity.TypeMangroveBoat,
+		"minecraft:cherry_boat":         corentity.TypeCherryBoat,
+		"minecraft:bamboo_raft":         corentity.TypeBambooRaft,
+		"minecraft:oak_chest_boat":      corentity.TypeOakChestBoat,
+		"minecraft:spruce_chest_boat":   corentity.TypeSpruceChestBoat,
+		"minecraft:birch_chest_boat":    corentity.TypeBirchChestBoat,
+		"minecraft:jungle_chest_boat":   corentity.TypeJungleChestBoat,
+		"minecraft:acacia_chest_boat":   corentity.TypeAcaciaChestBoat,
+		"minecraft:dark_oak_chest_boat": corentity.TypeDarkOakChestBoat,
+		"minecraft:mangrove_chest_boat": corentity.TypeMangroveChestBoat,
+		"minecraft:cherry_chest_boat":   corentity.TypeCherryChestBoat,
+		"minecraft:bamboo_chest_raft":   corentity.TypeBambooChestRaft,
+	}
+	entityType, ok := types[itemID]
+	return entityType, ok
+}
+
+func (s *Server) syncBedrockPlayersToJava() {
+	bedrockPlayers := make(map[[16]byte]*player.Player)
+	externalPlayers := make([]*player.Player, 0)
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if p.Edition == player.ClientEditionBedrock {
+			bedrockPlayers[p.UUID] = p
+			externalPlayers = append(externalPlayers, p)
+		}
+	})
+	s.sessions.ReplaceExternalPlayers(externalPlayers)
+
+	activeJava := make(map[[16]byte]struct{})
+	for _, viewer := range s.sessions.SnapshotAll() {
+		activeJava[viewer.Player.UUID] = struct{}{}
+		known := s.javaCrossKnown[viewer.Player.UUID]
+		if known == nil {
+			known = make(map[[16]byte]crossPlayerView)
+			s.javaCrossKnown[viewer.Player.UUID] = known
+		}
+		for id, p := range bedrockPlayers {
+			previous, ok := known[id]
+			_, _, _, dead := p.HealthSnapshot()
+			if !ok || (previous.dead && !dead) {
+				if ok {
+					handler.SendExternalPlayerLeave(viewer.Conn, p)
+				}
+				handler.SendExternalPlayerJoin(viewer.Conn, p)
+				handler.SendExternalPlayerEquipment(viewer.Conn, p)
+			} else if !dead && (previous.position != p.Position || previous.rotation != p.Rotation) {
+				handler.SendExternalPlayerPosition(viewer.Conn, p)
+			}
+			if ok && !dead && !(previous.dead && !dead) && (previous.inventory != p.Inventory || previous.heldSlot != p.HeldSlot) {
+				handler.SendExternalPlayerEquipment(viewer.Conn, p)
+			}
+			known[id] = crossPlayerView{player: p, position: p.Position, rotation: p.Rotation, inventory: p.Inventory, heldSlot: p.HeldSlot, dead: dead}
+		}
+		for id, previous := range known {
+			if _, ok := bedrockPlayers[id]; ok {
+				continue
+			}
+			handler.SendExternalPlayerLeave(viewer.Conn, previous.player)
+			delete(known, id)
+		}
+	}
+	for id := range s.javaCrossKnown {
+		if _, ok := activeJava[id]; !ok {
+			delete(s.javaCrossKnown, id)
+		}
+	}
 }
 
 // tickEntities advances every registered non-player entity by one game tick:
@@ -501,7 +1188,9 @@ func (s *Server) tickEntities() {
 	var (
 		moved        []*corentity.Entity // entities whose position changed this tick
 		hurtEntities []*corentity.Entity // entities damaged during this tick
+		deathIDs     []int32             // entities beginning the vanilla death animation
 		deadIDs      []int32             // entity IDs removed from the world this tick
+		spawned      []*corentity.Entity // item drops spawned by deaths this tick
 	)
 
 	endDamage := s.timings.measure(sectionDamage)
@@ -529,12 +1218,26 @@ func (s *Server) tickEntities() {
 	endDamage()
 
 	for _, e := range s.world.Entities.Snapshot() {
+		e.AgeTicks++
 		// ── Dead entity cleanup ───────────────────────────────────────────────
 		if e.Dead {
+			if e.DeathTicks == 0 {
+				deathIDs = append(deathIDs, e.EntityID)
+				spawned = append(spawned, s.spawnMobDrops(e)...)
+				slog.Info("entity died", "type", e.Type, "id", e.EntityID)
+			}
+			e.DeathTicks++
+			if e.DeathTicks >= 20 {
+				s.world.Entities.Remove(e.EntityID)
+				delete(s.mobAIs, e.EntityID)
+				deadIDs = append(deadIDs, e.EntityID)
+			}
+			continue
+		}
+
+		if e.Type == corentity.TypeItem && s.tryPickupDroppedItem(e) {
 			s.world.Entities.Remove(e.EntityID)
-			delete(s.mobAIs, e.EntityID)
 			deadIDs = append(deadIDs, e.EntityID)
-			slog.Info("entity died", "type", e.Type, "id", e.EntityID)
 			continue
 		}
 
@@ -594,18 +1297,46 @@ func (s *Server) tickEntities() {
 			continue
 		}
 
+		if corentity.IsProjectile(e.Type) {
+			prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
+			if s.tickProjectile(e) {
+				s.world.Entities.Remove(e.EntityID)
+				deadIDs = append(deadIDs, e.EntityID)
+				continue
+			}
+			if e.Position.X != prevX || e.Position.Y != prevY || e.Position.Z != prevZ {
+				moved = append(moved, e)
+			}
+			continue
+		}
+
 		// ── Mob AI (wander / hostile) ─────────────────────────────────────────
+		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
 		endAI := s.timings.measure(sectionAI)
 		if isPassiveMob(e.Type) {
 			if s.tickPassiveMobAI(e) && e.Type == corentity.TypeVillager {
 				// Sleeping state changed: broadcast updated pose so all clients
 				// see the villager lie down or stand up.
-				handler.BroadcastVillagerMetadata(e, s.sessions)
+				handler.BroadcastVillagerSleepState(e, s.sessions)
 			}
 		} else if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
 			s.tickGolemAI(e)
+		} else if isHostileMob(e.Type) {
+			s.tickHostileMobAI(e)
 		}
 		endAI()
+		if e.Dead {
+			// Damage during AI starts its animation on the next simulation tick.
+			continue
+		}
+		if e.Sleeping {
+			e.VX, e.VY, e.VZ = 0, 0, 0
+			e.OnGround = true
+			if e.Position.X != prevX || e.Position.Y != prevY || e.Position.Z != prevZ {
+				moved = append(moved, e)
+			}
+			continue
+		}
 
 		// ── Gravity + physics ─────────────────────────────────────────────────
 		endPhys := s.timings.measure(sectionPhysics)
@@ -615,7 +1346,6 @@ func (s *Server) tickEntities() {
 		}
 
 		// ── Position integration with step-up ────────────────────────────────
-		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
 		nextX := e.Position.X + e.VX
 		if canX, xLoaded := s.world.CanEntityOccupyIfLoaded(nextX, e.Position.Y, e.Position.Z); xLoaded && canX {
 			e.Position.X = nextX
@@ -686,11 +1416,13 @@ func (s *Server) tickEntities() {
 		endPhys()
 	}
 
+	s.tickClearLag(&deadIDs)
+
 	// Build packets and dispatch network I/O off the tick goroutine.
 	// DispatchTickBroadcast reads entity fields here (tick goroutine, sole
 	// writer) to build immutable packets before spawning the send goroutine.
 	endBcast := s.timings.measure(sectionBroadcast)
-	handler.DispatchTickBroadcast(moved, hurtEntities, deadIDs, s.sessions)
+	handler.DispatchTickBroadcast(moved, hurtEntities, deathIDs, deadIDs, spawned, s.sessions)
 	endBcast()
 
 	// Publish time-of-day for handler code (e.g. bed sleep check).
@@ -708,6 +1440,9 @@ func (s *Server) tickEntities() {
 	}
 	if s.worldAge%20 == 0 {
 		handler.DispatchWorldTime(s.worldAge, s.worldAge%24000, s.sessions)
+		for _, change := range s.world.TickFarmland(s.worldAge, 64) {
+			handler.BroadcastBlockChange(change, s.sessions)
+		}
 		for _, change := range s.world.TickCrops(s.worldAge, 64) {
 			handler.BroadcastBlockChange(change, s.sessions)
 		}
@@ -760,6 +1495,244 @@ func (s *Server) tickEntities() {
 			"entities", len(s.world.Entities.Snapshot()),
 		)
 	}
+}
+
+// spawnMobDrops creates the basic vanilla loot for supported living entities.
+// Looting, fire-aspect cooking, equipment drops, and rare player-kill-only
+// drops are intentionally left for the enchantment/loot-table layer.
+func (s *Server) spawnMobDrops(e *corentity.Entity) []*corentity.Entity {
+	stacks := mobDrops(e.Type, s.spawnRNG)
+	spawned := make([]*corentity.Entity, 0, len(stacks))
+	for index, stack := range stacks {
+		if dropped := s.newDroppedItem(stack, e.Position, index); dropped != nil {
+			spawned = append(spawned, dropped)
+		}
+	}
+	return spawned
+}
+
+func mobDrops(entityType corentity.EntityType, rng *rand.Rand) []player.ItemStack {
+	between := func(minimum, maximum int) int {
+		if maximum <= minimum {
+			return minimum
+		}
+		return minimum + rng.Intn(maximum-minimum+1)
+	}
+	drops := make([]player.ItemStack, 0, 3)
+	add := func(itemID string, count int) {
+		if count > 0 {
+			drops = append(drops, player.ItemStack{ItemID: itemID, Count: count})
+		}
+	}
+
+	switch entityType {
+	case corentity.TypeCow, corentity.TypeMooshroom:
+		add("minecraft:leather", between(0, 2))
+		add("minecraft:beef", between(1, 3))
+	case corentity.TypePig:
+		add("minecraft:porkchop", between(1, 3))
+	case corentity.TypeSheep:
+		add("minecraft:white_wool", 1)
+		add("minecraft:mutton", between(1, 2))
+	case corentity.TypeChicken:
+		add("minecraft:feather", between(0, 2))
+		add("minecraft:chicken", 1)
+	case corentity.TypeRabbit:
+		add("minecraft:rabbit_hide", between(0, 1))
+		add("minecraft:rabbit", 1)
+		if between(1, 10) == 1 {
+			add("minecraft:rabbit_foot", 1)
+		}
+	case corentity.TypeHorse, corentity.TypeDonkey, corentity.TypeMule,
+		corentity.TypeLlama, corentity.TypeTraderLlama, corentity.TypeCamel:
+		add("minecraft:leather", between(0, 2))
+	case corentity.TypeCod:
+		add("minecraft:cod", 1)
+	case corentity.TypeSalmon:
+		add("minecraft:salmon", 1)
+	case corentity.TypeTropicalFish:
+		add("minecraft:tropical_fish", 1)
+	case corentity.TypePufferfish:
+		add("minecraft:pufferfish", 1)
+	case corentity.TypeSquid:
+		add("minecraft:ink_sac", between(1, 3))
+	case corentity.TypeGlowSquid:
+		add("minecraft:glow_ink_sac", between(1, 3))
+	case corentity.TypeTurtle:
+		add("minecraft:seagrass", between(0, 2))
+	case corentity.TypeHoglin:
+		add("minecraft:porkchop", between(2, 4))
+		add("minecraft:leather", between(0, 1))
+	case corentity.TypeStrider:
+		add("minecraft:string", between(2, 5))
+	case corentity.TypeZombie, corentity.TypeHusk, corentity.TypeDrowned,
+		corentity.TypeZombieVillager, corentity.TypeZombifiedPiglin:
+		add("minecraft:rotten_flesh", between(0, 2))
+	case corentity.TypeSkeleton, corentity.TypeStray, corentity.TypeBogged,
+		corentity.TypeWitherSkeleton:
+		add("minecraft:bone", between(0, 2))
+		add("minecraft:arrow", between(0, 2))
+	case corentity.TypeCreeper:
+		add("minecraft:gunpowder", between(0, 2))
+	case corentity.TypeSpider, corentity.TypeCaveSpider:
+		add("minecraft:string", between(0, 2))
+	case corentity.TypeEnderman:
+		add("minecraft:ender_pearl", between(0, 1))
+	case corentity.TypeBlaze:
+		add("minecraft:blaze_rod", between(0, 1))
+	case corentity.TypeIronGolem:
+		add("minecraft:iron_ingot", between(3, 5))
+		add("minecraft:poppy", between(0, 2))
+	case corentity.TypeSnowGolem:
+		add("minecraft:snowball", between(0, 15))
+	}
+	return drops
+}
+
+func (s *Server) newDroppedItem(stack player.ItemStack, position spatial.Vec3, ordinal int) *corentity.Entity {
+	if stack.IsEmpty() {
+		return nil
+	}
+	id := s.game.NextEntityID()
+	dropped := corentity.New(id, newRandomUUID(), corentity.TypeItem,
+		position.X, position.Y+0.25, position.Z)
+	dropped.ItemID = stack.ItemID
+	dropped.ItemCount = stack.Count
+	dropped.ItemDamage = stack.Damage
+	angle := float64(id+int32(ordinal)*17) * 2.399963229728653
+	dropped.VX = math.Cos(angle) * 0.1
+	dropped.VY = 0.2
+	dropped.VZ = math.Sin(angle) * 0.1
+	s.world.Entities.Add(dropped)
+	return dropped
+}
+
+// dropPlayerInventory applies vanilla's default keepInventory=false behaviour
+// for survival/adventure deaths. Creative and spectator inventories are not
+// turned into world drops.
+func (s *Server) dropPlayerInventory(p *player.Player) {
+	if p == nil || (p.GameMode != player.GameModeSurvival && p.GameMode != player.GameModeAdventure) {
+		return
+	}
+	stacks := make([]player.ItemStack, 0, player.InventorySize+len(p.CraftingGrid)+1)
+	for slot := 1; slot < player.InventorySize; slot++ {
+		if !p.Inventory[slot].IsEmpty() {
+			stacks = append(stacks, p.Inventory[slot])
+		}
+		p.Inventory[slot] = player.ItemStack{}
+	}
+	// Slot zero is only a derived crafting result and must never duplicate the
+	// ingredients that created it.
+	p.Inventory[0] = player.ItemStack{}
+	if !p.CarriedItem.IsEmpty() {
+		stacks = append(stacks, p.CarriedItem)
+	}
+	p.CarriedItem = player.ItemStack{}
+	for index := range p.CraftingGrid {
+		if !p.CraftingGrid[index].IsEmpty() {
+			stacks = append(stacks, p.CraftingGrid[index])
+		}
+		p.CraftingGrid[index] = player.ItemStack{}
+	}
+	p.CraftingResult = player.ItemStack{}
+	p.ContainerSlots = nil
+	p.OpenContainerKind = ""
+
+	for index, stack := range stacks {
+		if dropped := s.newDroppedItem(stack, p.Position, index); dropped != nil {
+			handler.BroadcastSpawnMob(dropped, s.sessions)
+		}
+	}
+	if sess, ok := s.sessions.Get(p.UUID); ok {
+		_ = handler.SyncPlayerInventory(sess.Conn, p)
+	}
+}
+
+func (s *Server) tryPickupDroppedItem(e *corentity.Entity) bool {
+	if e.AgeTicks < 10 || e.ItemID == "" || e.ItemCount <= 0 {
+		return false
+	}
+	for _, sess := range s.allPlayerSessions() {
+		p := sess.Player
+		if p == nil || p.Dead || p.GameMode == player.GameModeSpectator {
+			continue
+		}
+		dx := p.Position.X - e.Position.X
+		dy := p.Position.Y + 0.5 - e.Position.Y
+		dz := p.Position.Z - e.Position.Z
+		if dx*dx+dy*dy+dz*dz > 2.25 {
+			continue
+		}
+		stack := player.ItemStack{ItemID: e.ItemID, Count: e.ItemCount, Damage: e.ItemDamage}
+		if !p.GiveItem(stack) {
+			continue
+		}
+		handler.BroadcastCollectItem(e.EntityID, p.EntityID, e.ItemCount, s.sessions)
+		if sess.Conn != nil {
+			_ = handler.SyncPlayerInventory(sess.Conn, p)
+		}
+		return true
+	}
+	return false
+}
+
+func (s *Server) tickClearLag(deadIDs *[]int32) {
+	clearLag := s.cfg.ClearLag
+	if !clearLag.Enabled || s.worldAge <= 0 || s.worldAge%20 != 0 {
+		return
+	}
+	intervalTicks := int64(clearLag.IntervalSeconds * 20)
+	remainingTicks := intervalTicks - s.worldAge%intervalTicks
+	if remainingTicks == intervalTicks {
+		remainingTicks = 0
+	}
+	remainingSeconds := int(remainingTicks / 20)
+	if remainingSeconds > 0 {
+		for _, warning := range clearLag.WarningSeconds {
+			if warning == remainingSeconds {
+				message := strings.ReplaceAll(clearLag.WarningMessage, "{seconds}", strconv.Itoa(remainingSeconds))
+				handler.BroadcastSystemMessage(s.sessions, message)
+				break
+			}
+		}
+		return
+	}
+
+	minimumAge := int64(clearLag.MinimumEntityAgeSeconds * 20)
+	removed := 0
+	for _, e := range s.world.Entities.Snapshot() {
+		if e.AgeTicks < minimumAge || !clearLagRemoves(e.Type, clearLag.Remove) {
+			continue
+		}
+		s.world.Entities.Remove(e.EntityID)
+		delete(s.mobAIs, e.EntityID)
+		*deadIDs = append(*deadIDs, e.EntityID)
+		removed++
+	}
+	message := strings.ReplaceAll(clearLag.CompleteMessage, "{count}", strconv.Itoa(removed))
+	handler.BroadcastSystemMessage(s.sessions, message)
+}
+
+func clearLagRemoves(t corentity.EntityType, targets config.ClearLagTargets) bool {
+	switch {
+	case t == corentity.TypeItem:
+		return targets.DroppedItems
+	case t == corentity.TypeExperienceOrb:
+		return targets.ExperienceOrbs
+	case corentity.IsProjectile(t):
+		return targets.Projectiles
+	case t == corentity.TypePrimedTNT:
+		return targets.PrimedTNT
+	case t == corentity.TypeFallingBlock:
+		return targets.FallingBlocks
+	case corentity.IsBoat(t):
+		return targets.Boats
+	case isPassiveMob(t):
+		return targets.PassiveMobs
+	case isHostileMob(t):
+		return targets.HostileMobs
+	}
+	return false
 }
 
 // spawnTestMobs populates the world near the spawn point with a handful of
@@ -867,8 +1840,7 @@ func (s *Server) spawnHostileMobsNearPlayers() {
 	}
 	hostiles := 0
 	for _, e := range s.world.Entities.Snapshot() {
-		if !isPassiveMob(e.Type) && e.Type != corentity.TypeVillager &&
-			e.Type != corentity.TypeIronGolem && e.Type != corentity.TypeSnowGolem {
+		if isHostileMob(e.Type) {
 			hostiles++
 		}
 	}
@@ -967,6 +1939,26 @@ func isPassiveMob(t corentity.EntityType) bool {
 	return false
 }
 
+func isHostileMob(t corentity.EntityType) bool {
+	switch t {
+	case corentity.TypeBlaze, corentity.TypeBogged, corentity.TypeBreeze,
+		corentity.TypeCaveSpider, corentity.TypeCreaker, corentity.TypeCreeper,
+		corentity.TypeDrowned, corentity.TypeElderGuardian, corentity.TypeEnderman,
+		corentity.TypeEndermite, corentity.TypeEvoker, corentity.TypeGhast,
+		corentity.TypeGuardian, corentity.TypeHoglin, corentity.TypeHusk,
+		corentity.TypeIllusioner, corentity.TypeMagmaCube, corentity.TypePhantom,
+		corentity.TypePiglin, corentity.TypePiglinBrute, corentity.TypePillager,
+		corentity.TypeRavager, corentity.TypeShulker, corentity.TypeSilverfish,
+		corentity.TypeSkeleton, corentity.TypeSlime, corentity.TypeSpider,
+		corentity.TypeStray, corentity.TypeVex, corentity.TypeVindicator,
+		corentity.TypeWarden, corentity.TypeWitch, corentity.TypeWither,
+		corentity.TypeWitherSkeleton, corentity.TypeZoglin, corentity.TypeZombie,
+		corentity.TypeZombieVillager:
+		return true
+	}
+	return false
+}
+
 func (s *Server) mobAIFor(e *corentity.Entity) *mobAI {
 	ai, ok := s.mobAIs[e.EntityID]
 	if ok {
@@ -1025,6 +2017,9 @@ func (s *Server) startPassiveMobPanic(e *corentity.Entity, hit coreworld.EntityD
 func (s *Server) tickPassiveMobAI(e *corentity.Entity) bool {
 	ai := s.mobAIFor(e)
 	wasAsleep := ai.sleepingWas
+	if wasAsleep && !e.Sleeping && e.Type == corentity.TypeVillager {
+		s.wakeVillagerBesideBed(e)
+	}
 
 	if ai.knockbackTick > 0 {
 		ai.knockbackTick--
@@ -1051,7 +2046,11 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) bool {
 			dx, dz := targetX-e.Position.X, targetZ-e.Position.Z
 			distance := math.Hypot(dx, dz)
 			if distance <= 0.6 {
-				e.VX, e.VZ = 0, 0
+				e.Position.X = targetX
+				e.Position.Y = float64(e.VillageBed.Y) + 0.6875
+				e.Position.Z = targetZ
+				e.VX, e.VY, e.VZ = 0, 0, 0
+				e.OnGround = true
 				e.Sleeping = true
 				changed := !wasAsleep
 				ai.sleepingWas = true
@@ -1065,6 +2064,11 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) bool {
 			return changed
 		}
 		e.Sleeping = false
+		if wasAsleep {
+			s.wakeVillagerBesideBed(e)
+			ai.sleepingWas = false
+			return true
+		}
 	}
 
 	// While paused, hold still.
@@ -1128,13 +2132,55 @@ func (s *Server) tickPassiveMobAI(e *corentity.Entity) bool {
 	return wasAsleep != e.Sleeping
 }
 
+func (s *Server) wakeVillagerBesideBed(e *corentity.Entity) {
+	headX, headY, headZ := int(e.VillageBed.X), int(e.VillageBed.Y), int(e.VillageBed.Z)
+	dx, dz := 0, 1
+	switch s.world.GetBlock(headX, headY, headZ).Properties["facing"] {
+	case "north":
+		dx, dz = 0, -1
+	case "south":
+		dx, dz = 0, 1
+	case "east":
+		dx, dz = 1, 0
+	case "west":
+		dx, dz = -1, 0
+	}
+	footX, footZ := headX-dx, headZ-dz
+	leftX, leftZ := -dz, dx
+	candidates := [][2]int{
+		{headX + leftX, headZ + leftZ},
+		{headX - leftX, headZ - leftZ},
+		{footX + leftX, footZ + leftZ},
+		{footX - leftX, footZ - leftZ},
+		{headX + dx, headZ + dz},
+		{footX - dx, footZ - dz},
+	}
+	for _, candidate := range candidates {
+		x, z := candidate[0], candidate[1]
+		ok, loaded := s.world.CanEntityOccupyIfLoaded(float64(x)+0.5, float64(headY), float64(z)+0.5)
+		if !loaded || !ok || s.world.GroundYAtOrBelow(x, z, headY) != headY-1 {
+			continue
+		}
+		e.Position.X = float64(x) + 0.5
+		e.Position.Y = float64(headY)
+		e.Position.Z = float64(z) + 0.5
+		e.VX, e.VY, e.VZ = 0, 0, 0
+		e.OnGround = true
+		return
+	}
+	// Fallback: place beyond the foot instead of leaving the villager in bed.
+	e.Position.X = float64(footX-dx) + 0.5
+	e.Position.Y = float64(headY)
+	e.Position.Z = float64(footZ-dz) + 0.5
+	e.VX, e.VY, e.VZ = 0, 0, 0
+	e.OnGround = true
+}
+
 // tickGolemAI handles iron and snow golem behaviour.
 //
 // When the golem has been hit by a player, it charges at the attacker's last
-// known position.  The target refreshes each tick from the nearest player
-// within 16 blocks so the golem tracks its target as it moves.  Without a
-// player health system, the golem only knocks back the nearby player (future
-// milestone will add health depletion).
+// known position. The target refreshes each tick from the nearest attackable
+// player and a successful swing applies health damage and knockback.
 func (s *Server) tickGolemAI(e *corentity.Entity) {
 	ai := s.mobAIFor(e)
 
@@ -1146,8 +2192,10 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 
 	// Refresh target from the nearest player within 24 blocks.
 	nearestDist := 24.0
-	for _, sess := range s.sessions.SnapshotAll() {
-		if sess.Player == nil {
+	for _, sess := range s.allPlayerSessions() {
+		if sess.Player == nil || sess.Player.Dead ||
+			sess.Player.GameMode == player.GameModeCreative ||
+			sess.Player.GameMode == player.GameModeSpectator {
 			continue
 		}
 		dx := sess.Player.Position.X - e.Position.X
@@ -1178,9 +2226,12 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 		e.VX, e.VZ = 0, 0
 		if ai.attackCooldown == 0 {
 			ai.attackCooldown = 20 // 1-second cooldown between hits
-			// Find the nearest player and knock them back.
-			for _, sess := range s.sessions.SnapshotAll() {
-				if sess.Player == nil {
+			// Find the nearest player, deal the iron golem's vanilla random
+			// 7-21 damage, and launch the target upward.
+			for _, sess := range s.allPlayerSessions() {
+				if sess.Player == nil || sess.Player.Dead ||
+					sess.Player.GameMode == player.GameModeCreative ||
+					sess.Player.GameMode == player.GameModeSpectator {
 					continue
 				}
 				pdx := sess.Player.Position.X - e.Position.X
@@ -1195,10 +2246,16 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 					kbX = pdx / kbDist * 0.8
 					kbZ = pdz / kbDist * 0.8
 				}
-				handler.SendPlayerKnockback(sess.Conn, sess.Player.EntityID, kbX, 0.4, kbZ)
+				damage := float32(7 + ai.rng.Intn(15))
+				healthBefore, _, _, _ := sess.Player.HealthSnapshot()
+				handler.DamagePlayer(sess, damage, "was slain by an Iron Golem", s.sessions)
+				healthAfter, _, _, _ := sess.Player.HealthSnapshot()
+				if healthAfter < healthBefore {
+					s.sendPlayerVelocity(sess, kbX, 0.4, kbZ)
+				}
 				handler.BroadcastSoundAt(s.sessions, "minecraft:entity.iron_golem.attack", handler.SoundCategoryHostile,
 					e.Position.X, e.Position.Y+1, e.Position.Z, 1, 1)
-				handler.BroadcastHurtAnimation(sess.Player.EntityID, 0, s.sessions)
+				break
 			}
 		}
 		return
@@ -1209,6 +2266,220 @@ func (s *Server) tickGolemAI(e *corentity.Entity) {
 	e.VX = dx / dist * speed
 	e.VZ = dz / dist * speed
 	e.Yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
+}
+
+// tickHostileMobAI gives ground hostiles a common pursuit/melee controller.
+// Creepers replace the melee swing with the vanilla 30-tick fuse.
+func (s *Server) tickHostileMobAI(e *corentity.Entity) {
+	ai := s.mobAIFor(e)
+	var target *session.Session
+	nearest := 32.0
+	for _, candidate := range s.allPlayerSessions() {
+		if candidate.Player == nil || candidate.Player.Dead ||
+			candidate.Player.GameMode == player.GameModeCreative ||
+			candidate.Player.GameMode == player.GameModeSpectator {
+			continue
+		}
+		dx := candidate.Player.Position.X - e.Position.X
+		dz := candidate.Player.Position.Z - e.Position.Z
+		distance := math.Hypot(dx, dz)
+		if distance < nearest && math.Abs(candidate.Player.Position.Y-e.Position.Y) <= 4 {
+			nearest = distance
+			target = candidate
+		}
+	}
+	if target == nil {
+		e.VX, e.VZ = 0, 0
+		if e.Type == corentity.TypeCreeper && ai.fuseTick > 0 {
+			ai.fuseTick -= 2
+			if ai.fuseTick <= 0 {
+				ai.fuseTick = 0
+				handler.BroadcastCreeperSwell(e.EntityID, false, s.sessions)
+			}
+		}
+		return
+	}
+
+	dx := target.Player.Position.X - e.Position.X
+	dz := target.Player.Position.Z - e.Position.Z
+	distance := math.Hypot(dx, dz)
+	if distance > 0.001 {
+		e.Yaw = float32(math.Atan2(-dx, dz) * 180 / math.Pi)
+	}
+
+	if e.Type == corentity.TypeCreeper {
+		if distance <= 3 {
+			e.VX, e.VZ = 0, 0
+			ai.fuseTick++
+			if ai.fuseTick == 1 {
+				handler.BroadcastCreeperSwell(e.EntityID, true, s.sessions)
+				handler.BroadcastSoundAt(s.sessions, "minecraft:entity.creeper.primed", handler.SoundCategoryHostile,
+					e.Position.X, e.Position.Y, e.Position.Z, 1, 1)
+			}
+			if ai.fuseTick >= 30 {
+				s.explodeAt(e.Position.X, e.Position.Y, e.Position.Z, 3, "was blown up by a Creeper")
+				e.Dead = true
+			}
+			return
+		}
+		if distance > 7 && ai.fuseTick > 0 {
+			ai.fuseTick -= 2
+			if ai.fuseTick <= 0 {
+				ai.fuseTick = 0
+				handler.BroadcastCreeperSwell(e.EntityID, false, s.sessions)
+			}
+		}
+	}
+
+	if ai.attackCooldown > 0 {
+		ai.attackCooldown--
+	}
+	if distance <= 1.8 && e.Type != corentity.TypeCreeper {
+		e.VX, e.VZ = 0, 0
+		if ai.attackCooldown == 0 {
+			ai.attackCooldown = 20
+			damage := hostileAttackDamage(e.Type)
+			healthBefore, _, _, _ := target.Player.HealthSnapshot()
+			switch s.cfg.Difficulty {
+			case "easy":
+				damage *= 0.5
+			case "hard":
+				damage *= 1.5
+			}
+			name := strings.ReplaceAll(strings.TrimPrefix(string(e.Type), "minecraft:"), "_", " ")
+			handler.DamagePlayer(target, damage, "was slain by a "+name, s.sessions)
+			healthAfter, _, _, _ := target.Player.HealthSnapshot()
+			if healthAfter < healthBefore {
+				s.sendLegacyPlayerKnockback(target, e.Position.X, e.Position.Z, 0.4, 0.4)
+			}
+		}
+		return
+	}
+
+	if distance > 0.001 {
+		speed := 0.1
+		e.VX = dx / distance * speed
+		e.VZ = dz / distance * speed
+	}
+}
+
+func hostileAttackDamage(t corentity.EntityType) float32 {
+	switch t {
+	case corentity.TypeSilverfish, corentity.TypeEndermite:
+		return 1
+	case corentity.TypeSpider, corentity.TypeCaveSpider, corentity.TypeSlime:
+		return 2
+	case corentity.TypeZombie, corentity.TypeZombieVillager, corentity.TypeHusk, corentity.TypeDrowned:
+		return 3
+	case corentity.TypePiglin:
+		return 5
+	case corentity.TypeHoglin, corentity.TypeZoglin:
+		return 6
+	case corentity.TypeEnderman, corentity.TypePiglinBrute:
+		return 7
+	case corentity.TypeWitherSkeleton:
+		return 8
+	case corentity.TypeRavager:
+		return 12
+	case corentity.TypeVindicator:
+		return 13
+	case corentity.TypeWarden:
+		return 30
+	default:
+		return 3
+	}
+}
+
+func (s *Server) tickProjectile(projectile *corentity.Entity) bool {
+	if projectile.AgeTicks > 1200 {
+		return true
+	}
+	start := projectile.Position
+	projectile.VY -= 0.05
+	projectile.Position.X += projectile.VX
+	projectile.Position.Y += projectile.VY
+	projectile.Position.Z += projectile.VZ
+	projectile.VX *= 0.99
+	projectile.VY *= 0.99
+	projectile.VZ *= 0.99
+	horizontal := math.Hypot(projectile.VX, projectile.VZ)
+	projectile.Yaw = float32(math.Atan2(-projectile.VX, projectile.VZ) * 180 / math.Pi)
+	projectile.Pitch = float32(math.Atan2(-projectile.VY, horizontal) * 180 / math.Pi)
+
+	// Sample the swept path so fast arrows cannot tunnel through a one-block wall.
+	distance := math.Sqrt(
+		(projectile.Position.X-start.X)*(projectile.Position.X-start.X) +
+			(projectile.Position.Y-start.Y)*(projectile.Position.Y-start.Y) +
+			(projectile.Position.Z-start.Z)*(projectile.Position.Z-start.Z))
+	steps := int(math.Ceil(distance * 4))
+	if steps < 1 {
+		steps = 1
+	}
+	for step := 1; step <= steps; step++ {
+		t := float64(step) / float64(steps)
+		x := start.X + (projectile.Position.X-start.X)*t
+		y := start.Y + (projectile.Position.Y-start.Y)*t
+		z := start.Z + (projectile.Position.Z-start.Z)*t
+		block := s.world.GetBlock(int(math.Floor(x)), int(math.Floor(y)), int(math.Floor(z)))
+		if coreworld.IsEntitySupportBlock(block.ResourceLocation()) {
+			handler.BroadcastSoundAt(s.sessions, "minecraft:entity.arrow.hit", handler.SoundCategoryPlayers, x, y, z, 1, 1)
+			return true
+		}
+	}
+
+	for _, target := range s.allPlayerSessions() {
+		if target.Player == nil || target.Player.EntityID == projectile.OwnerEntityID || target.Player.Dead {
+			continue
+		}
+		centre := spatial.Vec3{X: target.Player.Position.X, Y: target.Player.Position.Y + 0.9, Z: target.Player.Position.Z}
+		if pointSegmentDistanceSquared(centre, start, projectile.Position) > 0.8*0.8 {
+			continue
+		}
+		shooterName := "a projectile"
+		for _, shooter := range s.allPlayerSessions() {
+			if shooter.Player != nil && shooter.Player.EntityID == projectile.OwnerEntityID {
+				shooterName = shooter.Player.Username
+				break
+			}
+		}
+		if handler.DamagePlayerLegacy(target, projectile.ProjectileDamage, "was shot by "+shooterName, s.sessions) {
+			s.sendLegacyPlayerKnockback(target, start.X, start.Z, 0.25, 0.1)
+		}
+		return true
+	}
+
+	for _, target := range s.world.Entities.Snapshot() {
+		if target == projectile || target.Dead || target.EntityID == projectile.OwnerEntityID ||
+			corentity.IsProjectile(target.Type) {
+			continue
+		}
+		centre := spatial.Vec3{X: target.Position.X, Y: target.Position.Y + 0.8, Z: target.Position.Z}
+		if pointSegmentDistanceSquared(centre, start, projectile.Position) <= 0.8*0.8 {
+			s.world.QueueEntityDamageFrom(target.EntityID, projectile.ProjectileDamage, start.X, start.Z)
+			return true
+		}
+	}
+	return false
+}
+
+func pointSegmentDistanceSquared(point, start, end spatial.Vec3) float64 {
+	dx, dy, dz := end.X-start.X, end.Y-start.Y, end.Z-start.Z
+	lengthSquared := dx*dx + dy*dy + dz*dz
+	if lengthSquared == 0 {
+		x, y, z := point.X-start.X, point.Y-start.Y, point.Z-start.Z
+		return x*x + y*y + z*z
+	}
+	t := ((point.X-start.X)*dx + (point.Y-start.Y)*dy + (point.Z-start.Z)*dz) / lengthSquared
+	if t < 0 {
+		t = 0
+	} else if t > 1 {
+		t = 1
+	}
+	closestX := start.X + dx*t
+	closestY := start.Y + dy*t
+	closestZ := start.Z + dz*t
+	x, y, z := point.X-closestX, point.Y-closestY, point.Z-closestZ
+	return x*x + y*y + z*z
 }
 
 // newRandomUUID generates a random RFC 4122 version-4 UUID.
@@ -1285,11 +2556,18 @@ func (s *Server) handleConn(conn *network.ClientConn) {
 func (s *Server) registerPlayer(result *handler.LoginResult) *player.Player {
 	// protocol.UUID is [16]byte — convertible to the core's raw [16]byte UUID.
 	p := player.New([16]byte(result.UUID), result.Name, player.ClientEditionJava)
+	p.Operator = handler.IsOperatorName(result.Name)
+	p.InvulnerableUntil = time.Now().Add(3 * time.Second)
+	p.GameMode = configuredGameMode(s.cfg.DefaultGameMode)
 	p.AttackCooldown = s.cfg.Combat.AttackCooldown
+	p.KnockbackHorizontal = s.cfg.Combat.KnockbackHorizontal
+	p.KnockbackVertical = s.cfg.Combat.KnockbackVertical
+	p.OnDeath = s.dropPlayerInventory
 	// Spawn on the highest generated or loaded block at the world origin.
 	p.Position.X = float64(s.spawnX) + 0.5
 	p.Position.Y = float64(s.world.SurfaceY(s.spawnX, s.spawnZ) + 1)
 	p.Position.Z = float64(s.spawnZ) + 0.5
+	p.WorldSpawn = p.Position
 
 	if err := s.game.AddPlayer(p); err != nil {
 		// Duplicate UUID — extremely rare; log and continue with assigned ID.
@@ -1300,6 +2578,32 @@ func (s *Server) registerPlayer(result *handler.LoginResult) *player.Player {
 	handler.OnlineCount.Store(int32(s.game.OnlineCount()))
 	slog.Info("player joined", "name", p.Username, "uuid", p.UUID, "entityID", p.EntityID)
 	return p
+}
+
+func configuredGameMode(name string) player.GameMode {
+	switch strings.ToLower(name) {
+	case "creative":
+		return player.GameModeCreative
+	case "adventure":
+		return player.GameModeAdventure
+	case "spectator":
+		return player.GameModeSpectator
+	default:
+		return player.GameModeSurvival
+	}
+}
+
+func difficultyID(name string) int32 {
+	switch strings.ToLower(name) {
+	case "peaceful":
+		return 0
+	case "easy":
+		return 1
+	case "hard":
+		return 3
+	default:
+		return 2
+	}
 }
 
 // ActiveConns returns the current number of open TCP connections.
@@ -1731,7 +3035,10 @@ func (s *Server) activateTNT(x, y, z int, changes *[]coreworld.BlockChange) {
 // Destroys blocks in a rough sphere, damages nearby entities, and broadcasts
 // the block changes to all clients.
 func (s *Server) explodeTNT(cx, cy, cz float64) {
-	const radius = 4.0
+	s.explodeAt(cx, cy, cz, 4, "blew up")
+}
+
+func (s *Server) explodeAt(cx, cy, cz, radius float64, playerDeathCause string) {
 	var changes []coreworld.BlockChange
 
 	// Destroy blocks in explosion radius with probability based on distance.
@@ -1781,6 +3088,29 @@ func (s *Server) explodeTNT(cx, cy, cz float64) {
 			s.world.QueueEntityDamageFrom(e.EntityID, damage, cx, cz)
 		}
 	}
+
+	// Player health is not stored in the entity manager, so explosions must
+	// damage online sessions separately.
+	for _, sess := range s.allPlayerSessions() {
+		if sess.Player == nil {
+			continue
+		}
+		dx := sess.Player.Position.X - cx
+		dy := sess.Player.Position.Y - cy
+		dz := sess.Player.Position.Z - cz
+		distance := math.Sqrt(dx*dx + dy*dy + dz*dz)
+		if distance > radius*2 {
+			continue
+		}
+		impact := 1 - distance/(radius*2)
+		damage := float32(((impact*impact+impact)/2)*7*(radius*2) + 1)
+		if handler.DamagePlayer(sess, damage, playerDeathCause, s.sessions) {
+			s.sendLegacyPlayerKnockback(sess, cx, cz, impact*1.2, impact*0.8)
+		}
+	}
+
+	handler.BroadcastSoundAt(s.sessions, "minecraft:entity.generic.explode", handler.SoundCategoryHostile,
+		cx, cy, cz, 4, 1)
 
 	for _, bc := range changes {
 		handler.BroadcastBlockChange(bc, s.sessions)
@@ -1850,37 +3180,42 @@ func (s *Server) tickBoatPhysics(e *corentity.Entity) {
 const babyGrowUpTicks = 6000
 
 // sleepAnimTicks is the number of ticks the server waits after all players
-// fall asleep before skipping to morning.  At 20 TPS this is 2 seconds —
-// enough for the client to play the lying-down animation before the wake-up.
-const sleepAnimTicks = 40
+// fall asleep before skipping to morning. Vanilla considers a player fully
+// asleep after 100 ticks (5 seconds at 20 TPS), allowing the full transition.
+const sleepAnimTicks = 100
 
 // tickSleep checks whether all online players are sleeping and, if so, waits
 // sleepAnimTicks for the animation to play, then skips the clock to morning
 // and wakes everyone.
 func (s *Server) tickSleep() {
-	sessions := s.sessions.SnapshotAll()
-	if len(sessions) == 0 {
+	players := make([]*player.Player, 0, s.game.OnlineCount())
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if p.GameMode != player.GameModeSpectator {
+			players = append(players, p)
+		}
+	})
+	if len(players) == 0 {
 		s.sleepAllTick = 0
 		return
 	}
 	tod := s.worldAge % 24000
 	if tod < 12541 || tod > 23459 {
-		// Not night — clear stale sleeping flags.
-		for _, sess := range sessions {
-			if sess.Player != nil {
-				sess.Player.Sleeping = false
+		// Not night — wake anyone who was still waiting for other players.
+		for _, p := range players {
+			if !p.Sleeping {
+				continue
 			}
+			p.Sleeping = false
+			handler.BroadcastPlayerWaking(p.EntityID, s.sessions)
 		}
 		s.sleepAllTick = 0
 		return
 	}
 	total, sleeping := 0, 0
-	for _, sess := range sessions {
-		if sess.Player != nil {
-			total++
-			if sess.Player.Sleeping {
-				sleeping++
-			}
+	for _, p := range players {
+		total++
+		if p.Sleeping {
+			sleeping++
 		}
 	}
 	if total == 0 || sleeping < total {
@@ -1901,6 +3236,12 @@ func (s *Server) tickSleep() {
 	// Animation window elapsed: skip night and wake everyone.
 	s.sleepAllTick = 0
 	handler.SkipNightAndWake(s.world, s.sessions)
+	for _, p := range players {
+		if p.Sleeping {
+			p.Sleeping = false
+			handler.BroadcastPlayerWaking(p.EntityID, s.sessions)
+		}
+	}
 	tod2 := s.worldAge % 24000
 	if tod2 < 6000 {
 		s.worldAge += 6000 - tod2

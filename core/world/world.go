@@ -35,6 +35,9 @@ type World struct {
 	accessClock     uint64
 	maxCachedChunks int
 
+	blockObserverMu sync.RWMutex
+	blockObserver   func(BlockChange)
+
 	pregenQueue  chan [2]int32
 	pregenQueued map[[2]int32]struct{}
 	pregenStop   chan struct{}
@@ -84,6 +87,24 @@ type World struct {
 	spawnedVillageGuards map[[2]int]struct{}
 }
 
+// SetBlockObserver installs an adapter-neutral notification invoked after each
+// canonical block mutation. It lets secondary protocol adapters mirror Java,
+// physics, redstone, and command changes without importing networking into core.
+func (w *World) SetBlockObserver(observer func(BlockChange)) {
+	w.blockObserverMu.Lock()
+	w.blockObserver = observer
+	w.blockObserverMu.Unlock()
+}
+
+func (w *World) notifyBlockObserver(x, y, z int, block Block) {
+	w.blockObserverMu.RLock()
+	observer := w.blockObserver
+	w.blockObserverMu.RUnlock()
+	if observer != nil {
+		observer(BlockChange{X: x, Y: y, Z: z, Block: block})
+	}
+}
+
 // EntityDamage is a simulation-thread damage event. Source coordinates are
 // optional and allow passive AI to flee from an attacker without mutating an
 // entity from a network goroutine.
@@ -117,7 +138,7 @@ func New(gen Generator, storage Storage, villagersEnabled bool) *World {
 		villageJobs:          make(map[spatial.BlockPos]entity.VillagerProfession),
 		spawnedVillageHomes:  make(map[spatial.BlockPos]struct{}),
 		spawnedVillageGuards: make(map[[2]int]struct{}),
-		BlockPhysics: newBlockPhysics(),
+		BlockPhysics:         newBlockPhysics(),
 	}
 	w.Redstone = newRedstoneEngine(w)
 	const workers = 2
@@ -140,24 +161,36 @@ func (w *World) Chunk(x, z int32) *Chunk {
 
 	// Fast path: already cached. If a background worker is already generating
 	// the same chunk, wait for it instead of doing the expensive work twice.
-	w.mu.Lock()
-	if c, ok := w.chunks[key]; ok {
-		w.touchChunkLocked(key)
-		w.mu.Unlock()
-		return c
-	}
-	if ready, ok := w.inflight[key]; ok {
-		w.mu.Unlock()
-		<-ready
+	// A clean chunk may be evicted between the producer closing ready and a
+	// waiter reacquiring the mutex. Retry that lookup instead of returning a nil
+	// chunk to callers, all of which rely on Chunk's non-nil contract.
+	var generatedReady chan struct{}
+	for {
 		w.mu.Lock()
-		c := w.chunks[key]
-		w.touchChunkLocked(key)
+		if c, ok := w.chunks[key]; ok {
+			w.touchChunkLocked(key)
+			w.mu.Unlock()
+			return c
+		}
+		if ready, ok := w.inflight[key]; ok {
+			w.mu.Unlock()
+			<-ready
+			w.mu.Lock()
+			c, ok := w.chunks[key]
+			if ok {
+				w.touchChunkLocked(key)
+			}
+			w.mu.Unlock()
+			if ok && c != nil {
+				return c
+			}
+			continue
+		}
+		generatedReady = make(chan struct{})
+		w.inflight[key] = generatedReady
 		w.mu.Unlock()
-		return c
+		break
 	}
-	ready := make(chan struct{})
-	w.inflight[key] = ready
-	w.mu.Unlock()
 
 	// Try loading from storage before generating.
 	var loaded *Chunk
@@ -177,6 +210,11 @@ func (w *World) Chunk(x, z int32) *Chunk {
 	if generated {
 		loaded = w.generator.Generate(x, z)
 	}
+	if loaded == nil {
+		// Keep malformed custom generators from violating Chunk's non-nil contract.
+		slog.Error("world: generator returned nil chunk", "x", x, "z", z)
+		loaded = &Chunk{X: x, Z: z}
+	}
 
 	// Free per-section palette dedup maps after loading/generating is done.
 	// They are lazily rebuilt the first time a Set() call modifies the section.
@@ -194,7 +232,7 @@ func (w *World) Chunk(x, z int32) *Chunk {
 		w.dirty[key] = struct{}{}
 	}
 	delete(w.inflight, key)
-	close(ready)
+	close(generatedReady)
 	w.trimChunksLocked()
 	w.mu.Unlock()
 
@@ -574,6 +612,12 @@ func entitySupportBlock(name string) bool {
 	}
 }
 
+// IsEntitySupportBlock reports whether entities and projectiles collide with
+// the block rather than passing through it.
+func IsEntitySupportBlock(name string) bool {
+	return entitySupportBlock(name)
+}
+
 // BlockChange describes a canonical world mutation that adapters can broadcast.
 type BlockChange struct {
 	X, Y, Z int
@@ -661,6 +705,131 @@ func (w *World) TickCrops(tick int64, maxChanges int) []BlockChange {
 		w.SetBlock(change.X, change.Y, change.Z, change.Block)
 	}
 	return changes
+}
+
+// TickFarmland applies vanilla hydration: water within four horizontal blocks
+// at the farmland level or one block above sets moisture to 7. Dry farmland
+// loses one moisture level per update and eventually returns to dirt when it
+// has no crop above it.
+func (w *World) TickFarmland(tick int64, maxChanges int) []BlockChange {
+	if maxChanges <= 0 {
+		return nil
+	}
+	w.mu.RLock()
+	chunks := make([]*Chunk, 0, len(w.chunks))
+	for _, chunk := range w.chunks {
+		chunks = append(chunks, chunk)
+	}
+	w.mu.RUnlock()
+
+	changes := make([]BlockChange, 0, maxChanges)
+	for _, chunk := range chunks {
+		for sectionIndex, section := range chunk.Sections {
+			if section == nil || section.NonAir == 0 {
+				continue
+			}
+			palette := section.BlockPalette()
+			hasFarmland := false
+			for _, block := range palette {
+				if block.ResourceLocation() == "minecraft:farmland" {
+					hasFarmland = true
+					break
+				}
+			}
+			if !hasFarmland {
+				continue
+			}
+			for index, paletteIndex := range section.BlockData() {
+				if int(paletteIndex) >= len(palette) {
+					continue
+				}
+				block := palette[paletteIndex]
+				if block.ResourceLocation() != "minecraft:farmland" {
+					continue
+				}
+				localX := index % SectionSize
+				localZ := (index / SectionSize) % SectionSize
+				localY := index / (SectionSize * SectionSize)
+				x := int(chunk.X)*SectionSize + localX
+				y := SectionMinY(sectionIndex) + localY
+				z := int(chunk.Z)*SectionSize + localZ
+				hash := uint64(int64(x)*0x9e3779b1) ^ uint64(int64(y)*0x85ebca77) ^
+					uint64(int64(z)*0xc2b2ae3d) ^ uint64((tick/20)*0x27d4eb2d)
+				if hash%5 != 0 {
+					continue
+				}
+				moisture, _ := strconv.Atoi(block.Properties["moisture"])
+				var replacement Block
+				if w.hasFarmlandWater(x, y, z) {
+					if moisture >= 7 {
+						continue
+					}
+					replacement = copyWorldBlock(block)
+					replacement.Properties["moisture"] = "7"
+				} else if moisture > 0 {
+					replacement = copyWorldBlock(block)
+					replacement.Properties["moisture"] = strconv.Itoa(moisture - 1)
+				} else if !isFarmlandCrop(w.GetBlock(x, y+1, z).ResourceLocation()) {
+					replacement = Block{Namespace: "minecraft", Name: "dirt"}
+				} else {
+					continue
+				}
+				changes = append(changes, BlockChange{X: x, Y: y, Z: z, Block: replacement})
+				if len(changes) >= maxChanges {
+					break
+				}
+			}
+			if len(changes) >= maxChanges {
+				break
+			}
+		}
+		if len(changes) >= maxChanges {
+			break
+		}
+	}
+	for _, change := range changes {
+		w.SetBlock(change.X, change.Y, change.Z, change.Block)
+	}
+	return changes
+}
+
+func (w *World) hasFarmlandWater(x, y, z int) bool {
+	for dx := -4; dx <= 4; dx++ {
+		for dz := -4; dz <= 4; dz++ {
+			for dy := 0; dy <= 1; dy++ {
+				wx, wz := x+dx, z+dz
+				cx, cz := ChunkCoordsFor(wx, wz)
+				if !w.IsChunkLoaded(cx, cz) {
+					continue
+				}
+				water := w.GetBlock(wx, y+dy, wz)
+				if water.ResourceLocation() == "minecraft:water" || water.Properties["waterlogged"] == "true" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isFarmlandCrop(name string) bool {
+	switch name {
+	case "minecraft:wheat", "minecraft:carrots", "minecraft:potatoes",
+		"minecraft:beetroots", "minecraft:melon_stem", "minecraft:pumpkin_stem",
+		"minecraft:attached_melon_stem", "minecraft:attached_pumpkin_stem",
+		"minecraft:torchflower_crop", "minecraft:pitcher_crop":
+		return true
+	}
+	return false
+}
+
+func copyWorldBlock(block Block) Block {
+	properties := make(map[string]string, len(block.Properties))
+	for key, value := range block.Properties {
+		properties[key] = value
+	}
+	block.Properties = properties
+	return block
 }
 
 func cropMaximumAge(name string) (int, bool) {
@@ -765,6 +934,7 @@ func (w *World) SetBlock(x, y, z int, block Block) {
 	if c.Sections[sIdx] == nil {
 		c.Sections[sIdx] = NewSection()
 	}
+	oldBlock := c.Sections[sIdx].At(lx, ly, lz)
 	c.Sections[sIdx].Set(lx, ly, lz, block)
 	if block.IsAir() {
 		w.containerMu.Lock()
@@ -793,7 +963,8 @@ func (w *World) SetBlock(x, y, z int, block Block) {
 
 	// Schedule physics updates for affected neighbours.
 	// worldAge 0 = "fire next tick" (drainDue uses <= comparison).
-	w.scheduleBlockNeighborUpdates(x, y, z, block)
+	w.scheduleBlockNeighborUpdates(x, y, z, oldBlock, block)
+	w.notifyBlockObserver(x, y, z, block)
 }
 
 // setBlockNoPhysics writes a block directly without scheduling physics updates.
@@ -821,13 +992,15 @@ func (w *World) setBlockNoPhysics(x, y, z int, block Block) {
 	w.dirty[key] = struct{}{}
 	w.trimChunksLocked()
 	w.mu.Unlock()
+	w.notifyBlockObserver(x, y, z, block)
 }
 
 // scheduleBlockNeighborUpdates schedules physics ticks when a block is placed
 // or removed.  worldAge is unknown here so we schedule at due=0 (fires on the
 // very next drain regardless of current age).
-func (w *World) scheduleBlockNeighborUpdates(x, y, z int, placed Block) {
+func (w *World) scheduleBlockNeighborUpdates(x, y, z int, old, placed Block) {
 	age := w.WorldTime() // close enough — physics fires within a few ticks
+	oldName := old.ResourceLocation()
 	placedName := placed.ResourceLocation()
 
 	// 1. If we just removed a block (placed = air), the gravity block directly
@@ -850,10 +1023,6 @@ func (w *World) scheduleBlockNeighborUpdates(x, y, z int, placed Block) {
 		if IsFluidBlock(above2.ResourceLocation()) {
 			w.BlockPhysics.ScheduleFluid(x, y+1, z, age, 1)
 		}
-		// Log removed — schedule leaf decay for all adjacent leaves.
-		if IsLogBlock(aboveName) || IsLogBlock(placedName) {
-			w.scheduleNearbyLeafDecay(x, y, z, age)
-		}
 	}
 
 	// 2. If we placed a gravity block, check immediately whether it has support.
@@ -866,10 +1035,10 @@ func (w *World) scheduleBlockNeighborUpdates(x, y, z int, placed Block) {
 		w.BlockPhysics.ScheduleFluid(x, y, z, age, 5)
 	}
 
-	// 4. If a log was removed (now air), schedule leaf decay.
-	// (Handled above for the air case, but also check if old block was log.)
-	// We detect this by checking if adjacent leaves exist after any removal.
-	if placed.IsAir() {
+	// 4. Only removing/replacing a log can disconnect leaves. Previously every
+	// broken plant triggered a 13x13x13 scan, creating needless chunk loads and
+	// making cache-eviction races common while a player crossed flower fields.
+	if IsLogBlock(oldName) && !IsLogBlock(placedName) {
 		w.scheduleNearbyLeafDecay(x, y, z, age)
 	}
 

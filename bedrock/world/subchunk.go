@@ -1,8 +1,8 @@
 // Package world provides Bedrock Edition world encoding utilities for GoCraft.
 //
-// M14.1 scope: minimal flat-world sub-chunk encoding to get a Bedrock client
-// into a walkable world.  Full palette-driven block encoding (matching
-// core/world blocks to Bedrock runtime IDs) is deferred to M14.2.
+// This file contains common Bedrock sub-chunk and biome-storage primitives.
+// encoder.go performs canonical GoCraft block-to-Bedrock state translation;
+// these helpers remain useful for empty sections and initial chunk payloads.
 package world
 
 import (
@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 
 	"github.com/sandertv/gophertunnel/minecraft/nbt"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
 
 // Overworld sub-chunk layout for Bedrock 1.18+ (Y range −64..320):
@@ -134,7 +135,7 @@ func EncodeGroundSubChunk() ([]byte, error) {
 //	uint32:  biome runtime ID (1 = plains)
 func EncodeLevelChunkPayload() []byte {
 	var buf bytes.Buffer
-	buf.Grow(overworldSubChunkCount*9 + 1)
+	buf.Grow(overworldSubChunkCount*2 + 1)
 
 	// One biome palette entry per sub-chunk: all plains.
 	entry := makeSingleValueBiomeStorage(biomePlains)
@@ -149,11 +150,10 @@ func EncodeLevelChunkPayload() []byte {
 // makeSingleValueBiomeStorage encodes a single-value runtime palette storage
 // (bitsPerBlock=0) for the given biome ID.  The returned slice is 9 bytes.
 func makeSingleValueBiomeStorage(biomeID uint32) []byte {
-	b := make([]byte, 9)
-	b[0] = 0x00                                    // (bitsPerBlock=0 << 1) | runtime=0
-	binary.LittleEndian.PutUint32(b[1:5], 1)       // palette count = 1
-	binary.LittleEndian.PutUint32(b[5:9], biomeID) // plains runtime ID
-	return b
+	var buf bytes.Buffer
+	buf.WriteByte(0x01) // bitsPerBlock=0, network palette
+	_ = protocol.WriteVarint32(&buf, int32(biomeID))
+	return buf.Bytes()
 }
 
 // marshalBlockState serialises a Bedrock block state to Network Little Endian

@@ -20,23 +20,62 @@ package handler
 import (
 	"fmt"
 	"log/slog"
+	"sync/atomic"
+	"time"
 
 	"GoCraft/core/player"
+	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
+	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
 )
+
+type itemTooltipOptions struct {
+	showDurability        bool
+	showAttributes        bool
+	hideVanillaAttributes bool
+	legacyCombat          bool
+}
+
+var configuredItemTooltips atomic.Value
+
+func init() {
+	configuredItemTooltips.Store(itemTooltipOptions{
+		showDurability:        true,
+		showAttributes:        true,
+		hideVanillaAttributes: true,
+	})
+}
+
+// ConfigureItemTooltips installs the server-wide presentation used for all
+// outgoing item stacks. The gameplay attributes remain authoritative even
+// when their vanilla tooltip section is hidden.
+func ConfigureItemTooltips(showDurability, showAttributes, hideVanillaAttributes, legacyCombat bool) {
+	configuredItemTooltips.Store(itemTooltipOptions{
+		showDurability:        showDurability,
+		showAttributes:        showAttributes,
+		hideVanillaAttributes: hideVanillaAttributes,
+		legacyCombat:          legacyCombat,
+	})
+}
 
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 // handleInventoryPacket dispatches an incoming inventory packet.
 // Called from the play loop for the two C→S inventory packet IDs.
-func handleInventoryPacket(pkt *protocol.Packet, p *player.Player) error {
+func handleInventoryPacket(pkt *protocol.Packet, p *player.Player, conn *network.ClientConn) error {
 	switch pkt.ID {
 	case packetIDSetHeldItemCS:
 		return handleSetHeldItem(pkt, p)
 	case packetIDCreativeModeSetItem:
-		return handleCreativeModeSetItem(pkt, p)
+		before := p.ArmorPoints()
+		if err := handleCreativeModeSetItem(pkt, p); err != nil {
+			return err
+		}
+		if p.ArmorPoints() != before {
+			return sendArmorAttributes(conn, p)
+		}
 	}
 	return nil
 }
@@ -78,43 +117,83 @@ func handleCreativeModeSetItem(pkt *protocol.Packet, p *player.Player) error {
 		return fmt.Errorf("creative set item: reading slot: %w", err)
 	}
 
-	count, err := protocol.ReadVarInt(r)
-	if err != nil {
-		return fmt.Errorf("creative set item: reading count: %w", err)
-	}
-
 	// Slot index -1 is used when the player drags an item to the cursor
 	// (outside valid inventory bounds). Ignore those.
 	if slot < 0 || int(slot) >= player.InventorySize {
 		return nil
 	}
+	item, err := readPlainSlot(r)
+	if err != nil {
+		return fmt.Errorf("creative set item: reading item: %w", err)
+	}
+	p.Inventory[slot] = item
+	slog.Debug("inventory slot set",
+		"player", p.Username, "slot", slot, "item", item.ItemID, "count", item.Count)
+	return nil
+}
 
-	if count <= 0 {
-		p.Inventory[slot] = player.ItemStack{} // clear slot
+// handleUseItem equips armour from the selected hotbar slot when the player
+// right-clicks it. This prevents the client-only predicted equip from being
+// rolled back and keeps the armour attribute authoritative.
+func handleUseItem(pkt *protocol.Packet, p *player.Player, conn *network.ClientConn, w *coreworld.World, mgr *session.Manager, nextEntityID func() int32) error {
+	r := pkt.Reader()
+	hand, err := protocol.ReadVarInt(r)
+	if err != nil {
+		return fmt.Errorf("use item: reading hand: %w", err)
+	}
+	sequence, err := protocol.ReadVarInt(r)
+	if err != nil {
+		return fmt.Errorf("use item: reading sequence: %w", err)
+	}
+	yaw, err := protocol.ReadFloat(r)
+	if err != nil {
+		return fmt.Errorf("use item: reading yaw: %w", err)
+	}
+	pitch, err := protocol.ReadFloat(r)
+	if err != nil {
+		return fmt.Errorf("use item: reading pitch: %w", err)
+	}
+	p.Rotation.Yaw, p.Rotation.Pitch = yaw, pitch
+	if r.Len() != 0 {
+		return fmt.Errorf("use item: %d trailing bytes", r.Len())
+	}
+	if hand != 0 {
+		_ = conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 		return nil
 	}
-
-	itemType, err := protocol.ReadVarInt(r)
-	if err != nil {
-		return fmt.Errorf("creative set item: reading item type: %w", err)
+	heldSlot := player.HotbarStart + p.HeldSlot
+	if isBoatItem(p.Inventory[heldSlot].ItemID) &&
+		p.GameMode != player.GameModeAdventure && p.GameMode != player.GameModeSpectator {
+		if boat := spawnBoatFromLook(p, w, nextEntityID); boat != nil {
+			BroadcastSpawnMob(boat, mgr)
+			consumePlacedBoat(p, conn)
+			slog.Info("player placed boat", "player", p.Username, "type", boat.Type)
+		}
+		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 	}
-	// Remaining fields (components_to_add, components_to_remove, component
-	// payloads) are beyond what M10 needs; they are dropped at packet end.
-
-	// Map numeric item type to a canonical resource location.
-	itemName := javaworld.ItemName(itemType)
-	if itemName == "" {
-		// Unknown numeric IDs are retained as placeholders. This should only
-		// occur when the client and embedded registry versions disagree.
-		itemName = fmt.Sprintf("unknown:%d", itemType)
-		slog.Debug("creative set item: unknown item type",
-			"player", p.Username, "type", itemType, "slot", slot)
+	switch p.Inventory[heldSlot].ItemID {
+	case "minecraft:bow", "minecraft:crossbow", "minecraft:trident":
+		p.UsingItemID = p.Inventory[heldSlot].ItemID
+		p.UsingItemSince = time.Now()
+		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 	}
-
-	p.Inventory[slot] = player.ItemStack{ItemID: itemName, Count: int(count)}
-	slog.Debug("inventory slot set",
-		"player", p.Username, "slot", slot, "item", itemName, "count", count)
-	return nil
+	armorSlot := armorInventorySlot(p.Inventory[heldSlot].ItemID)
+	if armorSlot < 5 {
+		_ = conn.WritePacket(buildAcknowledgeBlockChange(sequence))
+		return nil
+	}
+	before := p.ArmorPoints()
+	p.Inventory[heldSlot], p.Inventory[armorSlot] = p.Inventory[armorSlot], p.Inventory[heldSlot]
+	p.ContainerStateID++
+	if err := sendSetContainerContent(conn, p, p.ContainerStateID); err != nil {
+		return err
+	}
+	if p.ArmorPoints() != before {
+		if err := sendArmorAttributes(conn, p); err != nil {
+			return err
+		}
+	}
+	return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 }
 
 // ── S→C senders ──────────────────────────────────────────────────────────────
@@ -176,8 +255,150 @@ func encodeSlot(b *protocol.Builder, item player.ItemStack) {
 		b.VarInt(0)
 		return
 	}
+	maxDamage := player.MaxDurability(item.ItemID)
+	if maxDamage <= 0 {
+		b.VarInt(int32(item.Count)).
+			VarInt(id).
+			VarInt(0). // components_to_add
+			VarInt(0)  // components_to_remove
+		return
+	}
+	damage := item.Damage
+	if damage < 0 {
+		damage = 0
+	} else if damage >= maxDamage {
+		damage = maxDamage - 1
+	}
+	options := configuredItemTooltips.Load().(itemTooltipOptions)
+	type loreLine struct {
+		text  string
+		color string
+	}
+	lore := make([]loreLine, 0, 7)
+	if attackDamage, attackSpeed, ok := player.AttackAttributes(item.ItemID); ok && options.showAttributes {
+		speedText := fmt.Sprintf("%g", attackSpeed)
+		if options.legacyCombat {
+			speedText = "Instant"
+		}
+		lore = append(lore,
+			loreLine{"", "gray"},
+			loreLine{"When in Main Hand:", "gray"},
+			loreLine{fmt.Sprintf(" %g Attack Damage", attackDamage), "dark_green"},
+			loreLine{" " + speedText + " Attack Speed", "dark_green"})
+	}
+	if armour := player.ArmorPoints(item.ItemID); armour > 0 && options.showAttributes {
+		lore = append(lore,
+			loreLine{"", "gray"},
+			loreLine{armorTooltipHeading(item.ItemID), "gray"},
+			loreLine{fmt.Sprintf(" %d Armor", armour), "blue"})
+		if toughness := player.ArmorToughness(item.ItemID); toughness > 0 {
+			lore = append(lore, loreLine{fmt.Sprintf(" %g Armor Toughness", toughness), "blue"})
+		}
+		if resistance := player.ArmorKnockbackResistance(item.ItemID); resistance > 0 {
+			lore = append(lore, loreLine{fmt.Sprintf(" %g%% Knockback Resistance", resistance*100), "blue"})
+		}
+	}
+	if options.showDurability {
+		remaining := maxDamage - damage
+		color := "green"
+		if remaining*5 <= maxDamage {
+			color = "red"
+		} else if remaining*2 <= maxDamage {
+			color = "yellow"
+		}
+		lore = append(lore, loreLine{fmt.Sprintf("Durability: %d / %d", remaining, maxDamage), color})
+	}
+	componentCount := int32(2) // max_damage + damage
+	if len(lore) > 0 {
+		componentCount++
+	}
+	if options.hideVanillaAttributes {
+		componentCount++
+	}
 	b.VarInt(int32(item.Count)).
 		VarInt(id).
-		VarInt(0). // components_to_add
-		VarInt(0)  // components_to_remove
+		VarInt(componentCount).
+		VarInt(0). // components_to_remove
+		VarInt(2).VarInt(int32(maxDamage)).
+		VarInt(3).VarInt(int32(damage))
+	if len(lore) > 0 {
+		b.VarInt(8).VarInt(int32(len(lore)))
+		for _, line := range lore {
+			b.Bytes(nbtLoreTextComponent(line.text, line.color))
+		}
+	}
+	if options.hideVanillaAttributes {
+		// Component 13 overrides the item's default attribute list with an empty
+		// non-displayed list. This hides the client-visible 1024 attack speed;
+		// actual damage, armour, and cooldown remain server-authoritative.
+		b.VarInt(13).VarInt(0).Bool(false)
+	}
+}
+
+func armorTooltipHeading(itemID string) string {
+	switch armorInventorySlot(itemID) {
+	case 5:
+		return "When on Head:"
+	case 6:
+		return "When on Body:"
+	case 7:
+		return "When on Legs:"
+	case 8:
+		return "When on Feet:"
+	default:
+		return "When Worn:"
+	}
+}
+
+// SyncPlayerInventory refreshes every player slot after server-side changes
+// such as picking up a dropped item.
+func SyncPlayerInventory(conn *network.ClientConn, p *player.Player) error {
+	p.ContainerStateID++
+	return sendSetContainerContent(conn, p, p.ContainerStateID)
+}
+
+// damageHeldItem consumes one use and immediately refreshes the visible item.
+func damageHeldItem(p *player.Player, conn *network.ClientConn, amount int) bool {
+	if p.GameMode == player.GameModeCreative || p.GameMode == player.GameModeSpectator {
+		return false
+	}
+	slot := player.HotbarStart + p.HeldSlot
+	if player.MaxDurability(p.Inventory[slot].ItemID) == 0 {
+		return false
+	}
+	p.Inventory[slot].ApplyDamage(amount)
+	p.ContainerStateID++
+	if conn != nil {
+		_ = sendSetContainerContent(conn, p, p.ContainerStateID)
+	}
+	return true
+}
+
+// DamagePlayerArmor consumes durability on every equipped armour piece after a
+// server-side hit and refreshes both the items and HUD if a piece breaks.
+func DamagePlayerArmor(p *player.Player, conn *network.ClientConn, amount int) {
+	if p.GameMode == player.GameModeCreative || p.GameMode == player.GameModeSpectator || amount <= 0 {
+		return
+	}
+	before := p.ArmorPoints()
+	changed := false
+	for slot := 5; slot <= 8; slot++ {
+		if player.MaxDurability(p.Inventory[slot].ItemID) == 0 {
+			continue
+		}
+		p.Inventory[slot].ApplyDamage(amount)
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	p.ContainerStateID++
+	if conn != nil {
+		_ = sendSetContainerContent(conn, p, p.ContainerStateID)
+	}
+	if p.ArmorPoints() != before {
+		if conn != nil {
+			_ = sendArmorAttributes(conn, p)
+		}
+	}
 }

@@ -157,8 +157,39 @@ func skipSlotDisplay(t *testing.T, reader *bytes.Reader) {
 		_ = mustReadRecipeVarInt(t, reader)
 		added := mustReadRecipeVarInt(t, reader)
 		removed := mustReadRecipeVarInt(t, reader)
-		if added != 0 || removed != 0 {
-			t.Fatalf("unexpected components add=%d remove=%d", added, removed)
+		for i := int32(0); i < added; i++ {
+			switch component := mustReadRecipeVarInt(t, reader); component {
+			case 2, 3:
+				_ = mustReadRecipeVarInt(t, reader)
+			case 8:
+				lines := mustReadRecipeVarInt(t, reader)
+				for line := int32(0); line < lines; line++ {
+					if err := skipNetworkNBT(reader); err != nil {
+						t.Fatalf("skip lore component: %v", err)
+					}
+				}
+			case 13:
+				attributes := mustReadRecipeVarInt(t, reader)
+				for attribute := int32(0); attribute < attributes; attribute++ {
+					_ = mustReadRecipeVarInt(t, reader)
+					if _, err := protocol.ReadString(reader); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := protocol.ReadDouble(reader); err != nil {
+						t.Fatal(err)
+					}
+					_ = mustReadRecipeVarInt(t, reader)
+					_ = mustReadRecipeVarInt(t, reader)
+				}
+				if _, err := protocol.ReadBool(reader); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				t.Fatalf("unexpected component %d", component)
+			}
+		}
+		for i := int32(0); i < removed; i++ {
+			_ = mustReadRecipeVarInt(t, reader)
 		}
 	case slotDisplayTag:
 		if _, err := protocol.ReadString(reader); err != nil {

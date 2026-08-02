@@ -146,8 +146,34 @@ func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.W
 				return nil
 			}
 			damage := playerAttackDamage(p)
-			if w.QueueEntityDamageFrom(entityID, damage, p.Position.X, p.Position.Z) {
+			if target := playerSessionByEntityID(mgr, entityID); target != nil {
+				if target.Player == p || squaredPlayerDistance(p, target.Player) > 9 {
+					return nil
+				}
+				if DamagePlayerLegacy(target, damage, "was slain by "+p.Username, mgr) {
+					horizontal := p.KnockbackHorizontal
+					vertical := p.KnockbackVertical
+					if horizontal <= 0 {
+						horizontal = 0.4
+					}
+					if vertical <= 0 {
+						vertical = 0.4
+					}
+					if p.Sprinting {
+						horizontal *= 2
+					}
+					if target.Conn != nil {
+						SendLegacyKnockback(target, p.Position.X, p.Position.Z, horizontal, vertical)
+					} else {
+						mgr.KnockbackExternal(target.Player, p.Position.X, p.Position.Z, horizontal, vertical)
+					}
+					p.LastAttack = now
+					damageHeldItem(p, conn, 1)
+					slog.Info("player attacked player", "attacker", p.Username, "target", target.Player.Username, "damage", damage)
+				}
+			} else if w.QueueEntityDamageFrom(entityID, damage, p.Position.X, p.Position.Z) {
 				p.LastAttack = now
+				damageHeldItem(p, conn, 1)
 				slog.Info("entity attack queued", "player", p.Username, "entityID", entityID, "damage", damage)
 			} else {
 				slog.Debug("entity attack ignored", "player", p.Username, "entityID", entityID)
@@ -323,24 +349,24 @@ func playerAttackCooldown(p *player.Player) time.Duration {
 	}
 }
 func playerAttackDamage(p *player.Player) float32 {
-	switch p.HeldItem().ItemID {
-	case "minecraft:wooden_sword", "minecraft:golden_sword":
-		return 4
-	case "minecraft:stone_sword":
-		return 5
-	case "minecraft:iron_sword":
-		return 6
-	case "minecraft:diamond_sword":
-		return 7
-	case "minecraft:netherite_sword":
-		return 8
-	case "minecraft:wooden_axe", "minecraft:golden_axe":
-		return 7
-	case "minecraft:stone_axe", "minecraft:iron_axe", "minecraft:diamond_axe":
-		return 9
-	case "minecraft:netherite_axe":
-		return 10
-	default:
-		return 1
+	if p.AttackCooldown {
+		if damage, _, ok := player.AttackAttributes(p.HeldItem().ItemID); ok {
+			return damage
+		}
 	}
+	return player.LegacyAttackDamage(p.HeldItem().ItemID)
+}
+
+func playerSessionByEntityID(mgr *session.Manager, entityID int32) *session.Session {
+	if mgr == nil {
+		return nil
+	}
+	return mgr.PlayerSessionByEntityID(entityID)
+}
+
+func squaredPlayerDistance(a, b *player.Player) float64 {
+	dx := a.Position.X - b.Position.X
+	dy := a.Position.Y - b.Position.Y
+	dz := a.Position.Z - b.Position.Z
+	return dx*dx + dy*dy + dz*dz
 }

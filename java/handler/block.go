@@ -10,8 +10,10 @@ package handler
 // protocol 769.
 
 import (
+	cryptorand "crypto/rand"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 
 	corentity "GoCraft/core/entity"
@@ -72,7 +74,7 @@ const (
 func handleBlockPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn, nextEntityID func() int32) error {
 	switch pkt.ID {
 	case packetIDPlayerAction:
-		return handlePlayerAction(pkt, p, w, mgr)
+		return handlePlayerActionWithContext(pkt, p, w, mgr, conn, nextEntityID)
 	case packetIDUseItemOn:
 		return handleUseItemOn(pkt, p, w, mgr, conn, nextEntityID)
 	}
@@ -90,6 +92,10 @@ func handleBlockPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.Worl
 //	Byte      face     (0=−Y, 1=+Y, 2=−Z, 3=+Z, 4=−X, 5=+X)
 //	VarInt    sequence (monotonic counter; echoed in Acknowledge Block Change)
 func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager) error {
+	return handlePlayerActionWithContext(pkt, p, w, mgr, nil, nil)
+}
+
+func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *coreworld.World, mgr *session.Manager, conn *network.ClientConn, nextEntityID func() int32) error {
 	r := pkt.Reader()
 
 	status, err := protocol.ReadVarInt(r)
@@ -106,6 +112,11 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 	seq, err := protocol.ReadVarInt(r)
 	if err != nil {
 		return fmt.Errorf("player action: reading sequence: %w", err)
+	}
+	if status == 5 { // RELEASE_USE_ITEM
+		releaseRangedItem(p, w, mgr, conn, nextEntityID)
+		sendAcknowledgeBlockChange(mgr, p, seq)
+		return nil
 	}
 
 	// Reject out-of-bounds Y before touching the world.
@@ -154,6 +165,11 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 					}
 				}
 			}
+			heldSlot := player.HotbarStart + p.HeldSlot
+			if wear := player.BlockUseDamage(p.Inventory[heldSlot].ItemID); wear > 0 {
+				p.Inventory[heldSlot].ApplyDamage(wear)
+				inventoryChanged = true
+			}
 		}
 		// Clear orphaned container data regardless of game mode.
 		if isChestBlock(broken.ResourceLocation()) {
@@ -162,7 +178,8 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 		// Sync inventory once if anything was added.
 		if inventoryChanged {
 			if sess, ok := mgr.Get(p.UUID); ok {
-				_ = sendSetContainerContent(sess.Conn, p, 1)
+				p.ContainerStateID++
+				_ = sendSetContainerContent(sess.Conn, p, p.ContainerStateID)
 			}
 		}
 	}
@@ -177,18 +194,8 @@ func handlePlayerAction(pkt *protocol.Packet, p *player.Player, w *coreworld.Wor
 }
 
 func breakLinkedPlantHalf(x, y, z int, broken coreworld.Block, w *coreworld.World, mgr *session.Manager) {
-	switch broken.ResourceLocation() {
-	case "minecraft:tall_grass", "minecraft:large_fern", "minecraft:sunflower",
-		"minecraft:lilac", "minecraft:rose_bush", "minecraft:peony", "minecraft:pitcher_plant":
-	default:
-		return
-	}
-	half := broken.Properties["half"]
-	otherY := y + 1
-	wantHalf := "upper"
-	if half == "upper" {
-		otherY, wantHalf = y-1, "lower"
-	} else if half != "lower" {
+	otherY, wantHalf, ok := coreworld.DoublePlantPartnerY(broken, y)
+	if !ok {
 		return
 	}
 	other := w.GetBlock(x, otherY, z)
@@ -433,11 +440,17 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 
 	// Tool and seed interactions run before generic block/container handling.
 	targetBlock := w.GetBlock(int(bx), int(by), int(bz))
-	if hand == 0 && useHoeOrPlant(int(bx), int(by), int(bz), face, targetBlock, p, w, mgr) {
+	heldBefore := p.HeldItem().ItemID
+	usedDamageableTool := isBlockUseTool(heldBefore)
+	if hand == 0 && useToolOrPlant(int(bx), int(by), int(bz), face, targetBlock, p, w, mgr) {
 		sendAcknowledgeBlockChange(mgr, p, seq)
-		p.ContainerStateID++
-		if sess, ok := mgr.Get(p.UUID); ok {
-			_ = sendSetContainerContent(sess.Conn, p, p.ContainerStateID)
+		if usedDamageableTool {
+			damageHeldItem(p, conn, 1)
+		} else {
+			p.ContainerStateID++
+			if sess, ok := mgr.Get(p.UUID); ok {
+				_ = sendSetContainerContent(sess.Conn, p, p.ContainerStateID)
+			}
 		}
 		return nil
 	}
@@ -483,7 +496,9 @@ func handleUseItemOn(pkt *protocol.Packet, p *player.Player, w *coreworld.World,
 	if !held.IsEmpty() && isBoatItem(held.ItemID) && nextEntityID != nil &&
 		p.GameMode != player.GameModeAdventure && p.GameMode != player.GameModeSpectator {
 		if boat := spawnBoatFromItem(held.ItemID, int(bx), int(by), int(bz), int(face), w, nextEntityID); boat != nil {
+			boat.Yaw = p.Rotation.Yaw
 			BroadcastSpawnMob(boat, mgr)
+			consumePlacedBoat(p, conn)
 			sendAcknowledgeBlockChange(mgr, p, seq)
 			slog.Info("player placed boat", "player", p.Username, "type", boat.Type)
 		} else {
@@ -571,12 +586,15 @@ func placementReplaceable(blockName string) bool {
 	}
 }
 
-func useHoeOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.Player, w *coreworld.World, mgr *session.Manager) bool {
+func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.Player, w *coreworld.World, mgr *session.Manager) bool {
 	held := p.HeldItem()
-	if held.IsEmpty() || face == 0 {
+	if held.IsEmpty() {
 		return false
 	}
 	if isHoe(held.ItemID) {
+		if face == 0 {
+			return false
+		}
 		above := w.GetBlock(x, y+1, z)
 		if !above.IsAir() {
 			return false
@@ -592,6 +610,62 @@ func useHoeOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.Pl
 		}
 		applyBlockChange(x, y, z, replacement, w, mgr)
 		broadcastSoundAt(mgr, "minecraft:item.hoe.till", soundCategoryBlocks, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+		return true
+	}
+
+	if isAxe(held.ItemID) {
+		replacement, sound, ok := axeTransformation(target)
+		if !ok {
+			return false
+		}
+		applyBlockChange(x, y, z, replacement, w, mgr)
+		broadcastSoundAt(mgr, sound, soundCategoryBlocks, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+		return true
+	}
+
+	if isShovel(held.ItemID) {
+		if target.ResourceLocation() == "minecraft:campfire" || target.ResourceLocation() == "minecraft:soul_campfire" {
+			if target.Properties["lit"] != "true" {
+				return false
+			}
+			replacement := copyBlockProperties(target)
+			replacement.Properties["lit"] = "false"
+			applyBlockChange(x, y, z, replacement, w, mgr)
+			broadcastSoundAt(mgr, "minecraft:block.fire.extinguish", soundCategoryBlocks,
+				float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+			return true
+		}
+		if !w.GetBlock(x, y+1, z).IsAir() {
+			return false
+		}
+		switch target.ResourceLocation() {
+		case "minecraft:grass_block", "minecraft:dirt", "minecraft:coarse_dirt",
+			"minecraft:rooted_dirt", "minecraft:podzol", "minecraft:mycelium":
+			applyBlockChange(x, y, z, coreworld.Block{Namespace: "minecraft", Name: "dirt_path"}, w, mgr)
+			broadcastSoundAt(mgr, "minecraft:item.shovel.flatten", soundCategoryBlocks,
+				float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+			return true
+		}
+		return false
+	}
+
+	if held.ItemID == "minecraft:flint_and_steel" || held.ItemID == "minecraft:fire_charge" {
+		if face < 0 || int(face) >= len(faceOffset) {
+			return false
+		}
+		offset := faceOffset[face]
+		fx, fy, fz := x+int(offset[0]), y+int(offset[1]), z+int(offset[2])
+		if !placementReplaceable(w.GetBlock(fx, fy, fz).ResourceLocation()) {
+			return false
+		}
+		applyBlockChange(fx, fy, fz, coreworld.Block{Namespace: "minecraft", Name: "fire"}, w, mgr)
+		broadcastSoundAt(mgr, "minecraft:item.flintandsteel.use", soundCategoryBlocks,
+			float64(fx)+0.5, float64(fy)+0.5, float64(fz)+0.5, 1, 1)
+		if held.ItemID == "minecraft:fire_charge" && p.GameMode != player.GameModeCreative {
+			slot := player.HotbarStart + p.HeldSlot
+			p.Inventory[slot].Count--
+			normalizeStack(&p.Inventory[slot])
+		}
 		return true
 	}
 
@@ -751,7 +825,11 @@ func handleBedInteract(p *player.Player, bx, by, bz int, w *coreworld.World, con
 	// The server tick goroutine (tickSleep) will handle the actual time skip
 	// after a short delay so the client has time to play the animation.
 	p.Sleeping = true
-	BroadcastPlayerSleeping(p.EntityID, mgr)
+	BroadcastPlayerSleeping(p.EntityID, spatial.BlockPos{
+		X: int32(bx),
+		Y: int32(by),
+		Z: int32(bz),
+	}, mgr)
 
 	// Show waiting count in the action bar.
 	sessions := mgr.SnapshotAll()
@@ -800,6 +878,47 @@ func isHoe(item string) bool {
 	default:
 		return false
 	}
+}
+
+func isAxe(item string) bool {
+	return strings.HasSuffix(item, "_axe") && !strings.HasSuffix(item, "pickaxe")
+}
+
+func isShovel(item string) bool {
+	return strings.HasSuffix(item, "_shovel")
+}
+
+func isBlockUseTool(item string) bool {
+	return isHoe(item) || isAxe(item) || isShovel(item) || item == "minecraft:flint_and_steel"
+}
+
+func axeTransformation(block coreworld.Block) (coreworld.Block, string, bool) {
+	name := block.Name
+	if strings.HasPrefix(name, "waxed_") {
+		replacement := copyBlockProperties(block)
+		replacement.Name = strings.TrimPrefix(name, "waxed_")
+		return replacement, "minecraft:item.axe.wax_off", true
+	}
+	for _, stage := range []struct{ from, to string }{
+		{"oxidized_", "weathered_"},
+		{"weathered_", "exposed_"},
+		{"exposed_", ""},
+	} {
+		if strings.HasPrefix(name, stage.from) {
+			replacement := copyBlockProperties(block)
+			replacement.Name = stage.to + strings.TrimPrefix(name, stage.from)
+			return replacement, "minecraft:item.axe.scrape", true
+		}
+	}
+	strippable := strings.HasSuffix(name, "_log") || strings.HasSuffix(name, "_wood") ||
+		strings.HasSuffix(name, "_stem") || strings.HasSuffix(name, "_hyphae") ||
+		name == "bamboo_block"
+	if strippable && !strings.HasPrefix(name, "stripped_") {
+		replacement := copyBlockProperties(block)
+		replacement.Name = "stripped_" + name
+		return replacement, "minecraft:item.axe.strip", true
+	}
+	return coreworld.Block{}, "", false
 }
 
 // toggleDoor toggles both halves of a non-iron door and broadcasts the two
@@ -958,24 +1077,24 @@ func containerTitle(blockName string) string {
 
 // boatItemToType maps boat item resource locations to entity types.
 var boatItemToType = map[string]corentity.EntityType{
-	"minecraft:oak_boat":           corentity.TypeOakBoat,
-	"minecraft:spruce_boat":        corentity.TypeSpruceBoat,
-	"minecraft:birch_boat":         corentity.TypeBirchBoat,
-	"minecraft:jungle_boat":        corentity.TypeJungleBoat,
-	"minecraft:acacia_boat":        corentity.TypeAcaciaBoat,
-	"minecraft:dark_oak_boat":      corentity.TypeDarkOakBoat,
-	"minecraft:mangrove_boat":      corentity.TypeMangroveBoat,
-	"minecraft:cherry_boat":        corentity.TypeCherryBoat,
-	"minecraft:bamboo_raft":        corentity.TypeBambooRaft,
-	"minecraft:oak_chest_boat":     corentity.TypeOakChestBoat,
-	"minecraft:spruce_chest_boat":  corentity.TypeSpruceChestBoat,
-	"minecraft:birch_chest_boat":   corentity.TypeBirchChestBoat,
-	"minecraft:jungle_chest_boat":  corentity.TypeJungleChestBoat,
-	"minecraft:acacia_chest_boat":  corentity.TypeAcaciaChestBoat,
+	"minecraft:oak_boat":            corentity.TypeOakBoat,
+	"minecraft:spruce_boat":         corentity.TypeSpruceBoat,
+	"minecraft:birch_boat":          corentity.TypeBirchBoat,
+	"minecraft:jungle_boat":         corentity.TypeJungleBoat,
+	"minecraft:acacia_boat":         corentity.TypeAcaciaBoat,
+	"minecraft:dark_oak_boat":       corentity.TypeDarkOakBoat,
+	"minecraft:mangrove_boat":       corentity.TypeMangroveBoat,
+	"minecraft:cherry_boat":         corentity.TypeCherryBoat,
+	"minecraft:bamboo_raft":         corentity.TypeBambooRaft,
+	"minecraft:oak_chest_boat":      corentity.TypeOakChestBoat,
+	"minecraft:spruce_chest_boat":   corentity.TypeSpruceChestBoat,
+	"minecraft:birch_chest_boat":    corentity.TypeBirchChestBoat,
+	"minecraft:jungle_chest_boat":   corentity.TypeJungleChestBoat,
+	"minecraft:acacia_chest_boat":   corentity.TypeAcaciaChestBoat,
 	"minecraft:dark_oak_chest_boat": corentity.TypeDarkOakChestBoat,
 	"minecraft:mangrove_chest_boat": corentity.TypeMangroveChestBoat,
-	"minecraft:cherry_chest_boat":  corentity.TypeCherryChestBoat,
-	"minecraft:bamboo_chest_raft":  corentity.TypeBambooChestRaft,
+	"minecraft:cherry_chest_boat":   corentity.TypeCherryChestBoat,
+	"minecraft:bamboo_chest_raft":   corentity.TypeBambooChestRaft,
 }
 
 // isBoatItem reports whether an item resource location is a placeable boat item.
@@ -1001,18 +1120,70 @@ func spawnBoatFromItem(itemID string, bx, by, bz, face int, w *coreworld.World, 
 	// If clicking on water, float on the water surface.
 	clickedBlock := w.GetBlock(bx, by, bz)
 	if coreworld.IsFluidBlock(clickedBlock.ResourceLocation()) {
-		spawnY = float64(by) + 0.5
+		spawnY = float64(by) + 1
 	} else if face == 1 { // top face
 		spawnY = float64(by + 1)
 	}
 
+	id := nextEntityID()
 	var uuid [16]byte
-	for i := range uuid {
-		uuid[i] = byte(nextEntityID() & 0xff) // cheap non-crypto UUID — good enough for entity IDs
+	if _, err := cryptorand.Read(uuid[:]); err != nil {
+		for index := range uuid {
+			uuid[index] = byte(uint32(id) >> (uint(index%4) * 8))
+		}
 	}
+	uuid[6] = (uuid[6] & 0x0f) | 0x40
+	uuid[8] = (uuid[8] & 0x3f) | 0x80
 
-	boat := corentity.New(nextEntityID(), uuid, eType, spawnX, spawnY, spawnZ)
+	boat := corentity.New(id, uuid, eType, spawnX, spawnY, spawnZ)
 	w.Entities.Add(boat)
 	return boat
 }
 
+// spawnBoatFromLook handles BoatItem's vanilla Use Item behaviour. Boat items
+// raycast fluids and blocks themselves, so clients do not normally send Use
+// Item On when placing one on water.
+func spawnBoatFromLook(p *player.Player, w *coreworld.World, nextEntityID func() int32) *corentity.Entity {
+	if p == nil || w == nil || nextEntityID == nil || !isBoatItem(p.HeldItem().ItemID) {
+		return nil
+	}
+	yaw := float64(p.Rotation.Yaw) * math.Pi / 180
+	pitch := float64(p.Rotation.Pitch) * math.Pi / 180
+	directionX := -math.Sin(yaw) * math.Cos(pitch)
+	directionY := -math.Sin(pitch)
+	directionZ := math.Cos(yaw) * math.Cos(pitch)
+	eyeX, eyeY, eyeZ := p.Position.X, p.Position.Y+1.62, p.Position.Z
+	lastBlock := [3]int{math.MinInt, math.MinInt, math.MinInt}
+	for distance := 0.2; distance <= 5; distance += 0.1 {
+		bx := int(math.Floor(eyeX + directionX*distance))
+		by := int(math.Floor(eyeY + directionY*distance))
+		bz := int(math.Floor(eyeZ + directionZ*distance))
+		if lastBlock == [3]int{bx, by, bz} {
+			continue
+		}
+		lastBlock = [3]int{bx, by, bz}
+		block := w.GetBlock(bx, by, bz)
+		name := block.ResourceLocation()
+		if block.IsAir() || (placementReplaceable(name) && !coreworld.IsFluidBlock(name)) {
+			continue
+		}
+		boat := spawnBoatFromItem(p.HeldItem().ItemID, bx, by, bz, 1, w, nextEntityID)
+		if boat != nil {
+			boat.Yaw = p.Rotation.Yaw
+		}
+		return boat
+	}
+	return nil
+}
+
+func consumePlacedBoat(p *player.Player, conn *network.ClientConn) {
+	if p == nil || p.GameMode != player.GameModeSurvival {
+		return
+	}
+	slot := player.HotbarStart + p.HeldSlot
+	p.Inventory[slot].Count--
+	normalizeStack(&p.Inventory[slot])
+	if conn != nil {
+		_ = SyncPlayerInventory(conn, p)
+	}
+}

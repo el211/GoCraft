@@ -185,7 +185,7 @@ func TestGroundSubChunkWordBoundaryAtY0End(t *testing.T) {
 func TestLevelChunkPayloadLength(t *testing.T) {
 	payload := EncodeLevelChunkPayload()
 	// 24 sub-chunks × 9 bytes each + 1 byte border block varint = 217
-	const want = overworldSubChunkCount*9 + 1
+	const want = overworldSubChunkCount*2 + 1
 	if len(payload) != want {
 		t.Errorf("LevelChunk payload length: got %d, want %d", len(payload), want)
 	}
@@ -195,21 +195,9 @@ func TestLevelChunkPayloadBiomeHeader(t *testing.T) {
 	payload := EncodeLevelChunkPayload()
 	// Each biome storage entry starts with 0x00 (bitsPerBlock=0, runtime).
 	for i := range overworldSubChunkCount {
-		off := i * 9
-		if payload[off] != 0x00 {
-			t.Errorf("sub-chunk[%d] biome header: got 0x%02x, want 0x00", i, payload[off])
-		}
-	}
-}
-
-func TestLevelChunkPayloadBiomePaletteCount(t *testing.T) {
-	payload := EncodeLevelChunkPayload()
-	// Each entry: header(1) + paletteCount(4) + biomeID(4) = 9 bytes.
-	for i := range overworldSubChunkCount {
-		off := i * 9
-		count := binary.LittleEndian.Uint32(payload[off+1 : off+5])
-		if count != 1 {
-			t.Errorf("sub-chunk[%d] palette count: got %d, want 1", i, count)
+		off := i * 2
+		if payload[off] != 0x01 {
+			t.Errorf("sub-chunk[%d] biome header: got 0x%02x, want 0x01", i, payload[off])
 		}
 	}
 }
@@ -217,10 +205,9 @@ func TestLevelChunkPayloadBiomePaletteCount(t *testing.T) {
 func TestLevelChunkPayloadBiomeIDs(t *testing.T) {
 	payload := EncodeLevelChunkPayload()
 	for i := range overworldSubChunkCount {
-		off := i * 9
-		id := binary.LittleEndian.Uint32(payload[off+5 : off+9])
-		if id != biomePlains {
-			t.Errorf("sub-chunk[%d] biome ID: got %d, want %d (plains)", i, id, biomePlains)
+		off := i * 2
+		if payload[off+1] != byte(biomePlains<<1) {
+			t.Errorf("sub-chunk[%d] biome ID byte: got %d, want %d (plains)", i, payload[off+1], biomePlains<<1)
 		}
 	}
 }
@@ -235,9 +222,9 @@ func TestLevelChunkPayloadBorderBlocksZero(t *testing.T) {
 
 func TestLevelChunkPayloadAllSubChunksIdentical(t *testing.T) {
 	payload := EncodeLevelChunkPayload()
-	first := payload[0:9]
+	first := payload[0:2]
 	for i := 1; i < overworldSubChunkCount; i++ {
-		chunk := payload[i*9 : i*9+9]
+		chunk := payload[i*2 : i*2+2]
 		if !bytes.Equal(first, chunk) {
 			t.Errorf("sub-chunk[%d] differs from sub-chunk[0]", i)
 		}

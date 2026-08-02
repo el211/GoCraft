@@ -21,13 +21,88 @@ type Session struct {
 // Manager is a concurrent-safe registry of active Java play sessions.
 // All methods are safe for concurrent use across multiple goroutines.
 type Manager struct {
-	mu       sync.RWMutex
-	sessions map[[16]byte]*Session
+	mu                    sync.RWMutex
+	sessions              map[[16]byte]*Session
+	external              map[[16]byte]*player.Player
+	messageObserver       func(string)
+	externalKnockbackFunc func(*player.Player, float64, float64, float64, float64)
 }
 
 // NewManager returns an empty, ready-to-use Manager.
 func NewManager() *Manager {
-	return &Manager{sessions: make(map[[16]byte]*Session)}
+	return &Manager{
+		sessions: make(map[[16]byte]*Session),
+		external: make(map[[16]byte]*player.Player),
+	}
+}
+
+// ReplaceExternalPlayers publishes the canonical players owned by other
+// edition adapters. They are discoverable for entity interaction/combat but
+// are deliberately excluded from Java packet broadcasts because they have no
+// Java connection.
+func (m *Manager) ReplaceExternalPlayers(players []*player.Player) {
+	external := make(map[[16]byte]*player.Player, len(players))
+	for _, p := range players {
+		if p != nil {
+			external[p.UUID] = p
+		}
+	}
+	m.mu.Lock()
+	m.external = external
+	m.mu.Unlock()
+}
+
+// PlayerSessionByEntityID resolves both native Java sessions and canonical
+// cross-edition players. External players are returned in a lightweight
+// Session with Conn == nil, which the health code already supports.
+func (m *Manager) PlayerSessionByEntityID(entityID int32) *Session {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, candidate := range m.sessions {
+		if candidate.Player != nil && candidate.Player.EntityID == entityID {
+			return candidate
+		}
+	}
+	for _, p := range m.external {
+		if p.EntityID == entityID {
+			return &Session{Player: p}
+		}
+	}
+	return nil
+}
+
+// SetMessageObserver installs the bridge used to mirror Java-origin system and
+// chat messages into other edition adapters.
+func (m *Manager) SetMessageObserver(observer func(string)) {
+	m.mu.Lock()
+	m.messageObserver = observer
+	m.mu.Unlock()
+}
+
+func (m *Manager) ObserveMessage(message string) {
+	m.mu.RLock()
+	observer := m.messageObserver
+	m.mu.RUnlock()
+	if observer != nil {
+		observer(message)
+	}
+}
+
+// SetExternalKnockbackHandler bridges Java attacks against players whose
+// network connection belongs to another adapter.
+func (m *Manager) SetExternalKnockbackHandler(fn func(*player.Player, float64, float64, float64, float64)) {
+	m.mu.Lock()
+	m.externalKnockbackFunc = fn
+	m.mu.Unlock()
+}
+
+func (m *Manager) KnockbackExternal(p *player.Player, sourceX, sourceZ, horizontal, vertical float64) {
+	m.mu.RLock()
+	fn := m.externalKnockbackFunc
+	m.mu.RUnlock()
+	if fn != nil {
+		fn(p, sourceX, sourceZ, horizontal, vertical)
+	}
 }
 
 // Add registers s in the manager. Replaces any existing session for the same UUID.

@@ -2,7 +2,10 @@ package handler
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"strings"
 
 	"GoCraft/core/player"
 	"GoCraft/core/spatial"
@@ -160,12 +163,13 @@ func addStackToInventory(inventory *[player.InventorySize]player.ItemStack, item
 		return true
 	}
 	remaining := item.Count
+	stackLimit := player.MaxStackSize(item.ItemID)
 	for _, bounds := range [][2]int{{player.HotbarStart, player.HotbarStart + 9}, {9, player.HotbarStart}, {45, 46}} {
 		for i := bounds[0]; i < bounds[1] && remaining > 0; i++ {
-			if inventory[i].ItemID != item.ItemID || inventory[i].Count >= 64 {
+			if inventory[i].ItemID != item.ItemID || inventory[i].Damage != item.Damage || inventory[i].Count >= stackLimit {
 				continue
 			}
-			add := minInt(64-inventory[i].Count, remaining)
+			add := minInt(stackLimit-inventory[i].Count, remaining)
 			inventory[i].Count += add
 			remaining -= add
 		}
@@ -175,8 +179,9 @@ func addStackToInventory(inventory *[player.InventorySize]player.ItemStack, item
 			if !inventory[i].IsEmpty() {
 				continue
 			}
-			add := minInt(64, remaining)
-			inventory[i] = player.ItemStack{ItemID: item.ItemID, Count: add}
+			add := minInt(stackLimit, remaining)
+			inventory[i] = item
+			inventory[i].Count = add
 			remaining -= add
 		}
 	}
@@ -231,6 +236,23 @@ func handleContainerClick(pkt *protocol.Packet, p *player.Player, conn *network.
 	}
 	if r.Len() != 0 {
 		return fmt.Errorf("container click: %d trailing bytes", r.Len())
+	}
+
+	if windowID == 0 {
+		before := p.ArmorPoints()
+		if mode == 1 {
+			shiftPlayerInventorySlot(p, int(slot))
+		} else if mode == 0 {
+			clickPlayerInventorySlot(p, int(slot), button)
+		}
+		p.ContainerStateID++
+		if err := sendSetContainerContent(conn, p, p.ContainerStateID); err != nil {
+			return err
+		}
+		if p.ArmorPoints() != before {
+			return sendArmorAttributes(conn, p)
+		}
+		return nil
 	}
 
 	if windowID == chestContainerID && p.OpenContainerID == windowID && p.OpenContainerKind == "minecraft:chest" {
@@ -299,12 +321,64 @@ func readPlainSlot(r *bytes.Reader) (player.ItemStack, error) {
 	if err != nil {
 		return player.ItemStack{}, err
 	}
-	if added != 0 {
-		return player.ItemStack{}, fmt.Errorf("component-bearing client slots are not supported")
-	}
 	removed, err := protocol.ReadVarInt(r)
 	if err != nil {
 		return player.ItemStack{}, err
+	}
+	damage := int32(0)
+	for i := int32(0); i < added; i++ {
+		componentType, err := protocol.ReadVarInt(r)
+		if err != nil {
+			return player.ItemStack{}, err
+		}
+		switch componentType {
+		case 2: // max_damage
+			if _, err := protocol.ReadVarInt(r); err != nil {
+				return player.ItemStack{}, err
+			}
+		case 3: // damage
+			damage, err = protocol.ReadVarInt(r)
+			if err != nil {
+				return player.ItemStack{}, err
+			}
+		case 8: // lore: VarInt count followed by optional anonymous NBT
+			lines, err := protocol.ReadVarInt(r)
+			if err != nil || lines < 0 || lines > 256 {
+				return player.ItemStack{}, fmt.Errorf("invalid lore line count %d: %w", lines, err)
+			}
+			for line := int32(0); line < lines; line++ {
+				if err := skipNetworkNBT(r); err != nil {
+					return player.ItemStack{}, fmt.Errorf("reading lore: %w", err)
+				}
+			}
+		case 13: // attribute modifiers, including the final showTooltip flag
+			attributes, readErr := protocol.ReadVarInt(r)
+			if readErr != nil || attributes < 0 || attributes > 256 {
+				return player.ItemStack{}, fmt.Errorf("invalid attribute modifier count %d: %w", attributes, readErr)
+			}
+			for attribute := int32(0); attribute < attributes; attribute++ {
+				if _, readErr = protocol.ReadVarInt(r); readErr != nil {
+					return player.ItemStack{}, readErr
+				}
+				if _, readErr = protocol.ReadString(r); readErr != nil {
+					return player.ItemStack{}, readErr
+				}
+				if _, readErr = protocol.ReadDouble(r); readErr != nil {
+					return player.ItemStack{}, readErr
+				}
+				if _, readErr = protocol.ReadVarInt(r); readErr != nil {
+					return player.ItemStack{}, readErr
+				}
+				if _, readErr = protocol.ReadVarInt(r); readErr != nil {
+					return player.ItemStack{}, readErr
+				}
+			}
+			if _, readErr = protocol.ReadBool(r); readErr != nil {
+				return player.ItemStack{}, readErr
+			}
+		default:
+			return player.ItemStack{}, fmt.Errorf("unsupported item component %d", componentType)
+		}
 	}
 	for i := int32(0); i < removed; i++ {
 		if _, err := protocol.ReadVarInt(r); err != nil {
@@ -315,7 +389,241 @@ func readPlainSlot(r *bytes.Reader) (player.ItemStack, error) {
 	if name == "" {
 		return player.ItemStack{}, fmt.Errorf("unknown item ID %d", itemID)
 	}
-	return player.ItemStack{ItemID: name, Count: int(count)}, nil
+	if damage < 0 {
+		damage = 0
+	}
+	return player.ItemStack{ItemID: name, Count: int(count), Damage: int(damage)}, nil
+}
+
+func skipNetworkNBT(r *bytes.Reader) error {
+	tagType, err := r.ReadByte()
+	if err != nil {
+		return err
+	}
+	if tagType == 0 {
+		return nil
+	}
+	return skipNBTPayload(r, tagType)
+}
+
+func skipNBTPayload(r *bytes.Reader, tagType byte) error {
+	switch tagType {
+	case 0:
+		return nil
+	case 1:
+		return skipReaderBytes(r, 1)
+	case 2:
+		return skipReaderBytes(r, 2)
+	case 3, 5:
+		return skipReaderBytes(r, 4)
+	case 4, 6:
+		return skipReaderBytes(r, 8)
+	case 7:
+		n, err := readNBTLength(r)
+		if err != nil {
+			return err
+		}
+		return skipReaderBytes(r, n)
+	case 8:
+		return skipNBTString(r)
+	case 9:
+		elementType, err := r.ReadByte()
+		if err != nil {
+			return err
+		}
+		n, err := readNBTLength(r)
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			if err := skipNBTPayload(r, elementType); err != nil {
+				return err
+			}
+		}
+		return nil
+	case 10:
+		for {
+			childType, err := r.ReadByte()
+			if err != nil {
+				return err
+			}
+			if childType == 0 {
+				return nil
+			}
+			if err := skipNBTString(r); err != nil {
+				return err
+			}
+			if err := skipNBTPayload(r, childType); err != nil {
+				return err
+			}
+		}
+	case 11:
+		n, err := readNBTLength(r)
+		if err != nil {
+			return err
+		}
+		return skipReaderBytes(r, n*4)
+	case 12:
+		n, err := readNBTLength(r)
+		if err != nil {
+			return err
+		}
+		return skipReaderBytes(r, n*8)
+	default:
+		return fmt.Errorf("invalid NBT tag type %d", tagType)
+	}
+}
+
+func readNBTLength(r *bytes.Reader) (int, error) {
+	var raw [4]byte
+	if _, err := io.ReadFull(r, raw[:]); err != nil {
+		return 0, err
+	}
+	n := int(int32(binary.BigEndian.Uint32(raw[:])))
+	if n < 0 || n > r.Len() {
+		return 0, fmt.Errorf("invalid NBT length %d", n)
+	}
+	return n, nil
+}
+
+func skipNBTString(r *bytes.Reader) error {
+	var raw [2]byte
+	if _, err := io.ReadFull(r, raw[:]); err != nil {
+		return err
+	}
+	return skipReaderBytes(r, int(binary.BigEndian.Uint16(raw[:])))
+}
+
+func skipReaderBytes(r *bytes.Reader, n int) error {
+	if n < 0 || n > r.Len() {
+		return io.ErrUnexpectedEOF
+	}
+	_, err := r.Seek(int64(n), io.SeekCurrent)
+	return err
+}
+
+func clickPlayerInventorySlot(p *player.Player, slot int, button byte) {
+	if slot == -999 {
+		if button == 0 {
+			p.CarriedItem = player.ItemStack{}
+		} else if !p.CarriedItem.IsEmpty() {
+			p.CarriedItem.Count--
+			normalizeStack(&p.CarriedItem)
+		}
+		return
+	}
+	if slot < 5 || slot >= player.InventorySize {
+		return
+	}
+	target := &p.Inventory[slot]
+	if button == 0 {
+		switch {
+		case p.CarriedItem.IsEmpty():
+			p.CarriedItem, *target = *target, player.ItemStack{}
+		case !canPlaceInPlayerSlot(slot, p.CarriedItem):
+			return
+		case target.IsEmpty():
+			*target, p.CarriedItem = p.CarriedItem, player.ItemStack{}
+		case target.ItemID == p.CarriedItem.ItemID && target.Damage == p.CarriedItem.Damage:
+			limit := player.MaxStackSize(target.ItemID)
+			add := minInt(limit-target.Count, p.CarriedItem.Count)
+			if add > 0 {
+				target.Count += add
+				p.CarriedItem.Count -= add
+				normalizeStack(&p.CarriedItem)
+			}
+		default:
+			p.CarriedItem, *target = *target, p.CarriedItem
+		}
+		return
+	}
+	if button != 1 {
+		return
+	}
+	if p.CarriedItem.IsEmpty() {
+		if target.IsEmpty() {
+			return
+		}
+		take := (target.Count + 1) / 2
+		p.CarriedItem = *target
+		p.CarriedItem.Count = take
+		target.Count -= take
+		normalizeStack(target)
+		return
+	}
+	if !canPlaceInPlayerSlot(slot, p.CarriedItem) {
+		return
+	}
+	if target.IsEmpty() {
+		*target = p.CarriedItem
+		target.Count = 1
+		p.CarriedItem.Count--
+		normalizeStack(&p.CarriedItem)
+		return
+	}
+	if target.ItemID == p.CarriedItem.ItemID && target.Damage == p.CarriedItem.Damage &&
+		target.Count < player.MaxStackSize(target.ItemID) {
+		target.Count++
+		p.CarriedItem.Count--
+		normalizeStack(&p.CarriedItem)
+	}
+}
+
+func shiftPlayerInventorySlot(p *player.Player, slot int) {
+	if slot < 5 || slot >= player.InventorySize || p.Inventory[slot].IsEmpty() {
+		return
+	}
+	item := p.Inventory[slot]
+	if slot >= 9 {
+		if armorSlot := armorInventorySlot(item.ItemID); armorSlot >= 5 && p.Inventory[armorSlot].IsEmpty() {
+			p.Inventory[armorSlot] = item
+			p.Inventory[slot] = player.ItemStack{}
+			return
+		}
+	}
+	if slot >= 5 && slot <= 8 {
+		inventory := p.Inventory
+		inventory[slot] = player.ItemStack{}
+		if addStackToInventory(&inventory, item) {
+			p.Inventory = inventory
+		}
+		return
+	}
+	// Vanilla shift-click alternates between main inventory and hotbar.
+	start, end := player.HotbarStart, player.HotbarStart+9
+	if slot >= player.HotbarStart && slot < player.HotbarStart+9 {
+		start, end = 9, player.HotbarStart
+	}
+	for i := start; i < end; i++ {
+		if p.Inventory[i].IsEmpty() {
+			p.Inventory[i] = item
+			p.Inventory[slot] = player.ItemStack{}
+			return
+		}
+	}
+}
+
+func canPlaceInPlayerSlot(slot int, item player.ItemStack) bool {
+	if slot < 5 || slot > 8 {
+		return true
+	}
+	return armorInventorySlot(item.ItemID) == slot
+}
+
+func armorInventorySlot(itemID string) int {
+	switch {
+	case itemID == "minecraft:turtle_helmet", itemID == "minecraft:carved_pumpkin",
+		itemID == "minecraft:player_head", strings.HasSuffix(itemID, "_helmet"):
+		return 5
+	case itemID == "minecraft:elytra", strings.HasSuffix(itemID, "_chestplate"):
+		return 6
+	case strings.HasSuffix(itemID, "_leggings"):
+		return 7
+	case strings.HasSuffix(itemID, "_boots"):
+		return 8
+	default:
+		return -1
+	}
 }
 
 func clickCraftingSlot(p *player.Player, containerSlot int, button byte) {

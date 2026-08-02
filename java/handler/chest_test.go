@@ -30,7 +30,7 @@ func TestSurvivalPlacesChestIntoReplaceableGrass(t *testing.T) {
 		Bool(false).
 		VarInt(500).
 		Build()
-	if err := handleUseItemOn(pkt, p, w, mgr, nil); err != nil {
+	if err := handleUseItemOn(pkt, p, w, mgr, nil, nil); err != nil {
 		t.Fatalf("handleUseItemOn: %v", err)
 	}
 	if got := w.GetBlock(4, 64, 4).ResourceLocation(); got != "minecraft:chest" {

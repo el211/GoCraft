@@ -58,7 +58,7 @@ func TestUseItemOnProtocol769LayoutPlacesExactBlock(t *testing.T) {
 		Bool(false).
 		VarInt(300).
 		Build()
-	if err := handleUseItemOn(pkt, p, w, mgr, nil); err != nil {
+	if err := handleUseItemOn(pkt, p, w, mgr, nil, nil); err != nil {
 		t.Fatalf("handleUseItemOn: %v", err)
 	}
 	got := w.GetBlock(0, 64, 0)
@@ -82,7 +82,7 @@ func TestUseItemOnRequiresSequenceAfterWorldBorderHit(t *testing.T) {
 		Bool(false).
 		Bool(false).
 		Build()
-	err := handleUseItemOn(pkt, p, w, mgr, nil)
+	err := handleUseItemOn(pkt, p, w, mgr, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "sequence") {
 		t.Fatalf("handleUseItemOn error = %v, want missing sequence error after world_border_hit", err)
 	}
@@ -141,7 +141,7 @@ func TestUseItemOnTogglesBothDoorHalves(t *testing.T) {
 		Bool(false).
 		VarInt(302).
 		Build()
-	if err := handleUseItemOn(pkt, p, w, mgr, nil); err != nil {
+	if err := handleUseItemOn(pkt, p, w, mgr, nil, nil); err != nil {
 		t.Fatalf("handleUseItemOn: %v", err)
 	}
 	for y := 64; y <= 65; y++ {
@@ -219,6 +219,33 @@ func TestBreakingLowerDoublePlantRemovesUpperHalfAndDropsFlower(t *testing.T) {
 	}
 }
 
+func TestBreakingUpperDoublePlantRemovesLowerHalf(t *testing.T) {
+	p := player.New([16]byte{}, "gardener", player.ClientEditionJava)
+	p.GameMode = player.GameModeSurvival
+	w := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
+	defer w.Close()
+	mgr := session.NewManager()
+	lower := coreworld.Block{Namespace: "minecraft", Name: "lilac", Properties: map[string]string{"half": "lower"}}
+	upper := coreworld.Block{Namespace: "minecraft", Name: "lilac", Properties: map[string]string{"half": "upper"}}
+	w.SetBlock(5, 64, 0, lower)
+	w.SetBlock(5, 65, 0, upper)
+
+	start := protocol.NewBuilder(packetIDPlayerAction).
+		VarInt(actionStatusStartDigging).
+		Long(packBlockPos(5, 65, 0)).
+		Byte(1).
+		VarInt(306).
+		Build()
+	if err := handlePlayerAction(start, p, w, mgr); err != nil {
+		t.Fatal(err)
+	}
+	for y := 64; y <= 65; y++ {
+		if got := w.GetBlock(5, y, 0); !got.IsAir() {
+			t.Fatalf("plant half y=%d = %q, want air", y, got.ResourceLocation())
+		}
+	}
+}
+
 func TestSurvivalGrassBreaksOnStartDigging(t *testing.T) {
 	p := player.New([16]byte{}, "gardener", player.ClientEditionJava)
 	p.GameMode = player.GameModeSurvival
@@ -256,7 +283,7 @@ func TestHoeTillsAndSeedsPlant(t *testing.T) {
 	till := protocol.NewBuilder(packetIDUseItemOn).
 		VarInt(0).Long(packBlockPos(8, 64, 0)).VarInt(1).
 		Float(0.5).Float(1).Float(0.5).Bool(false).Bool(false).VarInt(400).Build()
-	if err := handleUseItemOn(till, p, w, mgr, nil); err != nil {
+	if err := handleUseItemOn(till, p, w, mgr, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	farmland := w.GetBlock(8, 64, 0)
@@ -268,7 +295,7 @@ func TestHoeTillsAndSeedsPlant(t *testing.T) {
 	plant := protocol.NewBuilder(packetIDUseItemOn).
 		VarInt(0).Long(packBlockPos(8, 64, 0)).VarInt(1).
 		Float(0.5).Float(1).Float(0.5).Bool(false).Bool(false).VarInt(401).Build()
-	if err := handleUseItemOn(plant, p, w, mgr, nil); err != nil {
+	if err := handleUseItemOn(plant, p, w, mgr, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	crop := w.GetBlock(8, 65, 0)
