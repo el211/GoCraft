@@ -46,6 +46,11 @@ type CommandContext struct {
 	// over Manager, which contains Java network sessions only.
 	FindPlayer func(name string) *player.Player
 
+	// ListPlayers returns all online players from the edition-neutral game
+	// registry. MaxPlayers is the configured server capacity.
+	ListPlayers func() []*player.Player
+	MaxPlayers  int
+
 	// Reply sends command feedback to the issuing edition. SyncAbilities asks
 	// that edition adapter to publish changed flight/permission state.
 	Reply         func(text string) error
@@ -69,6 +74,8 @@ type Dispatcher struct {
 	cmds         map[string]registeredCommand
 	nextEntityID func() int32
 	findPlayer   func(string) *player.Player
+	listPlayers  func() []*player.Player
+	maxPlayers   int
 }
 
 // NewDispatcher returns an empty, ready-to-use Dispatcher.
@@ -121,6 +128,20 @@ func (d *Dispatcher) SetPlayerFinder(find func(string) *player.Player) {
 	d.mu.Unlock()
 }
 
+// SetPlayerLister installs the edition-neutral player snapshot used by /list.
+func (d *Dispatcher) SetPlayerLister(list func() []*player.Player) {
+	d.mu.Lock()
+	d.listPlayers = list
+	d.mu.Unlock()
+}
+
+// SetMaxPlayers publishes the configured player capacity to commands.
+func (d *Dispatcher) SetMaxPlayers(maxPlayers int) {
+	d.mu.Lock()
+	d.maxPlayers = maxPlayers
+	d.mu.Unlock()
+}
+
 // Dispatch parses input (with or without a leading '/'), resolves the command
 // name, fills ctx.Args with the remaining tokens, and calls the registered
 // handler.
@@ -142,9 +163,13 @@ func (d *Dispatcher) Dispatch(input string, ctx CommandContext) {
 	command, ok := d.cmds[name]
 	allocateEntityID := d.nextEntityID
 	findPlayer := d.findPlayer
+	listPlayers := d.listPlayers
+	maxPlayers := d.maxPlayers
 	d.mu.RUnlock()
 	ctx.NextEntityID = allocateEntityID
 	ctx.FindPlayer = findPlayer
+	ctx.ListPlayers = listPlayers
+	ctx.MaxPlayers = maxPlayers
 
 	if !ok {
 		if ctx.Reply != nil {

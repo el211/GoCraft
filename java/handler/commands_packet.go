@@ -150,6 +150,11 @@ func buildCommandsPacket() *protocol.Packet {
 		),
 	)
 
+	rootChildren = append(rootChildren,
+		addLiteral(`timings`, true),
+		addLiteral(`tps`, true),
+	)
+
 	nodes[0].children = rootChildren
 
 	b := protocol.NewBuilder(packetIDCommands).VarInt(int32(len(nodes)))

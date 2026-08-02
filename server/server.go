@@ -15,7 +15,7 @@
 package server
 
 import (
-	`bufio`
+	"bufio"
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
@@ -29,6 +29,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -217,6 +218,14 @@ func New(cfg *config.Config) (*Server, error) {
 		})
 		return found
 	})
+	cmds.SetPlayerLister(func() []*player.Player {
+		players := make([]*player.Player, 0, gameCore.OnlineCount())
+		gameCore.OnlinePlayers(func(online *player.Player) {
+			players = append(players, online)
+		})
+		return players
+	})
+	cmds.SetMaxPlayers(cfg.MaxPlayers)
 	handler.RegisterBuiltins(cmds)
 
 	bus := intent.NewBus(64, 512)
@@ -225,7 +234,9 @@ func New(cfg *config.Config) (*Server, error) {
 	worldInstance := coreworld.New(coreworld.NewOverworldGenerator(cfg.WorldSeed), storage, cfg.Villagers)
 	worldInstance.SetMaxCachedChunks(cfg.MaxCachedChunks)
 
-	timings := newTickTimings()
+	timings := newTickTimings(func() (int, int) {
+		return gameCore.OnlineCount(), cfg.MaxPlayers
+	})
 
 	s := &Server{
 		cfg:            cfg,
@@ -249,7 +260,11 @@ func New(cfg *config.Config) (*Server, error) {
 
 	// Register server-state commands as closures after s is initialised.
 	cmds.Register("timings", func(ctx handler.CommandContext) error {
-		return handler.SendSystemMessage(ctx.Conn, timings.Report())
+		report := timings.Report()
+		if ctx.Reply != nil {
+			return ctx.Reply(report)
+		}
+		return handler.SendSystemMessage(ctx.Conn, report)
 	})
 	cmds.Register("tps", func(ctx handler.CommandContext) error {
 		tps, avgMs := timings.TPS()
@@ -260,8 +275,11 @@ func New(cfg *config.Config) (*Server, error) {
 		case tps < 18:
 			color = "§e"
 		}
-		return handler.SendSystemMessage(ctx.Conn,
-			fmt.Sprintf("TPS: %s%.1f§r  Avg tick: §f%.2fms", color, tps, avgMs))
+		message := fmt.Sprintf("TPS: %s%.1f§r  Avg tick: §f%.2fms", color, tps, avgMs)
+		if ctx.Reply != nil {
+			return ctx.Reply(message)
+		}
+		return handler.SendSystemMessage(ctx.Conn, message)
 	})
 	cmds.Register("time", func(ctx handler.CommandContext) error {
 		if len(ctx.Args) == 0 {
@@ -420,7 +438,12 @@ func (s *Server) runConsole(ctx context.Context) {
 			continue
 		}
 		result := s.executeConsoleCommand(line)
-		slog.Info(`console command`, `command`, line, `result`, result)
+		if strings.ContainsRune(result, '\n') {
+			slog.Info(`console command`, `command`, line, `result`, `multi-line output follows`)
+			fmt.Fprintln(os.Stdout, result)
+		} else {
+			slog.Info(`console command`, `command`, line, `result`, result)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -438,6 +461,43 @@ func (s *Server) executeConsoleCommand(input string) string {
 		return `No command entered`
 	}
 	switch strings.ToLower(fields[0]) {
+	case `list`:
+		names := make([]string, 0)
+		if s.game != nil {
+			names = make([]string, 0, s.game.OnlineCount())
+			s.game.OnlinePlayers(func(online *player.Player) {
+				if online != nil {
+					names = append(names, online.Username)
+				}
+			})
+		}
+		sort.Slice(names, func(i, j int) bool {
+			return strings.ToLower(names[i]) < strings.ToLower(names[j])
+		})
+		maximum := 0
+		if s.cfg != nil {
+			maximum = s.cfg.MaxPlayers
+		}
+		capacity := fmt.Sprintf(`%d`, len(names))
+		if maximum > 0 {
+			capacity = fmt.Sprintf(`%d/%d`, len(names), maximum)
+		}
+		joined := strings.Join(names, `, `)
+		if joined == `` {
+			joined = `no players`
+		}
+		return fmt.Sprintf(`Online (%s): %s`, capacity, joined)
+	case `timings`:
+		if s.timings == nil {
+			return `Timing collector is unavailable`
+		}
+		return stripMinecraftFormatting(s.timings.Report())
+	case `tps`:
+		if s.timings == nil {
+			return `Timing collector is unavailable`
+		}
+		tps, avgMs := s.timings.TPS()
+		return fmt.Sprintf(`TPS: %.1f  Avg tick: %.2fms`, tps, avgMs)
 	case `op`:
 		if len(fields) != 2 {
 			return `Usage: op <player>`

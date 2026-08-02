@@ -2,6 +2,8 @@ package server
 
 import (
 	"fmt"
+	"runtime"
+	"runtime/metrics"
 	"strings"
 	"sync"
 	"time"
@@ -50,9 +52,26 @@ type tickTimings struct {
 	// cur accumulates per-section nanoseconds for the tick in progress.
 	// Written only by the tick goroutine; reset in commit.
 	cur [sectionCount]int64
+
+	// Runtime samples power the RAM/CPU/player summary shown by /timings.
+	lastCPUTotal float64
+	lastCPUIdle  float64
+	cpuReady     bool
+	playerCounts func() (online, maximum int)
 }
 
-func newTickTimings() *tickTimings { return &tickTimings{} }
+func newTickTimings(playerCounters ...func() (online, maximum int)) *tickTimings {
+	total, idle, ready := readRuntimeCPU()
+	t := &tickTimings{
+		lastCPUTotal: total,
+		lastCPUIdle:  idle,
+		cpuReady:     ready,
+	}
+	if len(playerCounters) > 0 {
+		t.playerCounts = playerCounters[0]
+	}
+	return t
+}
 
 // measure starts timing section s.  The caller must invoke the returned
 // function when the section ends; the elapsed time is added to cur[s].
@@ -117,10 +136,21 @@ func (t *tickTimings) Report() string {
 	window := t.window
 	sections := t.sections
 	peakNS := t.peakTickNS
+	playerCounts := t.playerCounts
 	t.mu.Unlock()
+	stats := t.runtimeSnapshot()
+	online, maximum := 0, 0
+	if playerCounts != nil {
+		online, maximum = playerCounts()
+	}
 
 	if fill == 0 {
-		return "§cNo timing data collected yet — wait a few seconds after startup."
+		return strings.Join([]string{
+			`§e━━━ GoCraft Timings ━━━`,
+			formatRuntimeStats(stats, online, maximum),
+			`§cNo timing data collected yet — wait a few seconds after startup.`,
+			`§e━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
+		}, string('\n'))
 	}
 
 	var totalNS, maxNS int64
@@ -161,8 +191,9 @@ func (t *tickTimings) Report() string {
 		sectionAvgMs[s] = float64(sum) / float64(fill) / 1e6
 	}
 
-	lines := make([]string, 0, 12)
+	lines := make([]string, 0, 14)
 	lines = append(lines, fmt.Sprintf("§e━━━ GoCraft Timings (last %ds, %d ticks) ━━━", secs, fill))
+	lines = append(lines, formatRuntimeStats(stats, online, maximum))
 	lines = append(lines, fmt.Sprintf(
 		"§7TPS: %s%.1f§r  §7Avg: §f%.2fms  §7Max(window): §f%.2fms  §7Peak(all-time): §f%.2fms",
 		tpsColor, tps, avgMs, maxMs, peakMs,
@@ -201,6 +232,92 @@ func (t *tickTimings) Report() string {
 
 	lines = append(lines, "§e━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	return strings.Join(lines, "\n")
+}
+
+type runtimeStats struct {
+	memoryBytes uint64
+	heapBytes   uint64
+	cpuPercent  float64
+	cpuReady    bool
+}
+
+// runtimeSnapshot reports Go runtime memory and CPU utilisation normalised to
+// the process GOMAXPROCS capacity. CPU is measured since the previous report.
+func (t *tickTimings) runtimeSnapshot() runtimeStats {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	total, idle, ready := readRuntimeCPU()
+
+	t.mu.Lock()
+	cpuPercent := 0.0
+	if ready && t.cpuReady {
+		totalDelta := total - t.lastCPUTotal
+		idleDelta := idle - t.lastCPUIdle
+		if totalDelta > 0 {
+			busyDelta := totalDelta - idleDelta
+			if busyDelta < 0 {
+				busyDelta = 0
+			}
+			cpuPercent = busyDelta / totalDelta * 100
+			if cpuPercent > 100 {
+				cpuPercent = 100
+			}
+		}
+	}
+	t.lastCPUTotal = total
+	t.lastCPUIdle = idle
+	t.cpuReady = ready
+	t.mu.Unlock()
+
+	return runtimeStats{
+		memoryBytes: memory.Sys,
+		heapBytes:   memory.HeapAlloc,
+		cpuPercent:  cpuPercent,
+		cpuReady:    ready,
+	}
+}
+
+func readRuntimeCPU() (total, idle float64, ready bool) {
+	samples := []metrics.Sample{
+		{Name: `/cpu/classes/total:cpu-seconds`},
+		{Name: `/cpu/classes/idle:cpu-seconds`},
+	}
+	metrics.Read(samples)
+	if samples[0].Value.Kind() != metrics.KindFloat64 || samples[1].Value.Kind() != metrics.KindFloat64 {
+		return 0, 0, false
+	}
+	return samples[0].Value.Float64(), samples[1].Value.Float64(), true
+}
+
+func formatRuntimeStats(stats runtimeStats, online, maximum int) string {
+	cpu := `n/a`
+	if stats.cpuReady {
+		cpu = fmt.Sprintf(`%.1f%%`, stats.cpuPercent)
+	}
+	players := fmt.Sprintf(`%d`, online)
+	if maximum > 0 {
+		players = fmt.Sprintf(`%d/%d`, online, maximum)
+	}
+	return fmt.Sprintf(
+		`§7RAM: §f%.1f MB §8(heap %.1f MB)  §7CPU: §f%s  §7Players: §f%s`,
+		float64(stats.memoryBytes)/(1024*1024),
+		float64(stats.heapBytes)/(1024*1024),
+		cpu,
+		players,
+	)
+}
+
+func stripMinecraftFormatting(text string) string {
+	runes := []rune(text)
+	plain := make([]rune, 0, len(runes))
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == '§' && i+1 < len(runes) {
+			i++
+			continue
+		}
+		plain = append(plain, runes[i])
+	}
+	return string(plain)
 }
 
 // progressBar returns a coloured ASCII bar.

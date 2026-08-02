@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -171,14 +172,45 @@ func cmdSpawnBoat(ctx CommandContext) error {
 // ── /list ─────────────────────────────────────────────────────────────────────
 
 func cmdList(ctx CommandContext) error {
+	if ctx.ListPlayers != nil {
+		players := ctx.ListPlayers()
+		names := make([]string, 0, len(players))
+		for _, online := range players {
+			if online != nil {
+				names = append(names, online.Username)
+			}
+		}
+		sort.Slice(names, func(i, j int) bool {
+			return strings.ToLower(names[i]) < strings.ToLower(names[j])
+		})
+		capacity := fmt.Sprintf(`%d`, len(names))
+		if ctx.MaxPlayers > 0 {
+			capacity = fmt.Sprintf(`%d/%d`, len(names), ctx.MaxPlayers)
+		}
+		joined := strings.Join(names, `, `)
+		if joined == `` {
+			joined = `no players`
+		}
+		return sendCommandMessage(ctx, fmt.Sprintf(`Online (%s): %s`, capacity, joined))
+	}
+	if ctx.Manager == nil {
+		return sendCommandMessage(ctx, `Online (0): no players`)
+	}
 	sessions := ctx.Manager.SnapshotAll()
 	names := make([]string, 0, len(sessions))
-	for _, s := range sessions {
-		names = append(names, s.Player.Username)
+	for _, online := range sessions {
+		if online != nil && online.Player != nil {
+			names = append(names, online.Player.Username)
+		}
 	}
-	_ = sendSystemMessage(ctx.Conn,
-		fmt.Sprintf("Online (%d): %s", len(names), strings.Join(names, ", ")))
-	return nil
+	sort.Slice(names, func(i, j int) bool {
+		return strings.ToLower(names[i]) < strings.ToLower(names[j])
+	})
+	joined := strings.Join(names, `, `)
+	if joined == `` {
+		joined = `no players`
+	}
+	return sendCommandMessage(ctx, fmt.Sprintf(`Online (%d): %s`, len(names), joined))
 }
 
 // ── /gamemode ─────────────────────────────────────────────────────────────────
