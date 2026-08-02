@@ -8,10 +8,10 @@ import (
 	"github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
-// The movement attribute carries the absolute vanilla speed. Modern Bedrock
-// clients treat AbilityLayer.WalkSpeed as a multiplier, so it must remain 1;
-// sending 0.1 in both places applies the value twice and makes walking crawl.
-const bedrockWalkSpeedMultiplier float32 = 1
+// AbilityLayer.WalkSpeed is an absolute Bedrock ability value, not a scalar.
+// Keep it at the protocol's vanilla 0.1; using 1.0 causes distorted FOV and
+// movement behaviour even when minecraft:movement is otherwise correct.
+const bedrockAbilityWalkSpeed = protocol.AbilityBaseWalkSpeed
 
 func bedrockGameType(mode player.GameMode) int32 {
 	switch mode {
@@ -93,7 +93,7 @@ func bedrockAbilityData(p *player.Player) protocol.AbilityData {
 			Values:           values,
 			FlySpeed:         flySpeed,
 			VerticalFlySpeed: protocol.AbilityBaseVerticalFlySpeed,
-			WalkSpeed:        bedrockWalkSpeedMultiplier,
+			WalkSpeed:        bedrockAbilityWalkSpeed,
 		}},
 	}
 }

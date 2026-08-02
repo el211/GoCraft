@@ -76,7 +76,7 @@ func TestBedrockMovementAttributeUsesVanillaSpeed(t *testing.T) {
 	if attribute.Value != protocol.AbilityBaseWalkSpeed || attribute.Default != protocol.AbilityBaseWalkSpeed {
 		t.Fatalf(`movement speed = %v/%v, want %v`, attribute.Value, attribute.Default, protocol.AbilityBaseWalkSpeed)
 	}
-	if got := bedrockAbilityData(p).Layers[0].WalkSpeed; got != bedrockWalkSpeedMultiplier {
-		t.Fatalf(`ability walk multiplier = %v, want %v`, got, bedrockWalkSpeedMultiplier)
+	if got := bedrockAbilityData(p).Layers[0].WalkSpeed; got != bedrockAbilityWalkSpeed {
+		t.Fatalf(`ability walk speed = %v, want %v`, got, bedrockAbilityWalkSpeed)
 	}
 }

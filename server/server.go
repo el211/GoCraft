@@ -15,6 +15,7 @@
 package server
 
 import (
+	`bufio`
 	"context"
 	cryptorand "crypto/rand"
 	"crypto/rsa"
@@ -337,6 +338,7 @@ func New(cfg *config.Config) (*Server, error) {
 // All background goroutines are tracked with a WaitGroup and are joined before
 // the world is flushed to disk, ensuring clean shutdown of both listeners.
 func (s *Server) Run(ctx context.Context) error {
+	go s.runConsole(ctx)
 	if s.cfg.JavaEnabled {
 		slog.Info("java listener enabled",
 			"addr", s.cfg.Addr(),
@@ -405,6 +407,61 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	s.saveWorldAge()
 	return listenErr
+}
+
+// runConsole executes commands written to stdin by Pterodactyl or a local
+// terminal. Scanner is intentionally not part of the shutdown WaitGroup:
+// stdin cannot be cancelled portably, and the process owns its lifetime.
+func (s *Server) runConsole(ctx context.Context) {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == `` {
+			continue
+		}
+		result := s.executeConsoleCommand(line)
+		slog.Info(`console command`, `command`, line, `result`, result)
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+	}
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		slog.Warn(`console input stopped`, `err`, err)
+	}
+}
+
+func (s *Server) executeConsoleCommand(input string) string {
+	fields := strings.Fields(strings.TrimPrefix(strings.TrimSpace(input), `/`))
+	if len(fields) == 0 {
+		return `No command entered`
+	}
+	switch strings.ToLower(fields[0]) {
+	case `op`:
+		if len(fields) != 2 {
+			return `Usage: op <player>`
+		}
+		name := fields[1]
+		if err := handler.SetOperator(name); err != nil {
+			return fmt.Sprintf(`Could not save ops.json: %v`, err)
+		}
+		var target *player.Player
+		s.game.OnlinePlayers(func(candidate *player.Player) {
+			if target == nil && strings.EqualFold(candidate.Username, name) {
+				target = candidate
+			}
+		})
+		if target != nil {
+			target.Operator = true
+			if s.bedrockListener != nil {
+				s.bedrockListener.RefreshPlayerAbilities(target)
+			}
+		}
+		return fmt.Sprintf(`Made %s a server operator`, name)
+	default:
+		return fmt.Sprintf(`Unknown console command: %s`, fields[0])
+	}
 }
 
 // runEntityTick fires tickEntities and tickIntents at 20 TPS until ctx is done.
