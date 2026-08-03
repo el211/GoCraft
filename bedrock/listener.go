@@ -47,6 +47,8 @@ import (
 	coreworld "GoCraft/core/world"
 )
 
+const bedrockChunkRadius int32 = 4
+
 // Listener wraps a gophertunnel minecraft.Listener and manages Bedrock client
 // connections.
 type Listener struct {
@@ -308,7 +310,7 @@ func (l *Listener) handleConn(ctx context.Context, gt *minecraft.Listener, conn 
 		ServerAuthoritativeInventory: true,
 		WorldSeed:                    l.worldSeed,
 		WorldSpawn:                   protocol.BlockPos{int32(l.spawnX), int32(result.Position.Y), int32(l.spawnZ)},
-		ChunkRadius:                  4,
+		ChunkRadius:                  bedrockChunkRadius,
 		UseBlockNetworkIDHashes:      false,
 	}); err != nil {
 		slog.Debug("bedrock: StartGame failed",
@@ -327,14 +329,13 @@ func (l *Listener) handleConn(ctx context.Context, gt *minecraft.Listener, conn 
 		knownEntities: make(map[int32]bedrockEntityView),
 		lastHealth:    -1,
 	}
-	l.addSession(bedrockSess)
 	defer l.removeSession(playerUUID)
 	if p := l.game.GetPlayer(playerUUID); p != nil {
 		l.sendLocalPlayerState(bedrockSess, p)
 	}
 
 	// ── Step 4: stream initial chunks ────────────────────────────────────────
-	const chunkRadius = 4
+	const chunkRadius = bedrockChunkRadius
 	spawnCX := chunkCoordinate(result.Position.X)
 	spawnCZ := chunkCoordinate(result.Position.Z)
 
@@ -423,6 +424,7 @@ func (l *Listener) updateChunkStream(conn *minecraft.Conn, position spatial.Vec3
 // Returns when the connection closes or ctx is cancelled.
 func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSess *bedrockSession, streamCX, streamCZ, streamRadius int32) {
 	playerUUID, displayName := bedrockSess.uuid, bedrockSess.displayName
+	readyForWorldSync := false
 	connDone := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -439,6 +441,13 @@ func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSe
 		switch p := pk.(type) {
 		case *packet.SubChunkRequest:
 			l.handleSubChunkRequest(conn, p)
+			if !readyForWorldSync {
+				// Add the session only after its first requested terrain batch was
+				// queued. AddPlayer packets sent earlier may be discarded by the
+				// Bedrock client while the destination chunks do not exist yet.
+				l.addSession(bedrockSess)
+				readyForWorldSync = true
+			}
 
 		case *packet.MovePlayer:
 			position := canonicalPlayerPosition(p.Position)
@@ -553,7 +562,7 @@ func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSe
 		case *packet.RequestChunkRadius:
 			// GoCraft currently streams a four-chunk Bedrock radius.
 			_ = conn.WritePacket(&packet.ChunkRadiusUpdated{
-				ChunkRadius: 4,
+				ChunkRadius: bedrockChunkRadius,
 			})
 		}
 	}

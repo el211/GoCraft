@@ -162,7 +162,14 @@ func (l *Listener) SendVelocity(playerUUID [16]byte, velocity spatial.Vec3, tick
 
 func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player, bedrockByUUID map[[16]byte]*bedrockSession, tick uint64) {
 	present := make(map[[16]byte]struct{}, len(players))
+	viewerPlayer := l.game.GetPlayer(viewer.uuid)
 	for _, p := range players {
+		if p.Edition == player.ClientEditionBedrock && p.UUID != viewer.uuid && bedrockByUUID[p.UUID] == nil {
+			continue // Do not publish a Bedrock player before its own world is ready.
+		}
+		if !bedrockPlayerInView(viewerPlayer, p) {
+			continue
+		}
 		present[p.UUID] = struct{}{}
 		previous, known := viewer.knownPlayers[p.UUID]
 		if !known {
@@ -245,6 +252,16 @@ func playerRuntimeIDForViewer(viewer *bedrockSession, p *player.Player) uint64 {
 		return bedrockSelfRuntimeID
 	}
 	return bedrockRemoteRuntimeID(p.EntityID)
+}
+
+func bedrockPlayerInView(viewer, target *player.Player) bool {
+	if viewer == nil || target == nil || viewer.UUID == target.UUID {
+		return viewer != nil && target != nil
+	}
+	dx := chunkCoordinate(target.Position.X) - chunkCoordinate(viewer.Position.X)
+	dz := chunkCoordinate(target.Position.Z) - chunkCoordinate(viewer.Position.Z)
+	return dx >= -bedrockChunkRadius && dx <= bedrockChunkRadius &&
+		dz >= -bedrockChunkRadius && dz <= bedrockChunkRadius
 }
 
 func playerListEntry(p *player.Player, session *bedrockSession, self bool) protocol.PlayerListEntry {
@@ -473,7 +490,7 @@ func (l *Listener) syncLocalHealth(viewer *bedrockSession, tick uint64) {
 
 		// Death may have happened far from the bed/world spawn. Publish and
 		// announce the respawn area again so the client does not wake into sky.
-		const chunkRadius = 4
+		const chunkRadius = bedrockChunkRadius
 		_ = viewer.conn.WritePacket(initialChunkPublisher(p.Position, chunkRadius))
 		_ = l.sendInitialChunks(viewer.conn, chunkCoordinate(p.Position.X), chunkCoordinate(p.Position.Z), chunkRadius)
 	}
