@@ -1,14 +1,34 @@
 package bedrock
 
 import (
+	"bytes"
 	"strings"
 
 	coreworld "GoCraft/core/world"
+	"github.com/sandertv/gophertunnel/minecraft/nbt"
 )
 
 type bedBlockActor struct {
 	X, Y, Z int32
 	Colour  uint8
+}
+
+// encodeBedBlockActors produces the consecutive Network Little Endian NBT
+// compounds that Bedrock requires at the end of a successful SubChunk entry.
+// Sending BlockActorData later is insufficient for the initial chunk load:
+// the client creates the bed renderer while decoding this inline payload.
+func encodeBedBlockActors(chunk *coreworld.Chunk, subY int32) ([]byte, error) {
+	var payload bytes.Buffer
+	encoder := nbt.NewEncoderWithEncoding(&payload, nbt.NetworkLittleEndian)
+	for _, actor := range bedBlockActors(chunk, subY) {
+		if err := encoder.Encode(map[string]any{
+			"id": "Bed", "x": actor.X, "y": actor.Y, "z": actor.Z,
+			"color": actor.Colour,
+		}); err != nil {
+			return nil, err
+		}
+	}
+	return payload.Bytes(), nil
 }
 
 // bedBlockActors derives Bedrock block actors from canonical Java-style bed

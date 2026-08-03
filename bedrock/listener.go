@@ -850,11 +850,6 @@ func (l *Listener) handleSubChunkRequest(
 	req *packet.SubChunkRequest,
 ) {
 	entries := make([]protocol.SubChunkEntry, 0, len(req.Offsets))
-	type bedActor struct {
-		position protocol.BlockPos
-		colour   uint8
-	}
-	var bedActors []bedActor
 	for _, off := range req.Offsets {
 		subY := req.Position.Y() + int32(off[1])
 		chunkX := req.Position.X() + int32(off[0])
@@ -878,13 +873,12 @@ func (l *Listener) handleSubChunkRequest(
 			} else if len(payload) == 0 {
 				entry.Result = protocol.SubChunkResultSuccessAllAir
 			} else {
-				entry.Result = protocol.SubChunkResultSuccess
-				entry.RawPayload = payload
-				for _, actor := range bedBlockActors(chunk, subY) {
-					bedActors = append(bedActors, bedActor{
-						position: protocol.BlockPos{actor.X, actor.Y, actor.Z},
-						colour:   actor.Colour,
-					})
+				blockActors, actorErr := encodeBedBlockActors(chunk, subY)
+				if actorErr != nil {
+					entry.Result = protocol.SubChunkResultChunkNotFound
+				} else {
+					entry.Result = protocol.SubChunkResultSuccess
+					entry.RawPayload = append(payload, blockActors...)
 				}
 			}
 		}
@@ -897,15 +891,6 @@ func (l *Listener) handleSubChunkRequest(
 		Position:        req.Position,
 		SubChunkEntries: entries,
 	})
-	// Bedrock renders minecraft:bed only after receiving its block actor. Java
-	// stores the colour in the block name, so translate that information into
-	// the Bedrock NBT sent after the containing sub-chunk becomes available.
-	for _, actor := range bedActors {
-		_ = conn.WritePacket(&packet.BlockActorData{
-			Position: actor.position,
-			NBTData:  map[string]any{"id": "Bed", "color": actor.colour},
-		})
-	}
 }
 
 // ── Identity helpers ──────────────────────────────────────────────────────────
