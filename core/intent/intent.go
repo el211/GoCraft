@@ -35,6 +35,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"GoCraft/core/player"
 	"GoCraft/core/spatial"
 )
 
@@ -163,6 +164,9 @@ const (
 	InventoryActionSwap
 	InventoryActionDrop
 	InventoryActionDestroy
+	// InventoryActionCreativeGive spawns an item directly into Destination from
+	// the creative pool (no source slot). Only valid in creative game mode.
+	InventoryActionCreativeGive
 )
 
 // InventoryAction describes one protocol-neutral operation in an atomic
@@ -173,6 +177,8 @@ type InventoryAction struct {
 	Source      int16
 	Destination int16
 	Count       int
+	// Item is the item to give; only populated for InventoryActionCreativeGive.
+	Item player.ItemStack
 }
 
 type InventoryResult struct {

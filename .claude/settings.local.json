@@ -39,7 +39,16 @@
       "Bash(grep -r \"interact\\\\|Interact\\\\|use_entity\\\\|merchant\\\\|open_screen\\\\|MerchantOffer\" internal/protocoldata/ --include=\"*.go\" -l)",
       "Bash(grep -r \"merchant\\\\|interact\\\\|open_screen\" java/ --include=\"*.go\" -l)",
       "WebFetch(domain:prismarinejs.github.io)",
-      "Bash(gh api:*)"
+      "Bash(gh api:*)",
+      "Bash(ls \"$\\(go env GOPATH\\)/pkg/mod/github.com/df-mc/dragonfly@v0.11.0/server/item/creative/\")",
+      "Bash(sed -n '1380,1400p' \"$\\(go env GOPATH\\)/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/minecraft/conn.go\")",
+      "Bash(sed -n '1370,1392p' \"$\\(go env GOPATH\\)/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/minecraft/conn.go\")",
+      "Bash(cat \"$\\(go env GOPATH\\)/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/minecraft/protocol/packet/interact.go\")",
+      "Bash(head -40 \"$\\(go env GOPATH\\)/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/minecraft/protocol/packet/container_open.go\")",
+      "Bash(cat \"$\\(go env GOPATH\\)/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/minecraft/protocol/packet/container_close.go\")",
+      "Read(//c/Users/PC/go/pkg/mod/github.com/sandertv/gophertunnel@v1.57.1/**)",
+      "Read(//c/Users/PC/go/pkg/mod/github.com/df-mc/**)",
+      "Bash(/usr/local/go/bin/go version:*)"
     ]
   }
 }

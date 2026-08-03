@@ -64,6 +64,11 @@ type Listener struct {
 	difficulty int32
 	sessionsMu sync.RWMutex
 	sessions   map[[16]byte]*bedrockSession
+
+	// Creative inventory catalogue — built once in NewListener.
+	creativeGroups []protocol.CreativeGroup
+	creativeItems  []protocol.CreativeItem
+	creativeNames  map[uint32]creativeKnownItem // creative network ID → item name/meta
 }
 
 type bedrockSession struct {
@@ -91,6 +96,7 @@ type bedrockSession struct {
 	lastGodMode   bool
 	teleportMu    sync.Mutex
 	teleportPos   *spatial.Vec3
+	invOpened     bool // true while the player's own inventory/creative screen is open
 }
 
 func (s *bedrockSession) expectTeleport(position spatial.Vec3) {
@@ -137,7 +143,7 @@ func NewListener(
 	gameMode player.GameMode,
 	difficulty int32,
 ) *Listener {
-	return &Listener{
+	l := &Listener{
 		cfg:        cfg,
 		bus:        bus,
 		world:      world,
@@ -150,6 +156,8 @@ func NewListener(
 		difficulty: difficulty,
 		sessions:   make(map[[16]byte]*bedrockSession),
 	}
+	l.initCreativeContent()
+	return l
 }
 
 // Listen starts the RakNet UDP listener and blocks until ctx is cancelled or a
@@ -351,6 +359,15 @@ func (l *Listener) handleConn(ctx context.Context, gt *minecraft.Listener, conn 
 		slog.Debug("bedrock: chunk streaming failed",
 			"displayName", identity.DisplayName, "err", err)
 		return
+	}
+
+	// Override the empty CreativeContent gophertunnel sent during StartGame
+	// with the full item catalogue so the creative menu populates correctly.
+	if len(l.creativeItems) > 0 {
+		_ = conn.WritePacket(&packet.CreativeContent{
+			Groups: l.creativeGroups,
+			Items:  l.creativeItems,
+		})
 	}
 
 	// ── Step 5: play loop ─────────────────────────────────────────────────────
@@ -559,6 +576,38 @@ func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSe
 				})
 			}
 
+		case *packet.Interact:
+			// The client sends InteractActionOpenInventory when the player presses
+			// 'E' (open inventory / creative menu).  The server must respond with
+			// ContainerOpen so the client renders the correct screen.
+			if p.ActionType == packet.InteractActionOpenInventory && !bedrockSess.invOpened {
+				player := l.game.GetPlayer(playerUUID)
+				var pos protocol.BlockPos
+				if player != nil {
+					pos = protocol.BlockPos{
+						int32(player.Position.X),
+						int32(player.Position.Y),
+						int32(player.Position.Z),
+					}
+				}
+				_ = conn.WritePacket(&packet.ContainerOpen{
+					WindowID:                0,
+					ContainerType:           0xff, // special value: player inventory / creative screen
+					ContainerPosition:       pos,
+					ContainerEntityUniqueID: -1,
+				})
+				bedrockSess.invOpened = true
+			}
+
+		case *packet.ContainerClose:
+			// Echo the close back so the client confirms the screen is dismissed.
+			bedrockSess.invOpened = false
+			_ = conn.WritePacket(&packet.ContainerClose{
+				WindowID:      p.WindowID,
+				ContainerType: p.ContainerType,
+				ServerSide:    false,
+			})
+
 		case *packet.RequestChunkRadius:
 			// GoCraft currently streams a four-chunk Bedrock radius.
 			_ = conn.WritePacket(&packet.ChunkRadiusUpdated{
@@ -580,7 +629,7 @@ func (l *Listener) acceptBedrockMovement(session *bedrockSession, position spati
 func (l *Listener) handleStackRequests(ctx context.Context, conn *minecraft.Conn, playerUUID [16]byte, requests []protocol.ItemStackRequest) {
 	responses := make([]protocol.ItemStackResponse, 0, len(requests))
 	for _, request := range requests {
-		actions, ok := canonicalInventoryActions(request.Actions)
+		actions, ok := l.canonicalInventoryActions(request.Actions)
 		accepted := false
 		if ok {
 			done := make(chan intent.InventoryResult, 1)
@@ -611,10 +660,25 @@ func (l *Listener) handleStackRequests(ctx context.Context, conn *minecraft.Conn
 	}
 }
 
-func canonicalInventoryActions(actions []protocol.StackRequestAction) ([]intent.InventoryAction, bool) {
+func (l *Listener) canonicalInventoryActions(actions []protocol.StackRequestAction) ([]intent.InventoryAction, bool) {
 	out := make([]intent.InventoryAction, 0, len(actions))
 	for _, raw := range actions {
 		switch action := raw.(type) {
+		case *protocol.CraftCreativeStackRequestAction:
+			// Player picked an item from the creative inventory.  Look up the
+			// item by the creative network ID we assigned in CreativeContent and
+			// place a full stack of it in the cursor slot so the subsequent
+			// PlaceStackRequestAction can move it to the desired slot.
+			ki, ok := l.creativePlayerStack(action.CreativeItemNetworkID, 64)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, intent.InventoryAction{
+				Kind:        intent.InventoryActionCreativeGive,
+				Destination: intent.InventoryCursorSlot,
+				Count:       64,
+				Item:        player.ItemStack{ItemID: ki.name, Count: 64, Damage: int(ki.meta)},
+			})
 		case *protocol.TakeStackRequestAction:
 			source, sourceOK := canonicalInventorySlot(action.Source)
 			destination, destinationOK := canonicalInventorySlot(action.Destination)

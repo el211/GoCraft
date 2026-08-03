@@ -437,21 +437,24 @@ Please avoid adding generated binaries, credentials, player data, or private ser
 
 ## License
 
-**Copyright © 2026 Oreo Studios — All Rights Reserved**
+GoCraft is open source software licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
 
-GoCraft is a proprietary software project developed and maintained by **Oreo Studios**.
+Copyright © 2026 Oreo Studios
 
-This repository is intentionally public so the community can follow the development of the project. **Public visibility does not grant permission to copy, redistribute, modify, commercialize, or create derivative works from the source code.**
+You are free to:
 
-Unless you have received **prior written permission** from Oreo Studios, you may **not**:
+* **Use** — run GoCraft for any purpose
+* **Study** — read and learn from the source code
+* **Fork** — create your own version of GoCraft
+* **Contribute** — submit improvements back to this project
 
-* Copy substantial portions of the source code.
-* Redistribute or publish modified versions.
-* Create commercial or non-commercial derivatives.
-* Rebrand or represent GoCraft as your own project.
-* Use GoCraft code in another server software.
+Under the following conditions:
 
-If you are interested in contributing to GoCraft or collaborating with Oreo Studios, we would love to hear from you. Please open an issue or contact us before starting any work.
+* **Attribution** — you must retain credit to the original GoCraft project and Oreo Studios in any derivative work
+* **Copyleft** — any modified or derived version must also be released under GPL-3.0; you cannot make a closed-source or proprietary fork
+* **Source disclosure** — if you distribute a modified version, you must make the full source code available under the same license
+
+For the full license text, see the [LICENSE](LICENSE) file or visit [gnu.org/licenses/gpl-3.0](https://www.gnu.org/licenses/gpl-3.0.html).
 
 **Company Information**
 

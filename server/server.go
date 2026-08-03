@@ -1143,6 +1143,19 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 	}
 
 	for _, action := range i.Actions {
+		if action.Kind == intent.InventoryActionCreativeGive {
+			// Creative give: spawn an item into the cursor from the creative pool.
+			// No source slot — only allowed in creative mode.
+			if p.GameMode != player.GameModeCreative || action.Count <= 0 {
+				return
+			}
+			given := player.ItemStack{ItemID: action.Item.ItemID, Count: action.Count, Damage: action.Item.Damage}
+			if !set(action.Destination, given) {
+				return
+			}
+			continue
+		}
+
 		source, ok := get(action.Source)
 		if !ok || source.IsEmpty() {
 			return
@@ -1400,7 +1413,48 @@ func (s *Server) tickEntities() {
 	}
 	endDamage()
 
-	for _, e := range s.world.Entities.Snapshot() {
+	allEntities := s.world.Entities.Snapshot()
+
+	// ── Parallel passive mob AI ───────────────────────────────────────────────
+	// Passive wander AI is pure per-entity computation (position/velocity writes
+	// on the entity pointer; read-only world access) so it is safe to run
+	// concurrently.  Hostile and golem AI mutate shared player state and stay
+	// serial below.
+	//
+	// We pre-seed every passive mob's AI struct from the tick goroutine first so
+	// the map reads inside tickPassiveMobAI are guaranteed to be read-only
+	// (safe for concurrent goroutines).
+	for _, e := range allEntities {
+		if !e.Dead && isPassiveMob(e.Type) {
+			_ = s.mobAIFor(e) // ensure AI struct exists before parallel phase
+		}
+	}
+	endPassiveAI := s.timings.measure(sectionAI)
+	type villagerWakeEntry struct{ e *corentity.Entity }
+	var villagerWakesMu sync.Mutex
+	var villagerWakes []villagerWakeEntry
+	var passiveAIWG sync.WaitGroup
+	for _, e := range allEntities {
+		if e.Dead || !isPassiveMob(e.Type) {
+			continue
+		}
+		passiveAIWG.Add(1)
+		go func(e *corentity.Entity) {
+			defer passiveAIWG.Done()
+			if s.tickPassiveMobAI(e) && e.Type == corentity.TypeVillager {
+				villagerWakesMu.Lock()
+				villagerWakes = append(villagerWakes, villagerWakeEntry{e})
+				villagerWakesMu.Unlock()
+			}
+		}(e)
+	}
+	passiveAIWG.Wait()
+	endPassiveAI()
+	for _, vw := range villagerWakes {
+		handler.BroadcastVillagerSleepState(vw.e, s.sessions)
+	}
+
+	for _, e := range allEntities {
 		e.AgeTicks++
 		// ── Dead entity cleanup ───────────────────────────────────────────────
 		if e.Dead {
@@ -1493,21 +1547,18 @@ func (s *Server) tickEntities() {
 			continue
 		}
 
-		// ── Mob AI (wander / hostile) ─────────────────────────────────────────
+		// ── Mob AI (golem / hostile) ──────────────────────────────────────────
+		// Passive mob AI already ran in the parallel pre-pass above.
 		prevX, prevY, prevZ := e.Position.X, e.Position.Y, e.Position.Z
-		endAI := s.timings.measure(sectionAI)
-		if isPassiveMob(e.Type) {
-			if s.tickPassiveMobAI(e) && e.Type == corentity.TypeVillager {
-				// Sleeping state changed: broadcast updated pose so all clients
-				// see the villager lie down or stand up.
-				handler.BroadcastVillagerSleepState(e, s.sessions)
+		if !isPassiveMob(e.Type) {
+			endAI := s.timings.measure(sectionAI)
+			if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
+				s.tickGolemAI(e)
+			} else if isHostileMob(e.Type) {
+				s.tickHostileMobAI(e)
 			}
-		} else if e.Type == corentity.TypeIronGolem || e.Type == corentity.TypeSnowGolem {
-			s.tickGolemAI(e)
-		} else if isHostileMob(e.Type) {
-			s.tickHostileMobAI(e)
+			endAI()
 		}
-		endAI()
 		if e.Dead {
 			// Damage during AI starts its animation on the next simulation tick.
 			continue
