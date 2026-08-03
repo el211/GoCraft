@@ -82,6 +82,57 @@ func RegisterBuiltins(d *Dispatcher) {
 	d.RegisterOperator(`kill`, cmdKill)
 	d.RegisterOperator(`seed`, cmdSeed)
 	d.RegisterOperator(`spawnboat`, cmdSpawnBoat)
+	d.RegisterOperator(`whitelist`, cmdWhitelist)
+}
+
+func cmdWhitelist(ctx CommandContext) error {
+	if len(ctx.Args) == 0 {
+		state := "disabled"
+		if WhitelistEnabled() {
+			state = "enabled"
+		}
+		return sendCommandMessage(ctx, fmt.Sprintf("Whitelist is %s (%d players)", state, len(WhitelistedPlayers())))
+	}
+	switch strings.ToLower(ctx.Args[0]) {
+	case "on", "off":
+		enabled := strings.EqualFold(ctx.Args[0], "on")
+		if err := SetWhitelistEnabled(enabled); err != nil {
+			return fmt.Errorf("saving whitelist: %w", err)
+		}
+		state := "disabled"
+		if enabled {
+			state = "enabled"
+		}
+		return sendCommandMessage(ctx, "Whitelist "+state)
+	case "add":
+		if len(ctx.Args) != 2 {
+			return fmt.Errorf("usage: /whitelist add <player>")
+		}
+		if err := AddWhitelistedPlayer(ctx.Args[1]); err != nil {
+			return fmt.Errorf("saving whitelist: %w", err)
+		}
+		return sendCommandMessage(ctx, "Added "+ctx.Args[1]+" to the whitelist")
+	case "remove":
+		if len(ctx.Args) != 2 {
+			return fmt.Errorf("usage: /whitelist remove <player>")
+		}
+		removed, err := RemoveWhitelistedPlayer(ctx.Args[1])
+		if err != nil {
+			return fmt.Errorf("saving whitelist: %w", err)
+		}
+		if !removed {
+			return fmt.Errorf("%s is not whitelisted", ctx.Args[1])
+		}
+		return sendCommandMessage(ctx, "Removed "+ctx.Args[1]+" from the whitelist")
+	case "list":
+		players := WhitelistedPlayers()
+		if len(players) == 0 {
+			return sendCommandMessage(ctx, "Whitelist is empty")
+		}
+		return sendCommandMessage(ctx, "Whitelisted players: "+strings.Join(players, ", "))
+	default:
+		return fmt.Errorf("usage: /whitelist <on|off|add|remove|list>")
+	}
 }
 
 func registerBuiltinsWithoutPermissions(d *Dispatcher) {
@@ -115,7 +166,7 @@ func registerBuiltinsWithoutPermissions(d *Dispatcher) {
 
 func cmdHelp(ctx CommandContext) error {
 	_ = sendSystemMessage(ctx.Conn,
-		"Commands: /gamemode /tp /xyz /locate /summon /give /get /kill /fly /potioneffect /walkspeed /flyspeed /kick /list /version /seed /spawnboat /time /tps /timings /help")
+		"Commands: /gamemode /tp /xyz /locate /summon /give /get /kill /fly /potioneffect /walkspeed /flyspeed /kick /whitelist /list /version /seed /spawnboat /time /tps /timings /help")
 	return nil
 }
 

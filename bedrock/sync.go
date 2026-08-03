@@ -25,6 +25,8 @@ type bedrockPlayerView struct {
 	inventory [player.InventorySize]player.ItemStack
 	heldSlot  int
 	sleeping  bool
+	health    float32
+	dead      bool
 }
 
 type bedrockEntityView struct {
@@ -173,8 +175,30 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 				_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p))
 				l.sendPlayerEquipment(viewer, p)
 			}
-			viewer.knownPlayers[p.UUID] = bedrockPlayerView{entityID: p.EntityID, position: p.Position, rotation: p.Rotation, inventory: p.Inventory, heldSlot: p.HeldSlot, sleeping: p.Sleeping}
+			health, _, _, dead := p.HealthSnapshot()
+			viewer.knownPlayers[p.UUID] = bedrockPlayerView{entityID: p.EntityID, position: p.Position, rotation: p.Rotation, inventory: p.Inventory, heldSlot: p.HeldSlot, sleeping: p.Sleeping, health: health, dead: dead}
 			continue
+		}
+		health, _, _, dead := p.HealthSnapshot()
+		if p.UUID != viewer.uuid && previous.dead && !dead {
+			_ = viewer.conn.WritePacket(&packet.RemoveActor{EntityUniqueID: int64(bedrockRemoteRuntimeID(p.EntityID))})
+			_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p))
+			l.sendPlayerEquipment(viewer, p)
+		}
+		if p.UUID != viewer.uuid && health != previous.health {
+			_ = viewer.conn.WritePacket(&packet.UpdateAttributes{
+				EntityRuntimeID: bedrockRemoteRuntimeID(p.EntityID),
+				Attributes: []protocol.Attribute{{
+					AttributeValue: protocol.AttributeValue{Name: "minecraft:health", Min: 0, Max: p.MaxHealth, Value: health},
+					DefaultMin:     0, DefaultMax: p.MaxHealth, Default: p.MaxHealth,
+				}}, Tick: tick,
+			})
+			if health < previous.health && !dead {
+				_ = viewer.conn.WritePacket(&packet.ActorEvent{EntityRuntimeID: bedrockRemoteRuntimeID(p.EntityID), EventType: packet.ActorEventHurt})
+			}
+		}
+		if p.UUID != viewer.uuid && !previous.dead && dead {
+			_ = viewer.conn.WritePacket(&packet.ActorEvent{EntityRuntimeID: bedrockRemoteRuntimeID(p.EntityID), EventType: packet.ActorEventDeath})
 		}
 		if p.UUID != viewer.uuid && (previous.position != p.Position || previous.rotation != p.Rotation) {
 			_ = viewer.conn.WritePacket(&packet.MovePlayer{
@@ -198,7 +222,7 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 				Tick:            tick,
 			})
 		}
-		viewer.knownPlayers[p.UUID] = bedrockPlayerView{entityID: p.EntityID, position: p.Position, rotation: p.Rotation, inventory: p.Inventory, heldSlot: p.HeldSlot, sleeping: p.Sleeping}
+		viewer.knownPlayers[p.UUID] = bedrockPlayerView{entityID: p.EntityID, position: p.Position, rotation: p.Rotation, inventory: p.Inventory, heldSlot: p.HeldSlot, sleeping: p.Sleeping, health: health, dead: dead}
 	}
 
 	for id, previous := range viewer.knownPlayers {

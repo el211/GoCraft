@@ -150,7 +150,13 @@ func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.W
 				if target.Player == p || squaredPlayerDistance(p, target.Player) > 9 {
 					return nil
 				}
-				if DamagePlayerLegacy(target, damage, "was slain by "+p.Username, mgr) {
+				var damaged bool
+				if p.AttackCooldown {
+					damaged = DamagePlayer(target, damage, "was slain by "+p.Username, mgr)
+				} else {
+					damaged = DamagePlayerLegacy(target, damage, "was slain by "+p.Username, mgr)
+				}
+				if damaged {
 					horizontal := p.KnockbackHorizontal
 					vertical := p.KnockbackVertical
 					if horizontal <= 0 {

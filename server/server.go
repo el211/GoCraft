@@ -207,6 +207,9 @@ func New(cfg *config.Config) (*Server, error) {
 	if err := handler.ConfigureOperators(`ops.json`, cfg.Operators); err != nil {
 		slog.Warn(`server: could not load ops.json`, `err`, err)
 	}
+	if err := handler.ConfigureWhitelist(`whitelist.json`, cfg.Whitelist.Enabled, cfg.Whitelist.Players); err != nil {
+		slog.Warn(`server: could not load whitelist.json`, `err`, err)
+	}
 	cmds := handler.NewDispatcher()
 	cmds.SetEntityIDAllocator(gameCore.NextEntityID)
 	cmds.SetPlayerFinder(func(name string) *player.Player {
@@ -519,6 +522,42 @@ func (s *Server) executeConsoleCommand(input string) string {
 			}
 		}
 		return fmt.Sprintf(`Made %s a server operator`, name)
+	case `whitelist`:
+		if len(fields) < 2 {
+			return fmt.Sprintf(`Whitelist enabled: %v; players: %s`, handler.WhitelistEnabled(), strings.Join(handler.WhitelistedPlayers(), `, `))
+		}
+		switch strings.ToLower(fields[1]) {
+		case `on`, `off`:
+			enabled := strings.EqualFold(fields[1], `on`)
+			if err := handler.SetWhitelistEnabled(enabled); err != nil {
+				return fmt.Sprintf(`Could not save whitelist.json: %v`, err)
+			}
+			return fmt.Sprintf(`Whitelist enabled: %v`, enabled)
+		case `add`:
+			if len(fields) != 3 {
+				return `Usage: whitelist add <player>`
+			}
+			if err := handler.AddWhitelistedPlayer(fields[2]); err != nil {
+				return fmt.Sprintf(`Could not save whitelist.json: %v`, err)
+			}
+			return fmt.Sprintf(`Added %s to the whitelist`, fields[2])
+		case `remove`:
+			if len(fields) != 3 {
+				return `Usage: whitelist remove <player>`
+			}
+			removed, err := handler.RemoveWhitelistedPlayer(fields[2])
+			if err != nil {
+				return fmt.Sprintf(`Could not save whitelist.json: %v`, err)
+			}
+			if !removed {
+				return fmt.Sprintf(`%s is not whitelisted`, fields[2])
+			}
+			return fmt.Sprintf(`Removed %s from the whitelist`, fields[2])
+		case `list`:
+			return `Whitelisted players: ` + strings.Join(handler.WhitelistedPlayers(), `, `)
+		default:
+			return `Usage: whitelist <on|off|add|remove|list>`
+		}
 	default:
 		return fmt.Sprintf(`Unknown console command: %s`, fields[0])
 	}
@@ -626,6 +665,12 @@ func (s *Server) applyBedrockPlayerState(i intent.PlayerStateIntent) {
 // applyJoin creates a canonical Player, registers it with the game core, and
 // sends a JoinResult to the waiting adapter goroutine.
 func (s *Server) applyJoin(i intent.JoinIntent) {
+	if !handler.IsWhitelisted(i.Username) {
+		err := fmt.Errorf("you are not whitelisted on this server")
+		slog.Warn("applyJoin: player rejected by whitelist", "name", i.Username, "edition", i.Edition)
+		i.Done <- intent.JoinResult{Err: err}
+		return
+	}
 	edition := player.ClientEditionBedrock
 	if i.Edition == "java" {
 		edition = player.ClientEditionJava
@@ -999,7 +1044,28 @@ func (s *Server) applyBedrockEntityInteract(i intent.EntityInteractIntent) {
 		if !ok {
 			targetSession = &session.Session{Player: targetPlayer}
 		}
-		if handler.DamagePlayerLegacy(targetSession, damage, "was slain by "+attacker.Username, s.sessions) {
+		var damaged bool
+		if attacker.AttackCooldown {
+			damaged = handler.DamagePlayer(targetSession, damage, "was slain by "+attacker.Username, s.sessions)
+		} else {
+			damaged = handler.DamagePlayerLegacy(targetSession, damage, "was slain by "+attacker.Username, s.sessions)
+		}
+		if damaged {
+			horizontal, vertical := attacker.KnockbackHorizontal, attacker.KnockbackVertical
+			if horizontal <= 0 {
+				horizontal = 0.4
+			}
+			if vertical <= 0 {
+				vertical = 0.4
+			}
+			if attacker.Sprinting {
+				horizontal *= 2
+			}
+			if targetSession.Conn != nil {
+				handler.SendLegacyKnockback(targetSession, attacker.Position.X, attacker.Position.Z, horizontal, vertical)
+			} else if s.sessions != nil {
+				s.sessions.KnockbackExternal(targetPlayer, attacker.Position.X, attacker.Position.Z, horizontal, vertical)
+			}
 			attacker.LastAttack = time.Now()
 			s.damageBedrockHeldItem(attacker, 1)
 		}
@@ -3398,7 +3464,7 @@ func (s *Server) tickVillagerBreeding() {
 	type villageInfo struct {
 		adults   []*corentity.Entity
 		babies   int
-		center   corentity.Entity // representative for center coords
+		center   spatial.BlockPos
 		occupied map[[3]int32]struct{}
 	}
 	villages := make(map[[2]int]*villageInfo)
@@ -3410,15 +3476,15 @@ func (s *Server) tickVillagerBreeding() {
 		key := [2]int{int(e.VillageCenter.X / 64), int(e.VillageCenter.Z / 64)}
 		info := villages[key]
 		if info == nil {
-			info = &villageInfo{occupied: make(map[[3]int32]struct{})}
+			info = &villageInfo{center: e.VillageCenter, occupied: make(map[[3]int32]struct{})}
 			villages[key] = info
 		}
+		bedKey := [3]int32{e.VillageBed.X, e.VillageBed.Y, e.VillageBed.Z}
+		info.occupied[bedKey] = struct{}{}
 		if e.IsBaby {
 			info.babies++
 		} else {
 			info.adults = append(info.adults, e)
-			bedKey := [3]int32{e.VillageBed.X, e.VillageBed.Y, e.VillageBed.Z}
-			info.occupied[bedKey] = struct{}{}
 		}
 	}
 
@@ -3430,28 +3496,19 @@ func (s *Server) tickVillagerBreeding() {
 		if info.babies*3 >= len(info.adults) {
 			continue
 		}
-		// Find an unoccupied bed among the adults' known beds.
-		var freeBed corentity.Entity
-		_ = freeBed
-		var parent *corentity.Entity
-		for _, adult := range info.adults {
-			// Check if a neighbouring bed slot is free.
-			bedKey := [3]int32{adult.VillageBed.X, adult.VillageBed.Y, adult.VillageBed.Z}
-			// Try adjacent X position for second-bed slot.
-			altKey := [3]int32{bedKey[0] + 2, bedKey[1], bedKey[2]}
-			if _, taken := info.occupied[altKey]; !taken {
-				parent = adult
-				break
-			}
-			altKey2 := [3]int32{bedKey[0] - 2, bedKey[1], bedKey[2]}
-			if _, taken := info.occupied[altKey2]; !taken {
-				parent = adult
+		var freeBed spatial.BlockPos
+		foundFreeBed := false
+		for _, bed := range s.world.VillageBedsNear(info.center, 48) {
+			key := [3]int32{bed.X, bed.Y, bed.Z}
+			if _, taken := info.occupied[key]; !taken {
+				freeBed, foundFreeBed = bed, true
 				break
 			}
 		}
-		if parent == nil {
-			parent = info.adults[s.spawnRNG.Intn(len(info.adults))]
+		if !foundFreeBed {
+			continue
 		}
+		parent := info.adults[s.spawnRNG.Intn(len(info.adults))]
 
 		// Spawn the baby near the parent.
 		id := s.game.NextEntityID()
@@ -3466,7 +3523,7 @@ func (s *Server) tickVillagerBreeding() {
 		baby.HasVillageHome = parent.HasVillageHome
 		baby.VillageHome = parent.VillageHome
 		baby.VillageCenter = parent.VillageCenter
-		baby.VillageBed = parent.VillageBed
+		baby.VillageBed = freeBed
 		baby.VillageWorkstation = parent.VillageWorkstation
 		baby.IsBaby = true
 		baby.OnGround = true

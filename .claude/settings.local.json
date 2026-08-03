@@ -38,7 +38,8 @@
       "Bash(go run:*)",
       "Bash(grep -r \"interact\\\\|Interact\\\\|use_entity\\\\|merchant\\\\|open_screen\\\\|MerchantOffer\" internal/protocoldata/ --include=\"*.go\" -l)",
       "Bash(grep -r \"merchant\\\\|interact\\\\|open_screen\" java/ --include=\"*.go\" -l)",
-      "WebFetch(domain:prismarinejs.github.io)"
+      "WebFetch(domain:prismarinejs.github.io)",
+      "Bash(gh api:*)"
     ]
   }
 }

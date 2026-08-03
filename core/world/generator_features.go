@@ -626,26 +626,26 @@ func (g *OverworldGenerator) placeGrassColumnDecor(c *Chunk, localX, surfaceY, l
 		}
 
 	case "minecraft:forest":
-		switch r % 10 {
-		case 0, 1, 2, 3:
+		switch r % 20 {
+		case 0, 1, 2, 3, 4, 5, 6, 7:
 			lower = shortGrassBlock
-		case 4, 5:
+		case 8, 9, 10:
 			lower, upper, hasUpper = tallGrassLowerBlock, tallGrassUpperBlock, true
-		case 6:
+		case 11:
 			lower = dandelionBlock
-		case 7:
+		case 12:
 			lower = poppyBlock
 		}
 
 	case "minecraft:birch_forest":
-		switch r % 10 {
-		case 0, 1, 2, 3:
+		switch r % 20 {
+		case 0, 1, 2, 3, 4, 5, 6, 7:
 			lower = shortGrassBlock
-		case 4, 5:
+		case 8, 9, 10:
 			lower, upper, hasUpper = tallGrassLowerBlock, tallGrassUpperBlock, true
-		case 6:
+		case 11:
 			lower = lilyOfTheValleyBlock
-		case 7:
+		case 12:
 			lower = dandelionBlock
 		}
 
@@ -660,21 +660,13 @@ func (g *OverworldGenerator) placeGrassColumnDecor(c *Chunk, localX, surfaceY, l
 		}
 
 	case "minecraft:plains":
-		switch r % 14 {
-		case 0, 1, 2, 3:
+		switch r % 32 {
+		case 0, 1, 2, 3, 4, 5, 6, 7:
 			lower = shortGrassBlock
-		case 4, 5:
+		case 8, 9, 10:
 			lower, upper, hasUpper = tallGrassLowerBlock, tallGrassUpperBlock, true
-		case 6:
+		case 11:
 			lower = biomeFlower("minecraft:plains", r)
-		case 7:
-			lower, upper, hasUpper = sunflowerLowerBlock, sunflowerUpperBlock, true
-		case 8:
-			lower, upper, hasUpper = roseBushLowerBlock, roseBushUpperBlock, true
-		case 9:
-			lower, upper, hasUpper = lilacLowerBlock, lilacUpperBlock, true
-		case 10:
-			lower, upper, hasUpper = peonyLowerBlock, peonyUpperBlock, true
 		}
 
 	case "minecraft:savanna":
@@ -710,14 +702,14 @@ func (g *OverworldGenerator) placeGrassColumnDecor(c *Chunk, localX, surfaceY, l
 		}
 
 	case "minecraft:old_growth_birch_forest":
-		switch r % 10 {
-		case 0, 1, 2, 3:
+		switch r % 20 {
+		case 0, 1, 2, 3, 4, 5, 6, 7:
 			lower = shortGrassBlock
-		case 4, 5:
+		case 8, 9, 10:
 			lower, upper, hasUpper = tallGrassLowerBlock, tallGrassUpperBlock, true
-		case 6:
+		case 11:
 			lower = lilyOfTheValleyBlock
-		case 7:
+		case 12:
 			lower = dandelionBlock
 		}
 

@@ -390,6 +390,16 @@ func villageClusterKey(center spatial.BlockPos) [2]int {
 	return [2]int{floorDiv(int(center.X), 64), floorDiv(int(center.Z), 64)}
 }
 
+// VillageBedsNear returns the real bed head positions discovered in loaded
+// chunks. Breeding uses this list as a hard population capacity instead of
+// assuming that an adjacent coordinate contains another bed.
+func (w *World) VillageBedsNear(center spatial.BlockPos, radius int32) []spatial.BlockPos {
+	w.villagePOIMu.Lock()
+	defer w.villagePOIMu.Unlock()
+	beds := villagePositionsNearSet(w.villageBeds, center, radius)
+	return beds
+}
+
 func liveVillagersNear(values []*entity.Entity, center spatial.BlockPos, radius int32) int {
 	count := 0
 	radiusSquared := float64(radius * radius)

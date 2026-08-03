@@ -403,7 +403,7 @@ func chooseBiome(height int, temperature, humidity, continental, erosion, peaks 
 		return "minecraft:desert"
 	}
 	// Savanna
-	if temperature > 0.42 && humidity < 0.12 {
+	if temperature > 0.32 && humidity < 0.18 {
 		return "minecraft:savanna"
 	}
 	// Jungle variants

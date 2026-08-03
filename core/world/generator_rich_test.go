@@ -84,3 +84,9 @@ func TestOverworldGeneratorHasCavesAndMajorOres(t *testing.T) {
 		}
 	}
 }
+
+func TestWarmModeratelyDryClimateSelectsSavanna(t *testing.T) {
+	if got := chooseBiome(72, 0.35, 0.1, 0.2, 0, 0); got != "minecraft:savanna" {
+		t.Fatalf("warm dry biome = %q, want savanna", got)
+	}
+}

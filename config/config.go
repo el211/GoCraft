@@ -72,6 +72,13 @@ type ClearLagConfig struct {
 	Remove                  ClearLagTargets `yaml:"remove"`
 }
 
+// WhitelistConfig controls the shared Java/Bedrock player whitelist. Names are
+// compared case-insensitively and persisted to whitelist.json at runtime.
+type WhitelistConfig struct {
+	Enabled bool     `yaml:"enabled"`
+	Players []string `yaml:"players"`
+}
+
 // Config holds all server configuration values.
 type Config struct {
 	// JavaEnabled controls whether the Java Edition TCP listener is started.
@@ -125,6 +132,7 @@ type Config struct {
 	// Operators bootstraps named operators. Runtime /op changes are persisted
 	// separately in ops.json, matching the vanilla server convention.
 	Operators []string
+	Whitelist WhitelistConfig `yaml:"whitelist"`
 
 	// Combat timing and knockback settings.
 	Combat CombatConfig `yaml:"combat"`
@@ -156,6 +164,7 @@ func defaults() *Config {
 		MaxCachedChunks:   256,
 		Difficulty:        "normal",
 		DefaultGameMode:   "survival",
+		Whitelist:         WhitelistConfig{Enabled: false, Players: []string{}},
 		Combat: CombatConfig{
 			AttackCooldown:      false,
 			KnockbackHorizontal: 0.4,
@@ -308,6 +317,7 @@ func (c *Config) validate() error {
 //	GOCRAFT_PREGENERATE_RADIUS Background generation radius (default: 12)
 //	GOCRAFT_MAX_CACHED_CHUNKS Clean chunk cache limit       (default: 768)
 //	GOCRAFT_DIFFICULTY        peaceful/easy/normal/hard    (default: normal)
+//	GOCRAFT_WHITELIST_ENABLED "true"/"false"              (default: false)
 //	GOCRAFT_BEDROCK_ENABLED   "true"/"false"              (default: false)
 //	GOCRAFT_BEDROCK_ADDR      Bedrock UDP address         (default: 0.0.0.0:19106)
 //	GOCRAFT_BEDROCK_ONLINE_MODE Xbox Live auth required   (default: true)
@@ -383,6 +393,13 @@ func (c *Config) ApplyEnvOverrides() error {
 	if v := os.Getenv("GOCRAFT_DIFFICULTY"); v != "" {
 		c.Difficulty = strings.ToLower(strings.TrimSpace(v))
 	}
+	if v := os.Getenv("GOCRAFT_WHITELIST_ENABLED"); v != "" {
+		value, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("GOCRAFT_WHITELIST_ENABLED %q: %w", v, err)
+		}
+		c.Whitelist.Enabled = value
+	}
 	if v := os.Getenv("GOCRAFT_ATTACK_COOLDOWN"); v != "" {
 		value, err := strconv.ParseBool(v)
 		if err != nil {
@@ -445,6 +462,7 @@ func logEnvOverrides(c *Config) {
 		{"GOCRAFT_PREGENERATE_RADIUS", os.Getenv("GOCRAFT_PREGENERATE_RADIUS")},
 		{"GOCRAFT_MAX_CACHED_CHUNKS", os.Getenv("GOCRAFT_MAX_CACHED_CHUNKS")},
 		{"GOCRAFT_DIFFICULTY", os.Getenv("GOCRAFT_DIFFICULTY")},
+		{"GOCRAFT_WHITELIST_ENABLED", os.Getenv("GOCRAFT_WHITELIST_ENABLED")},
 		{"GOCRAFT_ATTACK_COOLDOWN", os.Getenv("GOCRAFT_ATTACK_COOLDOWN")},
 		{"GOCRAFT_KNOCKBACK_HORIZONTAL", os.Getenv("GOCRAFT_KNOCKBACK_HORIZONTAL")},
 		{"GOCRAFT_KNOCKBACK_VERTICAL", os.Getenv("GOCRAFT_KNOCKBACK_VERTICAL")},

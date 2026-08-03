@@ -10,6 +10,9 @@ villagers: true
 difficulty: normal
 default_gamemode: survival
 operators: []
+whitelist:
+    enabled: false
+    players: []
 combat:
     attack_cooldown: false
     knockback_horizontal: 0.4

@@ -155,6 +155,16 @@ func buildCommandsPacket() *protocol.Packet {
 		addLiteral(`tps`, true),
 	)
 
+	whitelistAddName := addArgument("player", parserString, true, stringParser(0))
+	whitelistRemoveName := addArgument("player", parserString, true, stringParser(0))
+	rootChildren = append(rootChildren, addLiteral("whitelist", true,
+		addLiteral("on", true),
+		addLiteral("off", true),
+		addLiteral("list", true),
+		addLiteral("add", false, whitelistAddName),
+		addLiteral("remove", false, whitelistRemoveName),
+	))
+
 	nodes[0].children = rootChildren
 
 	b := protocol.NewBuilder(packetIDCommands).VarInt(int32(len(nodes)))

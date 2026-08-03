@@ -7,6 +7,7 @@ import (
 	"GoCraft/core/player"
 	coreworld "GoCraft/core/world"
 	"GoCraft/java/protocol"
+	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
 )
 
@@ -32,6 +33,26 @@ func TestInteractAttackQueuesDamageForTickThread(t *testing.T) {
 	pending := world.DrainEntityDamage()
 	if got := pending[mob.EntityID]; got.Amount != 1 || !got.HasSource {
 		t.Fatalf("queued damage = %+v, want amount 1 with attacker source", got)
+	}
+}
+
+func TestJavaAttackDamagesExternalBedrockPlayer(t *testing.T) {
+	world := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
+	defer world.Close()
+	attacker := player.New([16]byte{1}, "java", player.ClientEditionJava)
+	target := player.New([16]byte{2}, "bedrock", player.ClientEditionBedrock)
+	attacker.GameMode = player.GameModeSurvival
+	target.GameMode = player.GameModeSurvival
+	attacker.Position.X, target.Position.X = 0, 1
+	manager := session.NewManager()
+	manager.ReplaceExternalPlayers([]*player.Player{target})
+	packet := protocol.NewBuilder(packetIDInteract).VarInt(target.EntityID).VarInt(1).Bool(false).Build()
+	if err := handleInteractPacket(packet, attacker, world, nil, manager); err != nil {
+		t.Fatal(err)
+	}
+	health, _, _, _ := target.HealthSnapshot()
+	if health >= target.MaxHealth {
+		t.Fatalf("Bedrock target health = %v, want Java damage", health)
 	}
 }
 
