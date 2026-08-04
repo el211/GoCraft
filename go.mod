@@ -6,7 +6,7 @@ require (
 	github.com/df-mc/dragonfly v0.11.0
 	github.com/go-gl/mathgl v1.2.0
 	github.com/google/uuid v1.6.0
-	github.com/sandertv/gophertunnel v1.57.1
+	github.com/sandertv/gophertunnel v1.57.2-0.20260722164704-0a2ecd5633ea
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -50,3 +50,5 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.10.0 // indirect
 )
+
+replace github.com/sandertv/gophertunnel => github.com/HashimTheArab/gophertunnel v1.25.3-0.20260804190447-1f617284845c

@@ -2,6 +2,8 @@ package bedrock
 
 import (
 	"encoding/base64"
+	"encoding/hex"
+	"image/color"
 	"math"
 	"strings"
 
@@ -174,9 +176,9 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 		previous, known := viewer.knownPlayers[p.UUID]
 		if !known {
 			entry := playerListEntry(p, bedrockByUUID[p.UUID], p.UUID == viewer.uuid)
+			entry.ActionType = protocol.PlayerListActionAdd
 			_ = viewer.conn.WritePacket(&packet.PlayerList{
-				ActionType: packet.PlayerListActionAdd,
-				Entries:    []protocol.PlayerListEntry{entry},
+				Entries: []protocol.PlayerListEntry{entry},
 			})
 			if p.UUID != viewer.uuid {
 				_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p))
@@ -240,8 +242,10 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 			_ = viewer.conn.WritePacket(&packet.RemoveActor{EntityUniqueID: int64(bedrockRemoteRuntimeID(previous.entityID))})
 		}
 		_ = viewer.conn.WritePacket(&packet.PlayerList{
-			ActionType: packet.PlayerListActionRemove,
-			Entries:    []protocol.PlayerListEntry{{UUID: uuid.UUID(id)}},
+			Entries: []protocol.PlayerListEntry{{
+				ActionType: protocol.PlayerListActionRemove,
+				UUID:       uuid.UUID(id),
+			}},
 		})
 		delete(viewer.knownPlayers, id)
 	}
@@ -831,8 +835,8 @@ func skinFromClientData(data login.ClientData) protocol.Skin {
 		PrimaryUser:               true,
 		CapeID:                    data.CapeID,
 		FullID:                    data.SkinID,
-		SkinColour:                data.SkinColour,
-		ArmSize:                   data.ArmSize,
+		SkinColour:                hexToRGBA(data.SkinColour),
+		ArmSize:                   armSizeToUint8(data.ArmSize),
 		Trusted:                   data.TrustedSkin,
 		OverrideAppearance:        true,
 	}
@@ -851,9 +855,31 @@ func defaultPlayerSkin(id [16]byte) protocol.Skin {
 		SkinData:                  pixels,
 		GeometryDataEngineVersion: []byte(protocol.CurrentVersion),
 		FullID:                    uuid.UUID(id).String(),
-		ArmSize:                   "wide",
-		SkinColour:                "#b37b62",
+		ArmSize:                   protocol.ArmSizeWide,
+		SkinColour:                hexToRGBA("#b37b62"),
 		Trusted:                   true,
 		OverrideAppearance:        true,
 	}
+}
+
+// hexToRGBA converts a hex colour string (e.g. "#b37b62") to color.RGBA.
+func hexToRGBA(s string) color.RGBA {
+	s = strings.TrimPrefix(s, "#")
+	if len(s) < 6 {
+		return color.RGBA{A: 0xff}
+	}
+	b, err := hex.DecodeString(s[:6])
+	if err != nil || len(b) < 3 {
+		return color.RGBA{A: 0xff}
+	}
+	return color.RGBA{R: b[0], G: b[1], B: b[2], A: 0xff}
+}
+
+// armSizeToUint8 converts a login arm-size string ("slim"/"wide") to the
+// protocol constant.
+func armSizeToUint8(s string) uint8 {
+	if s == "slim" {
+		return protocol.ArmSizeSlim
+	}
+	return protocol.ArmSizeWide
 }

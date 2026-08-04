@@ -78,7 +78,7 @@ func (l *Listener) initCreativeContent() {
 		}
 
 		l.creativeGroups = append(l.creativeGroups, protocol.CreativeGroup{
-			Category: group.Category,
+			Category: byte(group.Category),
 			Name:     name,
 			Icon:     icon,
 		})

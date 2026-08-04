@@ -4,7 +4,7 @@
 // the edition-agnostic core simulation through the intent bus.
 //
 // Supported Bedrock protocol: determined by the pinned gophertunnel release.
-//   - gophertunnel v1.57.1 → Bedrock protocol 1001 (Minecraft BE 1.26.30)
+//   - gophertunnel fork (HashimTheArab/gophertunnel@1f617284) → Bedrock protocol 2168 (Minecraft BE 1.26.40)
 //
 // Architecture (sole-writer invariant):
 //
@@ -503,18 +503,24 @@ func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSe
 				PlayerUUID: playerUUID,
 				Position:   position,
 				Rotation:   spatial.Rotation{Yaw: p.Yaw, Pitch: p.Pitch},
-				OnGround:   p.InputData.Load(packet.InputFlagVerticalCollision),
+				OnGround:   inputHasFlag(p.InputData, packet.InputFlagVerticalCollision),
 			})
-			if p.InputData.Load(packet.InputFlagPerformBlockActions) {
-				for _, action := range p.BlockActions {
-					l.handlePlayerBlockAction(playerUUID, action.Action, action.BlockPos, action.Face)
+			if inputHasFlag(p.InputData, packet.InputFlagPerformBlockActions) {
+				if blockActions, ok := p.BlockActions.Value(); ok {
+					for _, action := range blockActions {
+						l.handlePlayerBlockAction(playerUUID, action.Action, action.BlockPos, action.Face)
+					}
 				}
 			}
-			if p.InputData.Load(packet.InputFlagPerformItemInteraction) {
-				l.handleUseItemTransaction(playerUUID, &p.ItemInteractionData)
+			if inputHasFlag(p.InputData, packet.InputFlagPerformItemInteraction) {
+				if itemData, ok := p.ItemInteractionData.Value(); ok {
+					l.handleUseItemTransaction(playerUUID, &itemData)
+				}
 			}
-			if p.InputData.Load(packet.InputFlagPerformItemStackRequest) {
-				l.handleStackRequests(ctx, conn, playerUUID, []protocol.ItemStackRequest{p.ItemStackRequest})
+			if inputHasFlag(p.InputData, packet.InputFlagPerformItemStackRequest) {
+				if sr, ok := p.ItemStackRequest.Value(); ok {
+					l.handleStackRequests(ctx, conn, playerUUID, []protocol.ItemStackRequest{sr})
+				}
 			}
 			l.postInputState(playerUUID, p.InputData)
 
@@ -1378,17 +1384,32 @@ func (l *Listener) broadcastBlockHitSound(position protocol.BlockPos) {
 	}
 }
 
-func (l *Listener) postInputState(playerUUID [16]byte, input protocol.Bitset) {
-	if input.Load(packet.InputFlagStartSprinting) {
+// inputHasFlag reports whether the given flag is present in a PlayerAuthInput
+// InputData optional flag list.
+func inputHasFlag(input protocol.Optional[[]int32], flag int32) bool {
+	flags, ok := input.Value()
+	if !ok {
+		return false
+	}
+	for _, f := range flags {
+		if f == flag {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *Listener) postInputState(playerUUID [16]byte, input protocol.Optional[[]int32]) {
+	if inputHasFlag(input, packet.InputFlagStartSprinting) {
 		l.postPlayerState(playerUUID, intent.PlayerStateSprinting, true)
 	}
-	if input.Load(packet.InputFlagStopSprinting) {
+	if inputHasFlag(input, packet.InputFlagStopSprinting) {
 		l.postPlayerState(playerUUID, intent.PlayerStateSprinting, false)
 	}
-	if input.Load(packet.InputFlagStartFlying) {
+	if inputHasFlag(input, packet.InputFlagStartFlying) {
 		l.postPlayerState(playerUUID, intent.PlayerStateFlying, true)
 	}
-	if input.Load(packet.InputFlagStopFlying) {
+	if inputHasFlag(input, packet.InputFlagStopFlying) {
 		l.postPlayerState(playerUUID, intent.PlayerStateFlying, false)
 	}
 }
