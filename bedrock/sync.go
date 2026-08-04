@@ -499,40 +499,91 @@ func (l *Listener) syncLocalHealth(viewer *bedrockSession, tick uint64) {
 
 func (l *Listener) syncLocalInventory(viewer *bedrockSession) {
 	p := l.game.GetPlayer(viewer.uuid)
-	if p == nil || (viewer.inventorySent && viewer.lastInventory == p.Inventory && viewer.lastHeldSlot == p.HeldSlot) {
+	if p == nil {
 		return
 	}
-	content := make([]protocol.ItemInstance, 36)
-	for slot := 0; slot < 9; slot++ {
-		content[slot] = l.itemInstance(p.Inventory[player.HotbarStart+slot], int32(slot+1))
+	heldItem := p.HeldItem()
+	inventoryChanged := !viewer.inventorySent ||
+		viewer.lastInventory != p.Inventory ||
+		viewer.lastCarriedItem != p.CarriedItem
+	heldChanged := !viewer.inventorySent ||
+		viewer.lastHeldSlot != p.HeldSlot ||
+		viewer.lastHeldItem != heldItem
+	if !inventoryChanged && !heldChanged {
+		return
 	}
-	for slot := 9; slot < 36; slot++ {
-		content[slot] = l.itemInstance(p.Inventory[slot], int32(slot+1))
+
+	viewer.stackMu.Lock()
+	for slot := 0; slot < player.InventorySize; slot++ {
+		stack := p.Inventory[slot]
+		if stack.IsEmpty() {
+			viewer.stackNetworkIDs[slot] = 0
+			continue
+		}
+		previous := viewer.lastInventory[slot]
+		if viewer.stackNetworkIDs[slot] == 0 ||
+			(!previous.IsEmpty() && (previous.ItemID != stack.ItemID || previous.Damage != stack.Damage)) {
+			viewer.stackNetworkIDs[slot] = viewer.allocateStackNetworkID()
+		}
 	}
-	_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDInventory, Content: content})
-	_ = viewer.conn.WritePacket(&packet.InventoryContent{
-		WindowID: protocol.WindowIDArmour,
-		Content: []protocol.ItemInstance{
-			l.itemInstance(p.Inventory[5], 101),
-			l.itemInstance(p.Inventory[6], 102),
-			l.itemInstance(p.Inventory[7], 103),
-			l.itemInstance(p.Inventory[8], 104),
-		},
-	})
-	_ = viewer.conn.WritePacket(&packet.InventoryContent{
-		WindowID: protocol.WindowIDOffHand,
-		Content:  []protocol.ItemInstance{l.itemInstance(p.Inventory[45], 105)},
-	})
-	_ = viewer.conn.WritePacket(&packet.MobEquipment{
-		EntityRuntimeID: bedrockSelfRuntimeID,
-		NewItem:         l.itemInstance(p.HeldItem(), int32(p.HeldSlot+1)),
-		InventorySlot:   byte(p.HeldSlot),
-		HotBarSlot:      byte(p.HeldSlot),
-		WindowID:        protocol.WindowIDInventory,
-	})
+	if p.CarriedItem.IsEmpty() {
+		viewer.cursorStackID = 0
+	} else if viewer.cursorStackID == 0 ||
+		(!viewer.lastCarriedItem.IsEmpty() &&
+			(viewer.lastCarriedItem.ItemID != p.CarriedItem.ItemID || viewer.lastCarriedItem.Damage != p.CarriedItem.Damage)) {
+		viewer.cursorStackID = viewer.allocateStackNetworkID()
+	}
+
+	heldCanonicalSlot := player.HotbarStart + p.HeldSlot
+	var held protocol.ItemInstance
+	if heldChanged {
+		held = l.itemInstance(heldItem, viewer.stackNetworkIDs[heldCanonicalSlot])
+	}
+
+	var content []protocol.ItemInstance
+	var armour []protocol.ItemInstance
+	var offhand []protocol.ItemInstance
+	if inventoryChanged {
+		content = make([]protocol.ItemInstance, 36)
+		for slot := 0; slot < 9; slot++ {
+			canonical := player.HotbarStart + slot
+			content[slot] = l.itemInstance(p.Inventory[canonical], viewer.stackNetworkIDs[canonical])
+		}
+		for slot := 9; slot < 36; slot++ {
+			content[slot] = l.itemInstance(p.Inventory[slot], viewer.stackNetworkIDs[slot])
+		}
+		armour = []protocol.ItemInstance{
+			l.itemInstance(p.Inventory[5], viewer.stackNetworkIDs[5]),
+			l.itemInstance(p.Inventory[6], viewer.stackNetworkIDs[6]),
+			l.itemInstance(p.Inventory[7], viewer.stackNetworkIDs[7]),
+			l.itemInstance(p.Inventory[8], viewer.stackNetworkIDs[8]),
+		}
+		offhand = []protocol.ItemInstance{
+			l.itemInstance(p.Inventory[45], viewer.stackNetworkIDs[45]),
+		}
+	}
+	viewer.stackMu.Unlock()
+
+	if inventoryChanged {
+		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDInventory, Content: content})
+		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDArmour, Content: armour})
+		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDOffHand, Content: offhand})
+	}
+	if heldChanged {
+		_ = viewer.conn.WritePacket(&packet.MobEquipment{
+			EntityRuntimeID: bedrockSelfRuntimeID,
+			NewItem:         held,
+			InventorySlot:   byte(p.HeldSlot),
+			HotBarSlot:      byte(p.HeldSlot),
+			WindowID:        protocol.WindowIDInventory,
+		})
+	}
+
 	viewer.inventorySent = true
 	viewer.lastInventory = p.Inventory
 	viewer.lastHeldSlot = p.HeldSlot
+	viewer.lastHeldItem = heldItem
+	viewer.lastCarriedItem = p.CarriedItem
 }
 
 func (l *Listener) sendPlayerEquipment(viewer *bedrockSession, p *player.Player) {
@@ -572,6 +623,72 @@ func (l *Listener) SendMessage(playerUUID [16]byte, message string) {
 	if viewer != nil {
 		_ = viewer.conn.WritePacket(&packet.Text{TextType: packet.TextTypeSystem, Message: message})
 	}
+}
+
+// OpenContainerBlock sends a ContainerOpen packet to the player for the given
+// block position. Returns true if the block is a supported interactive container,
+// false if it is not (so the caller can fall through to block placement logic).
+func (l *Listener) OpenContainerBlock(playerUUID [16]byte, x, y, z int32, blockName string) bool {
+	containerType, ok := bedrockContainerType(blockName)
+	if !ok {
+		return false
+	}
+	l.sessionsMu.RLock()
+	viewer := l.sessions[playerUUID]
+	l.sessionsMu.RUnlock()
+	if viewer == nil {
+		return false
+	}
+	_ = viewer.conn.WritePacket(&packet.ContainerOpen{
+		WindowID:                1,
+		ContainerType:           containerType,
+		ContainerPosition:       protocol.BlockPos{x, y, z},
+		ContainerEntityUniqueID: -1,
+	})
+	return true
+}
+
+// bedrockContainerType maps a block resource location to the Bedrock protocol
+// container type used in the ContainerOpen packet. Returns false if the block
+// is not an interactive container.
+func bedrockContainerType(blockName string) (byte, bool) {
+	switch blockName {
+	case "minecraft:crafting_table":
+		return protocol.ContainerTypeWorkbench, true
+	case "minecraft:furnace", "minecraft:lit_furnace":
+		return protocol.ContainerTypeFurnace, true
+	case "minecraft:blast_furnace", "minecraft:lit_blast_furnace":
+		return protocol.ContainerTypeBlastFurnace, true
+	case "minecraft:smoker", "minecraft:lit_smoker":
+		return protocol.ContainerTypeSmoker, true
+	case "minecraft:anvil", "minecraft:chipped_anvil", "minecraft:damaged_anvil":
+		return protocol.ContainerTypeAnvil, true
+	case "minecraft:enchanting_table":
+		return protocol.ContainerTypeEnchantment, true
+	case "minecraft:grindstone":
+		return protocol.ContainerTypeGrindstone, true
+	case "minecraft:loom":
+		return protocol.ContainerTypeLoom, true
+	case "minecraft:smithing_table":
+		return protocol.ContainerTypeSmithingTable, true
+	case "minecraft:stonecutter":
+		return protocol.ContainerTypeStonecutter, true
+	case "minecraft:brewing_stand":
+		return protocol.ContainerTypeBrewingStand, true
+	case "minecraft:cartography_table":
+		return protocol.ContainerTypeCartography, true
+	case "minecraft:beacon":
+		return protocol.ContainerTypeBeacon, true
+	case "minecraft:chest", "minecraft:trapped_chest", "minecraft:barrel", "minecraft:ender_chest":
+		return protocol.ContainerTypeContainer, true
+	case "minecraft:hopper":
+		return protocol.ContainerTypeHopper, true
+	case "minecraft:dispenser":
+		return protocol.ContainerTypeDispenser, true
+	case "minecraft:dropper":
+		return protocol.ContainerTypeDropper, true
+	}
+	return 0, false
 }
 
 // BroadcastBlockChange sends one canonical mutation to every Bedrock viewer.

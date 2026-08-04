@@ -2,6 +2,7 @@ package bedrock
 
 import (
 	_ "embed"
+	"fmt"
 	"log/slog"
 
 	dfworld "github.com/df-mc/dragonfly/server/world"
@@ -12,7 +13,7 @@ import (
 //go:embed creative_items.nbt
 var creativeItemsNBT []byte
 
-// creativeNBTItem mirrors the on-disk NBT entry for one creative item.
+// creativeNBTItem mirrors one item entry in Dragonfly's creative_items.nbt.
 type creativeNBTItem struct {
 	Name            string         `nbt:"name"`
 	Meta            int16          `nbt:"meta"`
@@ -21,126 +22,207 @@ type creativeNBTItem struct {
 	GroupIndex      int32          `nbt:"group_index,omitempty"`
 }
 
-// creativeNBTGroup mirrors the on-disk NBT entry for one creative group.
+// creativeNBTGroup mirrors one creative group entry.
 type creativeNBTGroup struct {
 	Category int32           `nbt:"category"`
 	Name     string          `nbt:"name"`
 	Icon     creativeNBTItem `nbt:"icon"`
 }
 
-// creativeKnownItem is a resolved name+meta pair stored in the Listener for
-// reverse-lookups when a player picks an item from the creative menu.
+// creativeKnownItem is the canonical identity associated with a creative
+// network ID. The simulation uses this when a Bedrock player selects an item.
 type creativeKnownItem struct {
 	name string
 	meta int16
 }
 
-// initCreativeContent parses creative_items.nbt (bundled from dragonfly) and
-// populates l.creativeGroups, l.creativeItems, and l.creativeNames.
-// Called once from NewListener; errors are logged and result in an empty catalogue.
+// initCreativeContent loads Dragonfly's bundled vanilla creative catalogue.
+//
+// This intentionally mirrors Dragonfly's behaviour:
+//   - anonymous groups receive stable internal names such as "anon0";
+//   - block entries resolve through BlockByName;
+//   - regular items resolve through ItemByName;
+//   - metadata must match exactly to prevent fallback duplicates;
+//   - raw NBT group indices are preserved without adding one;
+//   - invalid or unavailable entries are skipped.
 func (l *Listener) initCreativeContent() {
 	var root struct {
 		Groups []creativeNBTGroup `nbt:"groups"`
 		Items  []creativeNBTItem  `nbt:"items"`
 	}
 	if err := nbt.Unmarshal(creativeItemsNBT, &root); err != nil {
-		slog.Warn("bedrock: could not parse creative_items.nbt — creative menu will be empty", "err", err)
+		slog.Warn(
+			"bedrock: could not parse creative_items.nbt; creative menu will be empty",
+			"err", err,
+		)
 		return
 	}
 
 	l.creativeGroups = make([]protocol.CreativeGroup, 0, len(root.Groups))
-	for _, g := range root.Groups {
+	for index, group := range root.Groups {
+		name := group.Name
+		if name == "" {
+			name = fmt.Sprintf("anon%d", index)
+		}
+
+		icon, ok := creativeItemStack(group.Icon)
+		if !ok {
+			slog.Debug(
+				"bedrock: creative group icon unavailable",
+				"group_index", index,
+				"group_name", name,
+				"icon", group.Icon.Name,
+				"meta", group.Icon.Meta,
+			)
+			icon = protocol.ItemStack{}
+		}
+
 		l.creativeGroups = append(l.creativeGroups, protocol.CreativeGroup{
-			Category: g.Category,
-			Name:     g.Name,
-			Icon:     nbtItemToStack(g.Icon),
+			Category: group.Category,
+			Name:     name,
+			Icon:     icon,
 		})
 	}
 
 	l.creativeItems = make([]protocol.CreativeItem, 0, len(root.Items))
 	l.creativeNames = make(map[uint32]creativeKnownItem, len(root.Items))
-	networkID := uint32(1)
-	for _, item := range root.Items {
-		stack := nbtItemToStack(item)
-		// Skip items whose Bedrock network IDs could not be resolved.
-		if stack.NetworkID == 0 && stack.BlockRuntimeID == 0 {
+
+	var skipped int
+	for _, entry := range root.Items {
+		if entry.GroupIndex < 0 || entry.GroupIndex >= int32(len(l.creativeGroups)) {
+			slog.Warn(
+				"bedrock: creative item has invalid group index",
+				"name", entry.Name,
+				"meta", entry.Meta,
+				"group_index", entry.GroupIndex,
+				"group_count", len(l.creativeGroups),
+			)
+			skipped++
 			continue
 		}
+
+		stack, ok := creativeItemStack(entry)
+		if !ok {
+			slog.Debug(
+				"bedrock: creative item unavailable",
+				"name", entry.Name,
+				"meta", entry.Meta,
+				"group_index", entry.GroupIndex,
+			)
+			skipped++
+			continue
+		}
+
+		creativeNetworkID := uint32(len(l.creativeItems) + 1)
 		l.creativeItems = append(l.creativeItems, protocol.CreativeItem{
-			CreativeItemNetworkID: networkID,
+			CreativeItemNetworkID: creativeNetworkID,
 			Item:                  stack,
-			GroupIndex:            uint32(item.GroupIndex),
+			GroupIndex:            uint32(entry.GroupIndex),
 		})
-		l.creativeNames[networkID] = creativeKnownItem{name: item.Name, meta: item.Meta}
-		networkID++
+		l.creativeNames[creativeNetworkID] = creativeKnownItem{
+			name: entry.Name,
+			meta: entry.Meta,
+		}
 	}
-	slog.Info("bedrock: creative catalogue ready", "groups", len(l.creativeGroups), "items", len(l.creativeItems))
+
+	slog.Info(
+		"bedrock: creative catalogue ready",
+		"groups", len(l.creativeGroups),
+		"items", len(l.creativeItems),
+		"skipped", skipped,
+	)
 }
 
-// nbtItemToStack converts one creative NBT entry to the protocol.ItemStack the
-// Bedrock client expects inside CreativeContent.
-// It uses dragonfly's item/block registries directly to ensure runtime IDs match.
-func nbtItemToStack(data creativeNBTItem) protocol.ItemStack {
+// creativeItemStack converts one NBT catalogue entry into a protocol stack.
+func creativeItemStack(data creativeNBTItem) (protocol.ItemStack, bool) {
+	if data.Name == "" {
+		return protocol.ItemStack{}, false
+	}
+
+	var (
+		resolvedItem dfworld.Item
+		ok           bool
+		blockRID     int32
+	)
+
 	if len(data.BlockProperties) > 0 {
-		// Block item — resolve via dragonfly's block registry which uses the same
-		// runtime ID table as our encoder.
-		b, ok := dfworld.BlockByName(data.Name, data.BlockProperties)
+		block, found := dfworld.BlockByName(data.Name, data.BlockProperties)
+		if !found {
+			return protocol.ItemStack{}, false
+		}
+
+		resolvedItem, ok = block.(dfworld.Item)
 		if !ok {
-			return protocol.ItemStack{}
+			return protocol.ItemStack{}, false
 		}
-		blockRID := int32(dfworld.BlockRuntimeID(b))
+		blockRID = int32(dfworld.BlockRuntimeID(block))
+	} else {
+		resolvedItem, ok = dfworld.ItemByName(data.Name, data.Meta)
+		if !ok {
+			return protocol.ItemStack{}, false
+		}
 
-		var networkID int32
-		var metaValue int16
-		if it, isItem := b.(dfworld.Item); isItem {
-			rid, meta, ok := dfworld.ItemRuntimeID(it)
-			if ok {
-				networkID = rid
-				metaValue = meta
-			}
-		}
-		return protocol.ItemStack{
-			ItemType: protocol.ItemType{
-				NetworkID:     networkID,
-				MetadataValue: uint32(uint16(metaValue)),
-			},
-			Count:          1,
-			BlockRuntimeID: blockRID,
-			HasNetworkID:   networkID != 0,
+		_, resultingMeta := resolvedItem.EncodeItem()
+		if resultingMeta != data.Meta {
+			return protocol.ItemStack{}, false
 		}
 	}
 
-	// Regular item — use dragonfly's item registry.
-	it, ok := dfworld.ItemByName(data.Name, data.Meta)
+	if decoder, ok := resolvedItem.(dfworld.NBTer); ok && len(data.NBTData) > 0 {
+		decoded := decoder.DecodeNBT(cloneCreativeNBT(data.NBTData))
+		item, valid := decoded.(dfworld.Item)
+		if !valid {
+			return protocol.ItemStack{}, false
+		}
+		resolvedItem = item
+	}
+
+	runtimeID, metadata, ok := dfworld.ItemRuntimeID(resolvedItem)
 	if !ok {
-		return protocol.ItemStack{}
-	}
-	rid, meta, ok := dfworld.ItemRuntimeID(it)
-	if !ok {
-		return protocol.ItemStack{}
+		return protocol.ItemStack{}, false
 	}
 
-	// Attach block runtime ID for items that are also placeable blocks.
-	blockRID := int32(0)
-	if b, ok := it.(dfworld.Block); ok {
-		blockRID = int32(dfworld.BlockRuntimeID(b))
+	if blockRID == 0 {
+		if block, ok := resolvedItem.(dfworld.Block); ok {
+			blockRID = int32(dfworld.BlockRuntimeID(block))
+		}
 	}
 
 	return protocol.ItemStack{
 		ItemType: protocol.ItemType{
-			NetworkID:     rid,
-			MetadataValue: uint32(uint16(meta)),
+			NetworkID:     runtimeID,
+			MetadataValue: uint32(uint16(metadata)),
 		},
 		Count:          1,
+		NBTData:        cloneCreativeNBT(data.NBTData),
 		BlockRuntimeID: blockRID,
 		HasNetworkID:   true,
-	}
+	}, true
 }
 
-// creativePlayerStack returns the player.ItemStack for a creative item by its
-// network ID (assigned in initCreativeContent). Returns false if the ID is
-// unknown.
+func cloneCreativeNBT(source map[string]any) map[string]any {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = value
+	}
+	return out
+}
+
+// creativePlayerStack resolves the creative network ID selected by the client
+// back to the canonical item identity used by GoCraft.
 func (l *Listener) creativePlayerStack(creativeNetID uint32, count int) (creativeKnownItem, bool) {
-	ki, ok := l.creativeNames[creativeNetID]
-	return ki, ok
+	item, ok := l.creativeNames[creativeNetID]
+	return item, ok
+}
+
+// creativeGroupDebugName returns the same stable anonymous-group naming scheme
+// used while building the protocol catalogue.
+func creativeGroupDebugName(index int, name string) string {
+	if name != "" {
+		return name
+	}
+	return fmt.Sprintf("anon%d", index)
 }

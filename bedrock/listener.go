@@ -24,14 +24,15 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"fmt"
-	dfblock "github.com/df-mc/dragonfly/server/block"
-	dfitem "github.com/df-mc/dragonfly/server/item"
-	dfworld "github.com/df-mc/dragonfly/server/world"
-	"github.com/go-gl/mathgl/mgl32"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
+
+	dfblock "github.com/df-mc/dragonfly/server/block"
+	dfitem "github.com/df-mc/dragonfly/server/item"
+	dfworld "github.com/df-mc/dragonfly/server/world"
+	"github.com/go-gl/mathgl/mgl32"
 
 	"github.com/sandertv/gophertunnel/minecraft"
 	"github.com/sandertv/gophertunnel/minecraft/protocol"
@@ -72,31 +73,37 @@ type Listener struct {
 }
 
 type bedrockSession struct {
-	conn          *minecraft.Conn
-	uuid          [16]byte
-	entityID      int32
-	displayName   string
-	xuid          string
-	buildPlatform int32
-	skin          protocol.Skin
-	knownPlayers  map[[16]byte]bedrockPlayerView
-	knownEntities map[int32]bedrockEntityView
-	lastHealth    float32
-	wasDead       bool
-	inventorySent bool
-	lastInventory [player.InventorySize]player.ItemStack
-	lastHeldSlot  int
-	abilitiesSent bool
-	lastGameMode  player.GameMode
-	lastAllowFly  bool
-	lastFlying    bool
-	lastFlySpeed  float32
-	lastWalkSpeed float32
-	lastOperator  bool
-	lastGodMode   bool
-	teleportMu    sync.Mutex
-	teleportPos   *spatial.Vec3
-	invOpened     bool // true while the player's own inventory/creative screen is open
+	conn               *minecraft.Conn
+	uuid               [16]byte
+	entityID           int32
+	displayName        string
+	xuid               string
+	buildPlatform      int32
+	skin               protocol.Skin
+	knownPlayers       map[[16]byte]bedrockPlayerView
+	knownEntities      map[int32]bedrockEntityView
+	lastHealth         float32
+	wasDead            bool
+	inventorySent      bool
+	lastInventory      [player.InventorySize]player.ItemStack
+	lastHeldSlot       int
+	abilitiesSent      bool
+	lastGameMode       player.GameMode
+	lastAllowFly       bool
+	lastFlying         bool
+	lastFlySpeed       float32
+	lastWalkSpeed      float32
+	lastOperator       bool
+	lastGodMode        bool
+	teleportMu         sync.Mutex
+	teleportPos        *spatial.Vec3
+	stackMu            sync.Mutex
+	stackNetworkIDs    [player.InventorySize]int32
+	cursorStackID      int32
+	nextStackNetworkID int32
+	lastCarriedItem    player.ItemStack
+	lastHeldItem       player.ItemStack
+	invOpened          bool // true while the player's own inventory/creative screen is open
 }
 
 func (s *bedrockSession) expectTeleport(position spatial.Vec3) {
@@ -326,16 +333,17 @@ func (l *Listener) handleConn(ctx context.Context, gt *minecraft.Listener, conn 
 		return
 	}
 	bedrockSess := &bedrockSession{
-		conn:          conn,
-		uuid:          playerUUID,
-		entityID:      result.EntityID,
-		displayName:   identity.DisplayName,
-		xuid:          identity.XUID,
-		buildPlatform: int32(conn.ClientData().DeviceOS),
-		skin:          skinFromClientData(conn.ClientData()),
-		knownPlayers:  make(map[[16]byte]bedrockPlayerView),
-		knownEntities: make(map[int32]bedrockEntityView),
-		lastHealth:    -1,
+		conn:               conn,
+		uuid:               playerUUID,
+		entityID:           result.EntityID,
+		displayName:        identity.DisplayName,
+		xuid:               identity.XUID,
+		buildPlatform:      int32(conn.ClientData().DeviceOS),
+		skin:               skinFromClientData(conn.ClientData()),
+		knownPlayers:       make(map[[16]byte]bedrockPlayerView),
+		knownEntities:      make(map[int32]bedrockEntityView),
+		lastHealth:         -1,
+		nextStackNetworkID: 1,
 	}
 	defer l.removeSession(playerUUID)
 	if p := l.game.GetPlayer(playerUUID); p != nil {
@@ -626,101 +634,364 @@ func (l *Listener) acceptBedrockMovement(session *bedrockSession, position spati
 	return !dead && session.acceptMovement(position)
 }
 
-func (l *Listener) handleStackRequests(ctx context.Context, conn *minecraft.Conn, playerUUID [16]byte, requests []protocol.ItemStackRequest) {
+func (l *Listener) handleStackRequests(
+	ctx context.Context,
+	conn *minecraft.Conn,
+	playerUUID [16]byte,
+	requests []protocol.ItemStackRequest,
+) {
 	responses := make([]protocol.ItemStackResponse, 0, len(requests))
+
+	slog.Info(
+		"bedrock: received stack request packet",
+		"requests", len(requests),
+	)
+
 	for _, request := range requests {
-		actions, ok := l.canonicalInventoryActions(request.Actions)
+		slog.Info(
+			"bedrock: processing stack request",
+			"request_id", request.RequestID,
+			"actions", len(request.Actions),
+		)
+
+		for index, action := range request.Actions {
+			slog.Info(
+				"bedrock: stack request action",
+				"request_id", request.RequestID,
+				"index", index,
+				"type", fmt.Sprintf("%T", action),
+				"value", fmt.Sprintf("%+v", action),
+			)
+		}
+
+		response := protocol.ItemStackResponse{
+			Status:    protocol.ItemStackResponseStatusError,
+			RequestID: request.RequestID,
+		}
+
+		actions, valid := l.canonicalInventoryActions(request.Actions)
+		if !valid {
+			slog.Warn(
+				"bedrock: stack request translation failed",
+				"request_id", request.RequestID,
+			)
+			responses = append(responses, response)
+			continue
+		}
+
+		slog.Info(
+			"bedrock: stack request translated",
+			"request_id", request.RequestID,
+			"canonical_actions", len(actions),
+		)
+
+		done := make(chan intent.InventoryResult, 1)
+
+		posted := l.bus.PostInventory(intent.InventoryIntent{
+			PlayerUUID: playerUUID,
+			Actions:    actions,
+			Done:       done,
+		})
+		if !posted {
+			slog.Warn(
+				"bedrock: inventory intent could not be posted",
+				"request_id", request.RequestID,
+			)
+			responses = append(responses, response)
+			continue
+		}
+
+		timer := time.NewTimer(2 * time.Second)
 		accepted := false
-		if ok {
-			done := make(chan intent.InventoryResult, 1)
-			if l.bus.PostInventory(intent.InventoryIntent{PlayerUUID: playerUUID, Actions: actions, Done: done}) {
-				timer := time.NewTimer(2 * time.Second)
-				select {
-				case result := <-done:
-					accepted = result.Accepted
-				case <-timer.C:
-				case <-ctx.Done():
-				}
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
+
+		select {
+		case result := <-done:
+			accepted = result.Accepted
+
+			slog.Info(
+				"bedrock: simulation inventory result",
+				"request_id", request.RequestID,
+				"accepted", accepted,
+			)
+
+		case <-timer.C:
+			slog.Warn(
+				"bedrock: inventory intent timed out",
+				"request_id", request.RequestID,
+			)
+
+		case <-ctx.Done():
+			slog.Warn(
+				"bedrock: inventory request context cancelled",
+				"request_id", request.RequestID,
+			)
+		}
+
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
 		}
-		status := uint8(protocol.ItemStackResponseStatusError)
-		if accepted {
-			status = protocol.ItemStackResponseStatusOK
+
+		if !accepted {
+			p := l.game.GetPlayer(playerUUID)
+
+			if p == nil {
+				slog.Warn(
+					"bedrock: inventory rejected and player missing",
+					"request_id", request.RequestID,
+				)
+			} else {
+				slog.Warn(
+					"bedrock: inventory rejected by simulation",
+					"request_id", request.RequestID,
+					"player", p.Username,
+					"game_mode", p.GameMode,
+					"carried_item", p.CarriedItem,
+				)
+			}
+
+			responses = append(responses, response)
+			continue
 		}
-		responses = append(responses, protocol.ItemStackResponse{Status: status, RequestID: request.RequestID})
+
+		p := l.game.GetPlayer(playerUUID)
+		if p == nil {
+			slog.Warn(
+				"bedrock: accepted inventory request but player missing",
+				"request_id", request.RequestID,
+			)
+			responses = append(responses, response)
+			continue
+		}
+
+		session := l.sessionForPlayer(playerUUID)
+		if session == nil {
+			slog.Warn(
+				"bedrock: accepted inventory request but session missing",
+				"request_id", request.RequestID,
+				"player", p.Username,
+			)
+			responses = append(responses, response)
+			continue
+		}
+
+		l.applyStackNetworkIDChanges(session, p, request.Actions)
+
+		containerInfo := l.stackResponseContainerInfo(
+			session,
+			p,
+			request.Actions,
+		)
+
+		response.Status = protocol.ItemStackResponseStatusOK
+		response.ContainerInfo = containerInfo
+
+		slog.Info(
+			"bedrock: inventory request accepted",
+			"request_id", request.RequestID,
+			"player", p.Username,
+			"game_mode", p.GameMode,
+			"carried_item", p.CarriedItem,
+			"cursor_stack_id", session.cursorStackID,
+			"containers", len(containerInfo),
+		)
+
+		responses = append(responses, response)
 	}
-	if len(responses) != 0 {
-		_ = conn.WritePacket(&packet.ItemStackResponse{Responses: responses})
+
+	if len(responses) == 0 {
+		return
+	}
+
+	slog.Info(
+		"bedrock: sending stack responses",
+		"responses", len(responses),
+	)
+
+	if err := conn.WritePacket(&packet.ItemStackResponse{
+		Responses: responses,
+	}); err != nil {
+		slog.Warn(
+			"bedrock: failed to send stack response",
+			"err", err,
+		)
 	}
 }
 
-func (l *Listener) canonicalInventoryActions(actions []protocol.StackRequestAction) ([]intent.InventoryAction, bool) {
+func (l *Listener) canonicalInventoryActions(
+	actions []protocol.StackRequestAction,
+) ([]intent.InventoryAction, bool) {
 	out := make([]intent.InventoryAction, 0, len(actions))
+	creativeSelected := false
+	creativeCount := creativeRequestCount(actions)
+
 	for _, raw := range actions {
 		switch action := raw.(type) {
 		case *protocol.CraftCreativeStackRequestAction:
-			// Player picked an item from the creative inventory.  Look up the
-			// item by the creative network ID we assigned in CreativeContent and
-			// place a full stack of it in the cursor slot so the subsequent
-			// PlaceStackRequestAction can move it to the desired slot.
-			ki, ok := l.creativePlayerStack(action.CreativeItemNetworkID, 64)
+			ki, ok := l.creativePlayerStack(
+				action.CreativeItemNetworkID,
+				int(action.NumberOfCrafts),
+			)
 			if !ok {
+				slog.Warn(
+					"bedrock: unknown creative item",
+					"creative_network_id", action.CreativeItemNetworkID,
+				)
 				return nil, false
 			}
+
+			count := creativeCount
+			if count < 1 {
+				count = 1
+			}
+			maximum := player.MaxStackSize(ki.name)
+			if maximum > 0 && count > maximum {
+				count = maximum
+			}
+
 			out = append(out, intent.InventoryAction{
 				Kind:        intent.InventoryActionCreativeGive,
 				Destination: intent.InventoryCursorSlot,
-				Count:       64,
-				Item:        player.ItemStack{ItemID: ki.name, Count: 64, Damage: int(ki.meta)},
+				Count:       count,
+				Item: player.ItemStack{
+					ItemID: ki.name,
+					Count:  count,
+					Damage: int(ki.meta),
+				},
 			})
-		case *protocol.TakeStackRequestAction:
-			source, sourceOK := canonicalInventorySlot(action.Source)
-			destination, destinationOK := canonicalInventorySlot(action.Destination)
-			if !sourceOK || !destinationOK {
+			creativeSelected = true
+
+		case *protocol.CraftResultsDeprecatedStackRequestAction:
+			// Client-side preview of the result. The authoritative item was
+			// already resolved using CraftCreativeStackRequestAction.
+			continue
+
+		case *protocol.CreateStackRequestAction:
+			// The creative item is already created in the canonical cursor.
+			if !creativeSelected {
+				slog.Warn("bedrock: create stack action without creative selection")
 				return nil, false
 			}
-			out = append(out, intent.InventoryAction{Kind: intent.InventoryActionMove, Source: source, Destination: destination, Count: int(action.Count)})
+			continue
+
+		case *protocol.TakeStackRequestAction:
+			// Modern Bedrock creative selection sends the temporary created
+			// output (container 60, slot 50) to the cursor (container 59).
+			// CraftCreativeStackRequestAction already created that authoritative
+			// cursor stack, so this virtual transfer must be ignored.
+			if creativeSelected &&
+				action.Source.Container.ContainerID == protocol.ContainerCreatedOutput &&
+				action.Destination.Container.ContainerID == protocol.ContainerCursor {
+				continue
+			}
+
+			source, sourceOK := canonicalInventorySlot(action.Source)
+			destination, destinationOK := canonicalInventorySlot(action.Destination)
+			if !sourceOK || !destinationOK || action.Count == 0 {
+				slog.Warn(
+					"bedrock: invalid take stack slots",
+					"source_container", action.Source.Container.ContainerID,
+					"source_slot", action.Source.Slot,
+					"destination_container", action.Destination.Container.ContainerID,
+					"destination_slot", action.Destination.Slot,
+				)
+				return nil, false
+			}
+
+			out = append(out, intent.InventoryAction{
+				Kind:        intent.InventoryActionMove,
+				Source:      source,
+				Destination: destination,
+				Count:       int(action.Count),
+			})
+
 		case *protocol.PlaceStackRequestAction:
 			source, sourceOK := canonicalInventorySlot(action.Source)
 			destination, destinationOK := canonicalInventorySlot(action.Destination)
-			if !sourceOK || !destinationOK {
+			if !sourceOK || !destinationOK || action.Count == 0 {
 				return nil, false
 			}
-			out = append(out, intent.InventoryAction{Kind: intent.InventoryActionMove, Source: source, Destination: destination, Count: int(action.Count)})
+			out = append(out, intent.InventoryAction{
+				Kind:        intent.InventoryActionMove,
+				Source:      source,
+				Destination: destination,
+				Count:       int(action.Count),
+			})
+
 		case *protocol.SwapStackRequestAction:
 			source, sourceOK := canonicalInventorySlot(action.Source)
 			destination, destinationOK := canonicalInventorySlot(action.Destination)
-			if !sourceOK || !destinationOK {
+			if !sourceOK || !destinationOK || source == destination {
 				return nil, false
 			}
-			out = append(out, intent.InventoryAction{Kind: intent.InventoryActionSwap, Source: source, Destination: destination})
+			out = append(out, intent.InventoryAction{
+				Kind:        intent.InventoryActionSwap,
+				Source:      source,
+				Destination: destination,
+			})
+
 		case *protocol.DropStackRequestAction:
 			source, sourceOK := canonicalInventorySlot(action.Source)
-			if !sourceOK {
+			if !sourceOK || action.Count == 0 {
 				return nil, false
 			}
-			out = append(out, intent.InventoryAction{Kind: intent.InventoryActionDrop, Source: source, Count: int(action.Count)})
+			out = append(out, intent.InventoryAction{
+				Kind:   intent.InventoryActionDrop,
+				Source: source,
+				Count:  int(action.Count),
+			})
+
 		case *protocol.DestroyStackRequestAction:
 			source, sourceOK := canonicalInventorySlot(action.Source)
-			if !sourceOK {
+			if !sourceOK || action.Count == 0 {
 				return nil, false
 			}
-			out = append(out, intent.InventoryAction{Kind: intent.InventoryActionDestroy, Source: source, Count: int(action.Count)})
+			out = append(out, intent.InventoryAction{
+				Kind:   intent.InventoryActionDestroy,
+				Source: source,
+				Count:  int(action.Count),
+			})
+
 		case *protocol.ConsumeStackRequestAction:
-			// Consumption accompanies another authoritative action and carries no
-			// independent slot destination for this inventory implementation.
 			continue
+
 		default:
-			return nil, false
+			// Skip client-side prediction actions we don't need to handle
+			// (e.g. CraftRecipeStackRequestAction, AutoCraftRecipeStackRequestAction).
+			// Returning false here would reject the entire request and break
+			// operations like Q-drop when the client bundles extra actions.
+			slog.Debug(
+				"bedrock: skipping unsupported stack request action",
+				"type", fmt.Sprintf("%T", raw),
+			)
+			continue
 		}
 	}
-	return out, len(out) != 0
+
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+func creativeRequestCount(actions []protocol.StackRequestAction) int {
+	for _, raw := range actions {
+		switch action := raw.(type) {
+		case *protocol.TakeStackRequestAction:
+			if action.Source.Container.ContainerID == protocol.ContainerCreatedOutput &&
+				action.Destination.Container.ContainerID == protocol.ContainerCursor &&
+				action.Count > 0 {
+				return int(action.Count)
+			}
+		case *protocol.CraftResultsDeprecatedStackRequestAction:
+			if len(action.ResultItems) > 0 && action.ResultItems[0].Count > 0 {
+				return int(action.ResultItems[0].Count)
+			}
+		}
+	}
+	return 1
 }
 
 func canonicalInventorySlot(slot protocol.StackRequestSlotInfo) (int16, bool) {
@@ -748,6 +1019,244 @@ func canonicalInventorySlot(slot protocol.StackRequestSlotInfo) (int16, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func (s *bedrockSession) allocateStackNetworkID() int32 {
+	if s.nextStackNetworkID <= 0 {
+		s.nextStackNetworkID = 1
+	}
+	id := s.nextStackNetworkID
+	s.nextStackNetworkID++
+	if s.nextStackNetworkID <= 0 {
+		s.nextStackNetworkID = 1
+	}
+	return id
+}
+
+func (s *bedrockSession) stackNetworkIDAt(slot int16) int32 {
+	if slot == intent.InventoryCursorSlot {
+		return s.cursorStackID
+	}
+	if slot < 0 || int(slot) >= len(s.stackNetworkIDs) {
+		return 0
+	}
+	return s.stackNetworkIDs[slot]
+}
+
+func (s *bedrockSession) setStackNetworkID(slot int16, id int32) {
+	if slot == intent.InventoryCursorSlot {
+		s.cursorStackID = id
+		return
+	}
+	if slot < 0 || int(slot) >= len(s.stackNetworkIDs) {
+		return
+	}
+	s.stackNetworkIDs[slot] = id
+}
+
+func (l *Listener) sessionForPlayer(playerUUID [16]byte) *bedrockSession {
+	l.sessionsMu.RLock()
+	session := l.sessions[playerUUID]
+	l.sessionsMu.RUnlock()
+	return session
+}
+
+func (l *Listener) applyStackNetworkIDChanges(session *bedrockSession, p *player.Player, actions []protocol.StackRequestAction) {
+	if session == nil || p == nil {
+		return
+	}
+
+	session.stackMu.Lock()
+	defer session.stackMu.Unlock()
+
+	for _, raw := range actions {
+		switch action := raw.(type) {
+		case *protocol.CraftCreativeStackRequestAction:
+			session.cursorStackID = session.allocateStackNetworkID()
+
+		case *protocol.CreateStackRequestAction, *protocol.CraftResultsDeprecatedStackRequestAction:
+			continue
+
+		case *protocol.TakeStackRequestAction:
+			l.transferStackNetworkID(session, p, action.Source, action.Destination)
+
+		case *protocol.PlaceStackRequestAction:
+			l.transferStackNetworkID(session, p, action.Source, action.Destination)
+
+		case *protocol.SwapStackRequestAction:
+			source, sourceOK := canonicalInventorySlot(action.Source)
+			destination, destinationOK := canonicalInventorySlot(action.Destination)
+			if !sourceOK || !destinationOK {
+				continue
+			}
+			sourceID := session.stackNetworkIDAt(source)
+			destinationID := session.stackNetworkIDAt(destination)
+			if sourceID == 0 && action.Source.StackNetworkID > 0 {
+				sourceID = action.Source.StackNetworkID
+			}
+			if destinationID == 0 && action.Destination.StackNetworkID > 0 {
+				destinationID = action.Destination.StackNetworkID
+			}
+			session.setStackNetworkID(source, destinationID)
+			session.setStackNetworkID(destination, sourceID)
+
+		case *protocol.DropStackRequestAction:
+			source, ok := canonicalInventorySlot(action.Source)
+			if ok && canonicalStackAt(p, source).IsEmpty() {
+				session.setStackNetworkID(source, 0)
+			}
+
+		case *protocol.DestroyStackRequestAction:
+			source, ok := canonicalInventorySlot(action.Source)
+			if ok && canonicalStackAt(p, source).IsEmpty() {
+				session.setStackNetworkID(source, 0)
+			}
+		}
+	}
+}
+
+func (l *Listener) transferStackNetworkID(session *bedrockSession, p *player.Player, sourceInfo, destinationInfo protocol.StackRequestSlotInfo) {
+	source, sourceOK := canonicalInventorySlot(sourceInfo)
+	destination, destinationOK := canonicalInventorySlot(destinationInfo)
+	if !sourceOK || !destinationOK {
+		return
+	}
+
+	sourceID := session.stackNetworkIDAt(source)
+	destinationID := session.stackNetworkIDAt(destination)
+	if sourceID == 0 && sourceInfo.StackNetworkID > 0 {
+		sourceID = sourceInfo.StackNetworkID
+	}
+	if destinationID == 0 && destinationInfo.StackNetworkID > 0 {
+		destinationID = destinationInfo.StackNetworkID
+	}
+
+	sourceStack := canonicalStackAt(p, source)
+	destinationStack := canonicalStackAt(p, destination)
+
+	if destinationStack.IsEmpty() {
+		session.setStackNetworkID(destination, 0)
+	} else if destinationID > 0 {
+		session.setStackNetworkID(destination, destinationID)
+	} else if sourceID > 0 && sourceStack.IsEmpty() {
+		session.setStackNetworkID(destination, sourceID)
+	} else {
+		session.setStackNetworkID(destination, session.allocateStackNetworkID())
+	}
+
+	if sourceStack.IsEmpty() {
+		session.setStackNetworkID(source, 0)
+	} else if sourceID > 0 {
+		session.setStackNetworkID(source, sourceID)
+	} else {
+		session.setStackNetworkID(source, session.allocateStackNetworkID())
+	}
+}
+
+func (l *Listener) stackResponseContainerInfo(session *bedrockSession, p *player.Player, actions []protocol.StackRequestAction) []protocol.StackResponseContainerInfo {
+	if session == nil || p == nil {
+		return nil
+	}
+
+	type containerKey struct {
+		id      byte
+		dynamic string
+	}
+	type changedSlot struct {
+		container protocol.FullContainerName
+		slot      byte
+	}
+
+	changed := make([]changedSlot, 0, len(actions)*2+1)
+	seen := make(map[string]struct{}, len(actions)*2+1)
+	add := func(slot protocol.StackRequestSlotInfo) {
+		if _, ok := canonicalInventorySlot(slot); !ok {
+			return
+		}
+		key := fmt.Sprintf("%d:%v:%d", slot.Container.ContainerID, slot.Container.DynamicContainerID, slot.Slot)
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		changed = append(changed, changedSlot{container: slot.Container, slot: slot.Slot})
+	}
+
+	for _, raw := range actions {
+		switch action := raw.(type) {
+		case *protocol.CraftCreativeStackRequestAction:
+			add(protocol.StackRequestSlotInfo{Container: protocol.FullContainerName{ContainerID: protocol.ContainerCursor}, Slot: 0})
+		case *protocol.TakeStackRequestAction:
+			if action.Source.Container.ContainerID == protocol.ContainerCreatedOutput &&
+				action.Destination.Container.ContainerID == protocol.ContainerCursor {
+				add(action.Destination)
+				continue
+			}
+
+			add(action.Source)
+			add(action.Destination)
+		case *protocol.PlaceStackRequestAction:
+			add(action.Source)
+			add(action.Destination)
+		case *protocol.SwapStackRequestAction:
+			add(action.Source)
+			add(action.Destination)
+		case *protocol.DropStackRequestAction:
+			add(action.Source)
+		case *protocol.DestroyStackRequestAction:
+			add(action.Source)
+		}
+	}
+
+	session.stackMu.Lock()
+	defer session.stackMu.Unlock()
+
+	groups := make([]protocol.StackResponseContainerInfo, 0, len(changed))
+	indices := make(map[containerKey]int, len(changed))
+	for _, entry := range changed {
+		canonical, ok := canonicalInventorySlot(protocol.StackRequestSlotInfo{Container: entry.container, Slot: entry.slot})
+		if !ok {
+			continue
+		}
+
+		stack := canonicalStackAt(p, canonical)
+		stackID := session.stackNetworkIDAt(canonical)
+		if stack.IsEmpty() {
+			stackID = 0
+			session.setStackNetworkID(canonical, 0)
+		} else if stackID == 0 {
+			stackID = session.allocateStackNetworkID()
+			session.setStackNetworkID(canonical, stackID)
+		}
+
+		key := containerKey{id: entry.container.ContainerID, dynamic: fmt.Sprint(entry.container.DynamicContainerID)}
+		index, exists := indices[key]
+		if !exists {
+			index = len(groups)
+			indices[key] = index
+			groups = append(groups, protocol.StackResponseContainerInfo{Container: entry.container})
+		}
+		groups[index].SlotInfo = append(groups[index].SlotInfo, protocol.StackResponseSlotInfo{
+			Slot:                 entry.slot,
+			HotbarSlot:           entry.slot,
+			Count:                byte(min(max(stack.Count, 0), 255)),
+			StackNetworkID:       stackID,
+			DurabilityCorrection: int32(max(stack.Damage, 0)),
+		})
+	}
+	return groups
+}
+
+func canonicalStackAt(p *player.Player, slot int16) player.ItemStack {
+	if p == nil {
+		return player.ItemStack{}
+	}
+	if slot == intent.InventoryCursorSlot {
+		return p.CarriedItem
+	}
+	if slot < 0 || int(slot) >= len(p.Inventory) {
+		return player.ItemStack{}
+	}
+	return p.Inventory[slot]
 }
 
 func (l *Listener) handlePlayerBlockAction(playerUUID [16]byte, action int32, position protocol.BlockPos, face int32) {

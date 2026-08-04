@@ -938,6 +938,11 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 	case intent.BlockActionUse:
 		held := p.HeldItem()
 		clicked := s.world.GetBlock(x, y, z)
+		if s.bedrockListener != nil {
+			if s.bedrockListener.OpenContainerBlock(p.UUID, int32(x), int32(y), int32(z), clicked.ResourceLocation()) {
+				return
+			}
+		}
 		if strings.HasSuffix(clicked.ResourceLocation(), "_bed") {
 			p.SpawnPoint = spatial.BlockPos{X: int32(x), Y: int32(y), Z: int32(z)}
 			p.HasSpawnPoint = true
