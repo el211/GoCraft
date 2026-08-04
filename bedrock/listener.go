@@ -460,6 +460,7 @@ func (l *Listener) playLoop(ctx context.Context, conn *minecraft.Conn, bedrockSe
 	for {
 		pk, err := conn.ReadPacket()
 		if err != nil {
+			slog.Warn("bedrock: play loop ended", "displayName", displayName, "err", err)
 			return
 		}
 
