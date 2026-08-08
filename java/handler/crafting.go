@@ -751,6 +751,19 @@ func findCraftingResult(grid [9]player.ItemStack) player.ItemStack {
 	return player.ItemStack{}
 }
 
+// FindPersonalCraftingResult resolves every vanilla shaped or shapeless recipe
+// that fits the 2x2 crafting grid in the player's inventory. The recipe data
+// and tag matching are shared with Java Edition, so wood variants, dyes and
+// other tag-based recipes produce their corresponding vanilla result.
+func FindPersonalCraftingResult(grid [4]player.ItemStack) player.ItemStack {
+	var tableGrid [9]player.ItemStack
+	tableGrid[0] = grid[0]
+	tableGrid[1] = grid[1]
+	tableGrid[3] = grid[2]
+	tableGrid[4] = grid[3]
+	return findCraftingResult(tableGrid)
+}
+
 func shapedGridMatches(recipe recipeDisplay, grid [9]player.ItemStack) bool {
 	for offsetY := int32(0); offsetY <= 3-recipe.height; offsetY++ {
 		for offsetX := int32(0); offsetX <= 3-recipe.width; offsetX++ {

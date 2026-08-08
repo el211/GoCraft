@@ -118,6 +118,13 @@ type BlockInteractIntent struct {
 	HotbarSlot int32
 }
 
+// ConsumeFoodIntent requests consumption of the currently selected Bedrock
+// hotbar item after the client completes its use-item animation.
+type ConsumeFoodIntent struct {
+	PlayerUUID [16]byte
+	HotbarSlot int32
+}
+
 const (
 	BlockActionBreak uint8 = iota + 1
 	BlockActionUse
@@ -197,6 +204,7 @@ func (DisconnectIntent) isLifecycle()    {}
 func (ChatIntent) isGameplay()           {}
 func (TeleportIntent) isGameplay()       {}
 func (BlockInteractIntent) isGameplay()  {}
+func (ConsumeFoodIntent) isGameplay()    {}
 func (EntityInteractIntent) isGameplay() {}
 func (RespawnIntent) isGameplay()        {}
 func (WakeIntent) isGameplay()           {}
@@ -286,6 +294,7 @@ func (b *Bus) PostTeleport(i TeleportIntent) bool {
 }
 
 func (b *Bus) PostBlockInteract(i BlockInteractIntent) bool   { return b.tryGameplay(i) }
+func (b *Bus) PostConsumeFood(i ConsumeFoodIntent) bool       { return b.tryGameplay(i) }
 func (b *Bus) PostEntityInteract(i EntityInteractIntent) bool { return b.tryGameplay(i) }
 func (b *Bus) PostRespawn(i RespawnIntent) bool               { return b.tryGameplay(i) }
 func (b *Bus) PostWake(i WakeIntent) bool                     { return b.tryGameplay(i) }

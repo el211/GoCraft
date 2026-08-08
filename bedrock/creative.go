@@ -46,6 +46,9 @@ type creativeKnownItem struct {
 //   - raw NBT group indices are preserved without adding one;
 //   - invalid or unavailable entries are skipped.
 func (l *Listener) initCreativeContent() {
+	// Item stacks that represent blocks need the registry's stable network
+	// hashes. Finalize is idempotent and makes this initializer safe on its own.
+	dfworld.DefaultBlockRegistry.Finalize()
 	var root struct {
 		Groups []creativeNBTGroup `nbt:"groups"`
 		Items  []creativeNBTItem  `nbt:"items"`
@@ -155,7 +158,7 @@ func creativeItemStack(data creativeNBTItem) (protocol.ItemStack, bool) {
 		if !ok {
 			return protocol.ItemStack{}, false
 		}
-		blockRID = int32(dfworld.BlockRuntimeID(block))
+		blockRID = creativeBlockNetworkID(block)
 	} else {
 		resolvedItem, ok = dfworld.ItemByName(data.Name, data.Meta)
 		if !ok {
@@ -184,7 +187,7 @@ func creativeItemStack(data creativeNBTItem) (protocol.ItemStack, bool) {
 
 	if blockRID == 0 {
 		if block, ok := resolvedItem.(dfworld.Block); ok {
-			blockRID = int32(dfworld.BlockRuntimeID(block))
+			blockRID = creativeBlockNetworkID(block)
 		}
 	}
 
@@ -196,8 +199,16 @@ func creativeItemStack(data creativeNBTItem) (protocol.ItemStack, bool) {
 		Count:          1,
 		NBTData:        cloneCreativeNBT(data.NBTData),
 		BlockRuntimeID: blockRID,
-		HasNetworkID:   true,
 	}, true
+}
+
+func creativeBlockNetworkID(block dfworld.Block) int32 {
+	runtimeID := dfworld.BlockRuntimeID(block)
+	networkID, ok := dfworld.DefaultBlockRegistry.RuntimeIDToHash(runtimeID)
+	if !ok {
+		return 0
+	}
+	return int32(networkID)
 }
 
 func cloneCreativeNBT(source map[string]any) map[string]any {

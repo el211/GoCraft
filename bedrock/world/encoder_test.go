@@ -1,13 +1,14 @@
 package world
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 
 	coreworld "GoCraft/core/world"
+	dfworld "github.com/df-mc/dragonfly/server/world"
+	"github.com/sandertv/gophertunnel/minecraft/protocol"
 )
-
-import dfworld "github.com/df-mc/dragonfly/server/world"
 
 func TestCanonicalSubChunkUsesVersionNineAndAbsoluteY(t *testing.T) {
 	section := coreworld.NewSection()
@@ -23,8 +24,8 @@ func TestCanonicalSubChunkUsesVersionNineAndAbsoluteY(t *testing.T) {
 	if payload[0] != 9 || payload[1] != 1 || int8(payload[2]) != -3 {
 		t.Fatalf("header = [%d %d %d], want [9 1 -3]", payload[0], payload[1], int8(payload[2]))
 	}
-	if payload[3]&1 == 0 {
-		t.Fatal("block palette is not marked as a network palette")
+	if payload[3]&1 != 0 {
+		t.Fatal("sub-chunk response palette is not marked as persistent")
 	}
 }
 
@@ -44,6 +45,24 @@ func TestKnownBlocksResolveToDifferentNetworkHashes(t *testing.T) {
 	stone := encoder.BlockNetworkID(coreworld.Block{Namespace: "minecraft", Name: "stone"})
 	if air == stone {
 		t.Fatalf("air and stone resolved to the same network ID %d", air)
+	}
+}
+
+func TestFullChunkAirPaletteUsesNetworkHash(t *testing.T) {
+	encoder := NewEncoder()
+	payload, err := encoder.EncodeFullChunkPayload(nil)
+	if err != nil {
+		t.Fatalf("EncodeFullChunkPayload: %v", err)
+	}
+	if len(payload) < 5 || payload[0] != 9 || payload[3]&1 == 0 {
+		t.Fatalf("first sub-chunk header = %v, want V9 network palette", payload[:min(len(payload), 4)])
+	}
+	var networkID int32
+	if err := protocol.Varint32(bytes.NewBuffer(payload[4:]), &networkID); err != nil {
+		t.Fatalf("decode air network hash: %v", err)
+	}
+	if got, want := uint32(networkID), encoder.BlockNetworkID(coreworld.Air); got != want {
+		t.Fatalf("air network ID = %d, want stable hash %d", got, want)
 	}
 }
 
@@ -79,18 +98,32 @@ func packedPaletteIndex(words []byte, index, bits int) uint32 {
 	return (word >> bitOffset) & (1<<bits - 1)
 }
 
-func TestBlockNetworkIDsBelongToAdvertisedPalette(t *testing.T) {
+func TestBlockNetworkIDsUseStableRegistryHashes(t *testing.T) {
 	encoder := NewEncoder()
 	air := encoder.BlockNetworkID(coreworld.Air)
 	stone := encoder.BlockNetworkID(coreworld.Block{Namespace: `minecraft`, Name: `stone`})
 	registry := dfworld.DefaultBlockRegistry
 	registry.Finalize()
-	airName, _, ok := registry.RuntimeIDToState(air)
-	if !ok || airName != `minecraft:air` {
-		t.Fatalf(`air runtime ID %d maps to %q, ok=%v`, air, airName, ok)
+
+	var airRuntimeID, stoneRuntimeID uint32
+	for rid := uint32(0); rid < uint32(registry.BlockCount()); rid++ {
+		name, _, ok := registry.RuntimeIDToState(rid)
+		if !ok {
+			continue
+		}
+		switch name {
+		case `minecraft:air`:
+			airRuntimeID = rid
+		case `minecraft:stone`:
+			stoneRuntimeID = rid
+		}
 	}
-	stoneName, _, ok := registry.RuntimeIDToState(stone)
-	if !ok || stoneName != `minecraft:stone` {
-		t.Fatalf(`stone runtime ID %d maps to %q, ok=%v`, stone, stoneName, ok)
+	wantAir, ok := registry.RuntimeIDToHash(airRuntimeID)
+	if !ok || air != wantAir {
+		t.Fatalf(`air network ID = %d, want registry hash %d`, air, wantAir)
+	}
+	wantStone, ok := registry.RuntimeIDToHash(stoneRuntimeID)
+	if !ok || stone != wantStone {
+		t.Fatalf(`stone network ID = %d, want registry hash %d`, stone, wantStone)
 	}
 }

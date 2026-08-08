@@ -591,6 +591,7 @@ func (s *Server) safeTick() {
 	}()
 	s.tickIntents()
 	s.tickEntities()
+	s.tickBedrockHunger()
 	if s.bedrockListener != nil {
 		s.bedrockListener.Sync(uint64(s.worldAge))
 		s.syncBedrockPlayersToJava()
@@ -601,6 +602,30 @@ func (s *Server) safeTick() {
 		}
 		s.saveWorldAge()
 	}
+}
+
+// tickBedrockHunger applies the survival consequences of the Bedrock hunger
+// attributes. Movement exhaustion is accumulated in applyMove; this periodic
+// pass handles natural regeneration and starvation.
+func (s *Server) tickBedrockHunger() {
+	if s.worldAge%80 != 0 {
+		return
+	}
+	s.game.OnlinePlayers(func(p *player.Player) {
+		if p.Edition != player.ClientEditionBedrock || p.GameMode != player.GameModeSurvival || p.Dead {
+			return
+		}
+		health, food, _, _ := p.HealthSnapshot()
+		if food >= 18 && health < p.MaxHealth {
+			if p.Heal(1) {
+				p.AddExhaustion(6)
+			}
+			return
+		}
+		if food == 0 {
+			handler.DamagePlayer(&session.Session{Player: p}, 1, "starved to death", s.sessions)
+		}
+	})
 }
 
 // tickIntents drains the intent bus and applies each intent to world/player state.
@@ -627,6 +652,8 @@ func (s *Server) tickIntents() {
 			s.applyChat(i)
 		case intent.BlockInteractIntent:
 			s.applyBedrockBlockInteract(i)
+		case intent.ConsumeFoodIntent:
+			s.applyBedrockConsumeFood(i)
 		case intent.EntityInteractIntent:
 			s.applyBedrockEntityInteract(i)
 		case intent.RespawnIntent:
@@ -686,7 +713,7 @@ func (s *Server) applyJoin(i intent.JoinIntent) {
 	p.OnDeath = s.dropPlayerInventory
 	p.Position = spatial.Vec3{
 		X: float64(s.spawnX) + 0.5,
-		Y: float64(s.world.SurfaceY(s.spawnX, s.spawnZ) + 1),
+		Y: float64(s.safeSpawnY(s.spawnX, s.spawnZ)),
 		Z: float64(s.spawnZ) + 0.5,
 	}
 	p.WorldSpawn = p.Position
@@ -709,6 +736,21 @@ func (s *Server) applyJoin(i intent.JoinIntent) {
 	}
 }
 
+// safeSpawnY returns the Y coordinate where a player should spawn at (x, z).
+// It starts at the highest non-air block, then scans upward past fluid blocks
+// (water, lava) so the player is not placed inside a liquid column.
+func (s *Server) safeSpawnY(x, z int) int {
+	y := s.world.SurfaceY(x, z) + 1
+	for y <= coreworld.WorldMaxY {
+		loc := s.world.GetBlock(x, y, z).ResourceLocation()
+		if loc != "minecraft:water" && loc != "minecraft:lava" {
+			break
+		}
+		y++
+	}
+	return y
+}
+
 // applyDisconnect removes a player from the game core and logs the event.
 func (s *Server) applyDisconnect(i intent.DisconnectIntent) {
 	s.game.RemovePlayer(i.PlayerUUID)
@@ -729,7 +771,7 @@ func (s *Server) applyMove(m intent.MoveIntent) {
 	if dead {
 		return // death-camera movement must not move the canonical player entity
 	}
-	previousY, previousOnGround := p.Position.Y, p.OnGround
+	previousPosition, previousY, previousOnGround := p.Position, p.Position.Y, p.OnGround
 	p.Position = m.Position
 	p.Rotation = m.Rotation
 	p.OnGround = m.OnGround
@@ -741,7 +783,35 @@ func (s *Server) applyMove(m intent.MoveIntent) {
 		}
 	}
 	if p.Edition == player.ClientEditionBedrock {
+		if p.Sprinting && !p.Flying && p.GameMode == player.GameModeSurvival {
+			distance := math.Hypot(p.Position.X-previousPosition.X, p.Position.Z-previousPosition.Z)
+			// Reject teleport-sized deltas: teleports are not physical exertion.
+			if distance <= 10 {
+				p.AddExhaustion(float32(distance * 0.1))
+			}
+		}
 		s.applyBedrockMovementDamage(p, previousY, previousOnGround)
+	}
+}
+
+func (s *Server) applyBedrockConsumeFood(i intent.ConsumeFoodIntent) {
+	p := s.game.GetPlayer(i.PlayerUUID)
+	if p == nil || p.Edition != player.ClientEditionBedrock || p.GameMode != player.GameModeSurvival {
+		return
+	}
+	if i.HotbarSlot < 0 || i.HotbarSlot >= 9 {
+		return
+	}
+	p.HeldSlot = int(i.HotbarSlot)
+	slot := player.HotbarStart + p.HeldSlot
+	stack := p.Inventory[slot]
+	nutrition, saturation, ok := player.FoodValue(stack.ItemID)
+	if !ok || stack.IsEmpty() || !p.ConsumeFood(nutrition, saturation) {
+		return
+	}
+	p.Inventory[slot].Count--
+	if p.Inventory[slot].Count <= 0 {
+		p.Inventory[slot] = player.ItemStack{}
 	}
 }
 
@@ -1122,6 +1192,7 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 	}
 	inventory := p.Inventory
 	carried := p.CarriedItem
+	updateBedrockPersonalCrafting(&inventory)
 	drops := make([]player.ItemStack, 0)
 	get := func(slot int16) (player.ItemStack, bool) {
 		if slot == intent.InventoryCursorSlot {
@@ -1167,7 +1238,12 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 		}
 		switch action.Kind {
 		case intent.InventoryActionMove:
-			if action.Count <= 0 || action.Count > source.Count || action.Source == action.Destination {
+			if action.Count <= 0 || action.Count > source.Count || action.Source == action.Destination || action.Destination == 0 {
+				return
+			}
+			if action.Source == 0 && action.Count != source.Count {
+				// Crafting outputs are indivisible: One result stack consumes one
+				// item from every occupied ingredient slot.
 				return
 			}
 			destination, ok := get(action.Destination)
@@ -1189,6 +1265,9 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 			source.Count -= action.Count
 			if !set(action.Source, source) {
 				return
+			}
+			if action.Source == 0 {
+				consumeBedrockPersonalCrafting(&inventory)
 			}
 
 		case intent.InventoryActionSwap:
@@ -1220,6 +1299,7 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 			return
 		}
 	}
+	updateBedrockPersonalCrafting(&inventory)
 	p.Inventory = inventory
 	p.CarriedItem = carried
 	for index, stack := range drops {
@@ -1230,7 +1310,36 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 	accepted = true
 }
 
+func updateBedrockPersonalCrafting(inventory *[player.InventorySize]player.ItemStack) {
+	if inventory == nil {
+		return
+	}
+	grid := [4]player.ItemStack{
+		inventory[1], inventory[2], inventory[3], inventory[4],
+	}
+	inventory[0] = handler.FindPersonalCraftingResult(grid)
+}
+
+func consumeBedrockPersonalCrafting(inventory *[player.InventorySize]player.ItemStack) {
+	if inventory == nil {
+		return
+	}
+	for slot := 1; slot <= 4; slot++ {
+		if inventory[slot].IsEmpty() {
+			continue
+		}
+		inventory[slot].Count--
+		if inventory[slot].Count <= 0 {
+			inventory[slot] = player.ItemStack{}
+		}
+	}
+	updateBedrockPersonalCrafting(inventory)
+}
+
 func canPlaceCanonicalInventorySlot(slot int, stack player.ItemStack) bool {
+	if slot == 0 && !stack.IsEmpty() {
+		return false
+	}
 	if stack.IsEmpty() || slot < 5 || slot > 8 {
 		return true
 	}

@@ -7,6 +7,8 @@ import (
 	"math"
 	"strings"
 
+	"github.com/sandertv/gophertunnel/minecraft/nbt"
+
 	corentity "GoCraft/core/entity"
 	"GoCraft/core/player"
 	"GoCraft/core/spatial"
@@ -66,14 +68,38 @@ func (l *Listener) Sync(tick uint64) {
 		l.syncPlayers(viewer, players, bedrockByUUID, tick)
 		l.syncEntities(viewer, entities, tick)
 		l.syncLocalHealth(viewer, tick)
+		l.syncLocalHunger(viewer, tick)
 		l.syncLocalPlayerState(viewer)
 		l.syncLocalInventory(viewer)
 	}
 }
 
+func (l *Listener) syncLocalHunger(viewer *bedrockSession, tick uint64) {
+	p := l.game.GetPlayer(viewer.uuid)
+	if p == nil {
+		return
+	}
+	food, saturation, exhaustion := p.HungerSnapshot()
+	if viewer.hungerSent && food == viewer.lastFood && saturation == viewer.lastSaturation && exhaustion == viewer.lastExhaustion {
+		return
+	}
+	_ = viewer.conn.WritePacket(&packet.UpdateAttributes{
+		EntityRuntimeID: bedrockSelfRuntimeID,
+		Attributes: []protocol.Attribute{
+			{AttributeValue: protocol.AttributeValue{Name: "minecraft:player.hunger", Min: 0, Max: 20, Value: float32(food)}, DefaultMin: 0, DefaultMax: 20, Default: 20},
+			{AttributeValue: protocol.AttributeValue{Name: "minecraft:player.saturation", Min: 0, Max: 20, Value: saturation}, DefaultMin: 0, DefaultMax: 20, Default: 20},
+			{AttributeValue: protocol.AttributeValue{Name: "minecraft:player.exhaustion", Min: 0, Max: 5, Value: exhaustion}, DefaultMin: 0, DefaultMax: 5},
+		},
+		Tick: tick,
+	})
+	viewer.lastFood = food
+	viewer.lastSaturation = saturation
+	viewer.lastExhaustion = exhaustion
+	viewer.hungerSent = true
+}
+
 func (l *Listener) sendLocalPlayerState(viewer *bedrockSession, p *player.Player) {
 	_ = viewer.conn.WritePacket(&packet.SetPlayerGameType{GameType: bedrockGameType(p.GameMode)})
-	_ = viewer.conn.WritePacket(bedrockAdventureSettings(p))
 	_ = viewer.conn.WritePacket(&packet.UpdateAbilities{AbilityData: bedrockSelfAbilityData(p)})
 	_ = viewer.conn.WritePacket(&packet.UpdateAttributes{
 		EntityRuntimeID: bedrockSelfRuntimeID,
@@ -175,13 +201,27 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 		present[p.UUID] = struct{}{}
 		previous, known := viewer.knownPlayers[p.UUID]
 		if !known {
-			entry := playerListEntry(p, bedrockByUUID[p.UUID], p.UUID == viewer.uuid)
+			targetSession := bedrockByUUID[p.UUID]
+			entry := playerListEntry(p, targetSession, p.UUID == viewer.uuid)
+			platform := int32(0)
+			if targetSession != nil {
+				platform = targetSession.buildPlatform
+			} else if p.Edition == player.ClientEditionJava {
+				// Java players do not provide Bedrock skin geometry. Reuse a
+				// validated skin from the viewing Bedrock connection with new
+				// identity fields. The old generated fallback referenced custom
+				// geometry without supplying SkinGeometry, which makes current
+				// Bedrock clients close as soon as AddPlayer is received.
+				entry.Skin = crossEditionFallbackSkin(viewer.skin, p.UUID)
+				entry.BuildPlatform = viewer.buildPlatform
+				platform = viewer.buildPlatform
+			}
 			entry.ActionType = protocol.PlayerListActionAdd
 			_ = viewer.conn.WritePacket(&packet.PlayerList{
 				Entries: []protocol.PlayerListEntry{entry},
 			})
 			if p.UUID != viewer.uuid {
-				_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p))
+				_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p, platform))
 				l.sendPlayerEquipment(viewer, p)
 			}
 			health, _, _, dead := p.HealthSnapshot()
@@ -191,7 +231,13 @@ func (l *Listener) syncPlayers(viewer *bedrockSession, players []*player.Player,
 		health, _, _, dead := p.HealthSnapshot()
 		if p.UUID != viewer.uuid && previous.dead && !dead {
 			_ = viewer.conn.WritePacket(&packet.RemoveActor{EntityUniqueID: int64(bedrockRemoteRuntimeID(p.EntityID))})
-			_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p))
+			platform := int32(0)
+			if session := bedrockByUUID[p.UUID]; session != nil {
+				platform = session.buildPlatform
+			} else if p.Edition == player.ClientEditionJava {
+				platform = viewer.buildPlatform
+			}
+			_ = viewer.conn.WritePacket(buildAddBedrockPlayer(p, platform))
 			l.sendPlayerEquipment(viewer, p)
 		}
 		if p.UUID != viewer.uuid && health != previous.health {
@@ -268,6 +314,16 @@ func bedrockPlayerInView(viewer, target *player.Player) bool {
 		dz >= -bedrockChunkRadius && dz <= bedrockChunkRadius
 }
 
+func entityInView(viewer *player.Player, entity *corentity.Entity) bool {
+	if viewer == nil {
+		return false
+	}
+	dx := chunkCoordinate(entity.Position.X) - chunkCoordinate(viewer.Position.X)
+	dz := chunkCoordinate(entity.Position.Z) - chunkCoordinate(viewer.Position.Z)
+	return dx >= -bedrockChunkRadius && dx <= bedrockChunkRadius &&
+		dz >= -bedrockChunkRadius && dz <= bedrockChunkRadius
+}
+
 func playerListEntry(p *player.Player, session *bedrockSession, self bool) protocol.PlayerListEntry {
 	entityID := bedrockRemoteRuntimeID(p.EntityID)
 	if self {
@@ -287,7 +343,7 @@ func playerListEntry(p *player.Player, session *bedrockSession, self bool) proto
 	return entry
 }
 
-func buildAddBedrockPlayer(p *player.Player) *packet.AddPlayer {
+func buildAddBedrockPlayer(p *player.Player, buildPlatform int32) *packet.AddPlayer {
 	return &packet.AddPlayer{
 		UUID:            uuid.UUID(p.UUID),
 		Username:        p.Username,
@@ -299,7 +355,20 @@ func buildAddBedrockPlayer(p *player.Player) *packet.AddPlayer {
 		GameType:        int32(p.GameMode),
 		EntityMetadata:  bedrockPlayerMetadata(p),
 		AbilityData:     bedrockAbilityData(p),
+		BuildPlatform:   buildPlatform,
 	}
+}
+
+func crossEditionFallbackSkin(source protocol.Skin, id [16]byte) protocol.Skin {
+	result := source
+	identity := uuid.UUID(id).String()
+	result.PlayFabID = ""
+	result.SkinID = identity
+	result.FullID = identity
+	result.PrimaryUser = false
+	result.Trusted = true
+	result.OverrideAppearance = true
+	return result
 }
 
 func bedrockPlayerMetadata(p *player.Player) protocol.EntityMetadata {
@@ -317,8 +386,15 @@ func bedrockPlayerMetadata(p *player.Player) protocol.EntityMetadata {
 }
 
 func (l *Listener) syncEntities(viewer *bedrockSession, entities []*corentity.Entity, tick uint64) {
+	viewerPlayer := l.game.GetPlayer(viewer.uuid)
 	present := make(map[int32]struct{}, len(entities))
 	for _, entity := range entities {
+		// Only track and spawn entities within the player's loaded chunk radius.
+		// Sending AddActor for entities in columns the client has never received
+		// a LevelChunk for causes the client to crash or disconnect.
+		if !entityInView(viewerPlayer, entity) {
+			continue
+		}
 		present[entity.EntityID] = struct{}{}
 		previous, known := viewer.knownEntities[entity.EntityID]
 		if !known {
@@ -441,11 +517,8 @@ func (l *Listener) buildAddEntity(viewer *bedrockSession, entity *corentity.Enti
 		Yaw:             entity.Yaw,
 		HeadYaw:         entity.Yaw,
 		BodyYaw:         entity.Yaw,
-		Attributes: []protocol.AttributeValue{{
-			Name: "minecraft:health", Min: 0, Max: entity.MaxHealth, Value: entity.Health,
-		}},
-		EntityMetadata: metadata,
-		EntityLinks:    links,
+		EntityMetadata:  metadata,
+		EntityLinks:     links,
 	}
 }
 
@@ -455,6 +528,19 @@ func (l *Listener) syncLocalHealth(viewer *bedrockSession, tick uint64) {
 		return
 	}
 	health, _, _, dead := p.HealthSnapshot()
+	if viewer.wasDead && !dead {
+		respawnPosition := playerNetworkPosition(p.Position)
+		viewer.expectTeleport(p.Position)
+		// The client already sent RespawnStateClientReadyToSpawn when the
+		// button was clicked. Complete the handshake with ReadyToSpawn. Sending
+		// MovePlayer and a full 81-chunk burst before this packet is processed
+		// makes current Bedrock clients cancel the connection.
+		_ = viewer.conn.WritePacket(&packet.Respawn{
+			Position:        respawnPosition,
+			State:           packet.RespawnStateReadyToSpawn,
+			EntityRuntimeID: bedrockSelfRuntimeID,
+		})
+	}
 	if viewer.lastHealth > 0 && health < viewer.lastHealth && !dead {
 		_ = viewer.conn.WritePacket(&packet.ActorEvent{EntityRuntimeID: bedrockSelfRuntimeID, EventType: packet.ActorEventHurt})
 	}
@@ -471,32 +557,6 @@ func (l *Listener) syncLocalHealth(viewer *bedrockSession, tick uint64) {
 	}
 	if !viewer.wasDead && dead {
 		_ = viewer.conn.WritePacket(&packet.ActorEvent{EntityRuntimeID: bedrockSelfRuntimeID, EventType: packet.ActorEventDeath})
-	}
-	if viewer.wasDead && !dead {
-		respawnPosition := playerNetworkPosition(p.Position)
-		viewer.expectTeleport(p.Position)
-		// Teleport the dead actor first, then complete Bedrock's three-state
-		// respawn handshake, matching the vanilla server packet order.
-		_ = viewer.conn.WritePacket(&packet.MovePlayer{
-			EntityRuntimeID: bedrockSelfRuntimeID,
-			Position:        respawnPosition,
-			Pitch:           p.Rotation.Pitch,
-			Yaw:             p.Rotation.Yaw,
-			HeadYaw:         p.Rotation.Yaw,
-			Mode:            packet.MoveModeTeleport,
-			Tick:            tick,
-		})
-		_ = viewer.conn.WritePacket(&packet.Respawn{
-			Position:        respawnPosition,
-			State:           packet.RespawnStateReadyToSpawn,
-			EntityRuntimeID: bedrockSelfRuntimeID,
-		})
-
-		// Death may have happened far from the bed/world spawn. Publish and
-		// announce the respawn area again so the client does not wake into sky.
-		const chunkRadius = bedrockChunkRadius
-		_ = viewer.conn.WritePacket(initialChunkPublisher(p.Position, chunkRadius))
-		_ = l.sendInitialChunks(viewer.conn, chunkCoordinate(p.Position.X), chunkCoordinate(p.Position.Z), chunkRadius)
 	}
 	viewer.wasDead = dead
 }
@@ -547,6 +607,7 @@ func (l *Listener) syncLocalInventory(viewer *bedrockSession) {
 	var content []protocol.ItemInstance
 	var armour []protocol.ItemInstance
 	var offhand []protocol.ItemInstance
+	var uiContent []protocol.ItemInstance
 	if inventoryChanged {
 		content = make([]protocol.ItemInstance, 36)
 		for slot := 0; slot < 9; slot++ {
@@ -565,13 +626,27 @@ func (l *Listener) syncLocalInventory(viewer *bedrockSession) {
 		offhand = []protocol.ItemInstance{
 			l.itemInstance(p.Inventory[45], viewer.stackNetworkIDs[45]),
 		}
+		// The Bedrock cursor is slot 0 of the 54-slot UI inventory. Sending an
+		// entirely empty UI inventory here clears the client's mouse cursor after
+		// every authoritative change. That made picked-up stacks disappear and
+		// left their original inventory slots looking stuck/ghosted.
+		uiContent = make([]protocol.ItemInstance, 54)
+		uiContent[0] = l.itemInstance(p.CarriedItem, viewer.cursorStackID)
+		for slot := 0; slot < 4; slot++ {
+			canonical := 1 + slot
+			uiContent[28+slot] = l.itemInstance(p.Inventory[canonical], viewer.stackNetworkIDs[canonical])
+		}
+		uiContent[50] = l.itemInstance(p.Inventory[0], viewer.stackNetworkIDs[0])
 	}
 	viewer.stackMu.Unlock()
 
 	if inventoryChanged {
+		// Send in Dragonfly's exact order: Inventory → UI → OffHand → Armour
 		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDInventory, Content: content})
-		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDArmour, Content: armour})
+		// WindowIDUI: 54 empty slots — matches Dragonfly's s.ui (inventory.New(54, nil))
+		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDUI, Content: uiContent})
 		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDOffHand, Content: offhand})
+		_ = viewer.conn.WritePacket(&packet.InventoryContent{WindowID: protocol.WindowIDArmour, Content: armour})
 	}
 	if heldChanged {
 		_ = viewer.conn.WritePacket(&packet.MobEquipment{
@@ -763,6 +838,50 @@ func bedrockEntityType(entityType corentity.EntityType) string {
 	}
 }
 
+// actorIdentifierEntry matches Dragonfly's private actorIdentifier struct
+// in server/session/session.go — same field name, same NBT tag.
+type actorIdentifierEntry struct {
+	ID string `nbt:"id"`
+}
+
+// dragonflyDefaultActorIdentifiers is Dragonfly's DefaultRegistry entity list
+// (server/entity/register.go) in registration order, using each type's
+// EncodeEntity() string exactly as Dragonfly's sendAvailableEntities() would.
+// Order is not guaranteed by Dragonfly (map iteration), but the set is fixed.
+var dragonflyDefaultActorIdentifiers = []actorIdentifierEntry{
+	{ID: "minecraft:area_effect_cloud"},
+	{ID: "minecraft:arrow"},
+	{ID: "minecraft:xp_bottle"},
+	{ID: "minecraft:egg"},
+	{ID: "minecraft:ender_pearl"},
+	{ID: "minecraft:xp_orb"},
+	{ID: "minecraft:falling_block"},
+	{ID: "minecraft:fireworks_rocket"},
+	{ID: "minecraft:item"},
+	{ID: "minecraft:lightning_bolt"},
+	{ID: "minecraft:lingering_potion"},
+	{ID: "minecraft:snowball"},
+	{ID: "minecraft:splash_potion"},
+	{ID: "minecraft:tnt"},
+	{ID: "dragonfly:text"},
+}
+
+// availableActorIdentifiersPayload is the pre-marshalled NBT payload for the
+// AvailableActorIdentifiers packet. It exactly replicates what Dragonfly's
+// sendAvailableEntities() produces: nbt.Marshal(map[string]any{"idlist": [...]})
+// using Little Endian encoding (gophertunnel default).
+var availableActorIdentifiersPayload []byte
+
+func init() {
+	var err error
+	availableActorIdentifiersPayload, err = nbt.Marshal(map[string]any{
+		"idlist": dragonflyDefaultActorIdentifiers,
+	})
+	if err != nil {
+		panic("bedrock: failed to marshal AvailableActorIdentifiers payload: " + err.Error())
+	}
+}
+
 type namedItem struct {
 	name string
 	meta int16
@@ -793,7 +912,6 @@ func (l *Listener) itemInstance(stack player.ItemStack, stackNetworkID int32) pr
 			ItemType:       protocol.ItemType{NetworkID: runtimeID, MetadataValue: uint32(uint16(meta))},
 			Count:          uint16(min(stack.Count, math.MaxUint16)),
 			BlockRuntimeID: blockRuntimeID,
-			HasNetworkID:   true,
 			NBTData:        nbtData,
 		},
 	}

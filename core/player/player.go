@@ -81,6 +81,7 @@ type Player struct {
 	MaxHealth         float32
 	Food              int32
 	Saturation        float32
+	Exhaustion        float32
 	Dead              bool
 	LastDamageCause   string
 	InvulnerableUntil time.Time
@@ -202,6 +203,77 @@ func (p *Player) HealthSnapshot() (health float32, food int32, saturation float3
 	return p.Health, p.Food, p.Saturation, p.Dead
 }
 
+// HungerSnapshot returns the three Bedrock hunger attributes atomically.
+func (p *Player) HungerSnapshot() (food int32, saturation, exhaustion float32) {
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	return p.Food, p.Saturation, p.Exhaustion
+}
+
+// AddExhaustion applies vanilla's exhaustion rollover. Each four exhaustion
+// points consumes saturation first, then one food point.
+func (p *Player) AddExhaustion(amount float32) {
+	if amount <= 0 {
+		return
+	}
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.Dead {
+		return
+	}
+	p.Exhaustion += amount
+	for p.Exhaustion >= 4 {
+		p.Exhaustion -= 4
+		if p.Saturation > 0 {
+			p.Saturation--
+			if p.Saturation < 0 {
+				p.Saturation = 0
+			}
+		} else if p.Food > 0 {
+			p.Food--
+		}
+	}
+}
+
+// ConsumeFood fills hunger and saturation. It returns false when the player
+// is full and the item should not be consumed.
+func (p *Player) ConsumeFood(nutrition int32, saturationModifier float32) bool {
+	if nutrition <= 0 {
+		return false
+	}
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.Dead || p.Food >= 20 {
+		return false
+	}
+	p.Food += nutrition
+	if p.Food > 20 {
+		p.Food = 20
+	}
+	p.Saturation += float32(nutrition) * saturationModifier * 2
+	if p.Saturation > float32(p.Food) {
+		p.Saturation = float32(p.Food)
+	}
+	return true
+}
+
+// Heal restores a bounded amount of health to a living player.
+func (p *Player) Heal(amount float32) bool {
+	if amount <= 0 {
+		return false
+	}
+	p.healthMu.Lock()
+	defer p.healthMu.Unlock()
+	if p.Dead || p.Health >= p.MaxHealth {
+		return false
+	}
+	p.Health += amount
+	if p.Health > p.MaxHealth {
+		p.Health = p.MaxHealth
+	}
+	return true
+}
+
 // HealFull restores a living player to full health and hunger. Dead players
 // must complete the normal respawn handshake before they can be healed.
 func (p *Player) HealFull() bool {
@@ -216,6 +288,7 @@ func (p *Player) HealFull() bool {
 	p.Health = p.MaxHealth
 	p.Food = 20
 	p.Saturation = 5
+	p.Exhaustion = 0
 	p.LastDamageCause = ``
 	p.LastEnvironmentDamage = time.Time{}
 	p.UnderwaterSince = time.Time{}
@@ -231,6 +304,7 @@ func (p *Player) Revive() {
 	p.Health = p.MaxHealth
 	p.Food = 20
 	p.Saturation = 5
+	p.Exhaustion = 0
 	p.Dead = false
 	p.LastDamageCause = ""
 	p.FallDistance = 0

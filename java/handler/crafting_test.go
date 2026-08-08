@@ -52,3 +52,40 @@ func TestTakingCraftingResultConsumesOneIngredientPerOccupiedSlot(t *testing.T) 
 		t.Fatalf("next result = %+v, want another four sticks", next)
 	}
 }
+
+func TestPersonalCraftingResolvesWoodVariantsToMatchingPlanks(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		count int
+	}{
+		{"minecraft:oak_log", "minecraft:oak_planks", 4},
+		{"minecraft:birch_log", "minecraft:birch_planks", 4},
+		{"minecraft:stripped_spruce_wood", "minecraft:spruce_planks", 4},
+		{"minecraft:mangrove_log", "minecraft:mangrove_planks", 4},
+		{"minecraft:crimson_stem", "minecraft:crimson_planks", 4},
+		{"minecraft:bamboo_block", "minecraft:bamboo_planks", 2},
+	}
+	for _, test := range tests {
+		t.Run(test.input, func(t *testing.T) {
+			grid := [4]player.ItemStack{{ItemID: test.input, Count: 1}}
+			got := FindPersonalCraftingResult(grid)
+			if got.ItemID != test.want || got.Count != test.count {
+				t.Fatalf("result = %+v, want %d %s", got, test.count, test.want)
+			}
+		})
+	}
+}
+
+func TestPersonalCraftingSupportsShapedTwoByTwoRecipes(t *testing.T) {
+	grid := [4]player.ItemStack{
+		{ItemID: "minecraft:oak_planks", Count: 1},
+		{ItemID: "minecraft:oak_planks", Count: 1},
+		{ItemID: "minecraft:oak_planks", Count: 1},
+		{ItemID: "minecraft:oak_planks", Count: 1},
+	}
+	got := FindPersonalCraftingResult(grid)
+	if got.ItemID != "minecraft:crafting_table" || got.Count != 1 {
+		t.Fatalf("result = %+v, want crafting table", got)
+	}
+}

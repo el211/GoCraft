@@ -52,3 +52,25 @@ func TestHealFullDoesNotReviveDeadPlayer(t *testing.T) {
 		t.Fatal(`HealFull revived a dead player`)
 	}
 }
+
+func TestHungerExhaustionAndFoodConsumption(t *testing.T) {
+	p := New([16]byte{2}, "hungry", ClientEditionBedrock)
+	p.Saturation = 1
+	p.AddExhaustion(4)
+	food, saturation, exhaustion := p.HungerSnapshot()
+	if food != 20 || saturation != 0 || exhaustion != 0 {
+		t.Fatalf("after first rollover = food %d saturation %.1f exhaustion %.1f", food, saturation, exhaustion)
+	}
+	p.AddExhaustion(4)
+	food, saturation, _ = p.HungerSnapshot()
+	if food != 19 || saturation != 0 {
+		t.Fatalf("after second rollover = food %d saturation %.1f", food, saturation)
+	}
+	if !p.ConsumeFood(5, 0.6) {
+		t.Fatal("hungry player could not eat bread")
+	}
+	food, saturation, _ = p.HungerSnapshot()
+	if food != 20 || saturation != 6 {
+		t.Fatalf("after bread = food %d saturation %.1f, want 20/6", food, saturation)
+	}
+}
