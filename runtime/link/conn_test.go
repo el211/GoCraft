@@ -226,3 +226,73 @@ func TestConnRejectsANilEnvelope(t *testing.T) {
 		t.Fatal("Request() accepted nil")
 	}
 }
+
+// The host and a runtime both number the exchanges they start, from their own
+// counters. Splitting the space by parity is what keeps the two apart: without
+// it, host request 4 and an emission numbered 4 are the same key in one table.
+func TestConnNumbersItsOwnRequestsOdd(t *testing.T) {
+	conn, peer := testPair(t, nil)
+	seen := make(chan uint64, 3)
+	go func() {
+		for {
+			request, err := peer.Receive()
+			if err != nil {
+				return
+			}
+			seen <- request.GetSeq()
+			peer.Send(&wire.Envelope{
+				Seq:  request.GetSeq(),
+				Body: &wire.Envelope_Loaded{Loaded: &wire.Loaded{PluginId: "fr.oreo.hello"}},
+			})
+		}
+	}()
+
+	for range 3 {
+		if _, err := conn.Request(t.Context(), loadEnvelope("fr.oreo.hello")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 3 {
+		select {
+		case seq := <-seen:
+			if seq%2 == 0 {
+				t.Fatalf("Request() used seq %d, want an odd number", seq)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the peer never saw the request")
+		}
+	}
+}
+
+// An even sequence number belongs to the runtime's own numbering, so it must
+// never be looked up in the pending table — even when a caller happens to be
+// waiting on that number.
+func TestConnNeverAnswersAWaiterWithAnEvenSequence(t *testing.T) {
+	unsolicited := make(chan *wire.Envelope, 1)
+	conn, peer := testPair(t, func(envelope *wire.Envelope) { unsolicited <- envelope })
+	go func() {
+		request, err := peer.Receive()
+		if err != nil {
+			return
+		}
+		// Answer on the neighbouring even number rather than the one asked.
+		peer.Send(&wire.Envelope{
+			Seq:  request.GetSeq() + 1,
+			Body: &wire.Envelope_Loaded{Loaded: &wire.Loaded{PluginId: "impostor"}},
+		})
+	}()
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+	if _, err := conn.Request(ctx, loadEnvelope("fr.oreo.hello")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Request() = %v, want it to keep waiting rather than take an even reply", err)
+	}
+	select {
+	case envelope := <-unsolicited:
+		if got := envelope.GetLoaded().GetPluginId(); got != "impostor" {
+			t.Fatalf("handler saw %q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the even envelope reached neither the waiter nor the handler")
+	}
+}
