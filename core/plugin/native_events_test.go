@@ -19,8 +19,11 @@ func TestBlockBreakPayloadIsEditionNeutral(t *testing.T) {
 	var received *abi.Event
 	instance := &fakeInstance{
 		manifest: gcpkg.Manifest{
-			ID: "protect", Permissions: []string{"zone.trusted", "zone.build"},
-			Subscriptions: []gcpkg.Subscription{{Event: EventBlockBreak}},
+			ID: "protect",
+			Subscriptions: []gcpkg.Subscription{{
+				Event:       EventBlockBreak,
+				Permissions: []string{"zone.trusted", "zone.build"},
+			}},
 		},
 		dispatch: func(_ context.Context, event *abi.Event) (abi.Verdict, error) {
 			received = event

@@ -44,9 +44,12 @@ id = "fr.oreo.shop"
 version = "1.2.0"
 api = 1
 runtime = "go"
-[subscribe]
-events = ["block.break", "player.join"]
+[[subscribe]]
+event = "block.break"
 perms = ["shop.use"]
+
+[[subscribe]]
+event = "player.join"
 `, nil)
 	writeBundle(t, directory, "a-protect.gcpkg", `
 id = "fr.oreo.protect"

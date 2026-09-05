@@ -51,7 +51,12 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			sub.health.record(time.Now(), true, took)
 			b.recordStarved(subscribers[index+1:], definition.Type)
-			slog.Warn("plugin event deadline exceeded", "plugin", sub.id, "event", definition.Type)
+			// How long it actually took, and what it was allowed. "Exceeded"
+			// alone cannot tell a handler that is slightly too slow from one
+			// that spent a hundred milliseconds on its first dispatch, and
+			// those two are not the same problem.
+			slog.Warn("plugin event deadline exceeded", "plugin", sub.id,
+				"event", definition.Type, "took", took, "budget", b.budget)
 			return b.starvedResult(definition, applied)
 		}
 		if err != nil {

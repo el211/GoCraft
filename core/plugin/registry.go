@@ -86,7 +86,7 @@ func (b *Bus) Attach(instance Instance) error {
 	for _, declared := range manifest.Subscriptions {
 		sub := &subscriber{
 			id: manifest.ID, priority: declared.Priority, instance: instance, health: tracker,
-			permissions: append([]string(nil), manifest.Permissions...),
+			permissions: append([]string(nil), declared.Permissions...),
 		}
 		b.subs[declared.Event] = append(b.subs[declared.Event], sub)
 		sort.Slice(b.subs[declared.Event], func(i, j int) bool {
