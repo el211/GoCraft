@@ -98,7 +98,8 @@ they are online.
 
 ## Build a bundle
 
-See [`examples/go-plugin`](../examples/go-plugin/) for a complete plugin. Build
+See [gocraft-plugin-examples](https://github.com/GoCraft-MC/gocraft-plugin-examples) for a
+complete plugin — one per runtime, and the only examples that exist. Build
 its executable for the server operating system, place it at the manifest's
 `entry`, then package it:
 
