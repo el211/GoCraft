@@ -86,10 +86,6 @@ func sdkEvent(file *protogen.GeneratedFile, declared event) error {
 		file.P("\t// that could write to it would be answering its own question.")
 		file.P("\tpermissions map[string]bool")
 	}
-	if declared.Cancellable {
-		file.P()
-		file.P("\tcancelled bool")
-	}
 	file.P("}")
 	file.P()
 
@@ -109,24 +105,21 @@ func sdkEvent(file *protogen.GeneratedFile, declared event) error {
 		file.P()
 	}
 
-	if declared.Cancellable {
-		file.P("// Cancel prevents the action. The host decides the outcome once every")
-		file.P("// subscriber has answered or the budget has run out.")
-		file.P(fmt.Sprintf("func (e *%s) Cancel() { e.cancelled = true }", class))
-		file.P()
-		file.P(fmt.Sprintf("func (e *%s) Cancelled() bool { return e.cancelled }", class))
-		file.P()
-	}
-
 	file.P(fmt.Sprintf("// %s registers a handler for %s.", declared.SDKRegister(), declared.Type))
 	file.P("//")
 	file.P("// Typed, so there is no event name to misspell: the parameter is the")
 	file.P("// subscription. On accepts a name for anything this build does not know.")
-	file.P(fmt.Sprintf("func (e *Events) %s(handler func(*%s)) error {",
+	file.P("//")
+	file.P("// The control is what a handler refuses with, and where it reaches a")
+	file.P("// player the event did not hand it. A handler that only watches may")
+	file.P("// ignore it; it is a parameter rather than a method on the event because")
+	file.P("// a plugin-defined event is a struct its author wrote, and one shape for")
+	file.P("// both beats two that differ by who wrote the event.")
+	file.P(fmt.Sprintf("func (e *Events) %s(handler func(*%s, EventControl)) error {",
 		declared.SDKRegister(), class))
-	file.P(fmt.Sprintf("\treturn e.On(%s, func(event Event) {", declared.ConstName()))
+	file.P(fmt.Sprintf("\treturn e.On(%s, func(event Event, control EventControl) {", declared.ConstName()))
 	file.P(fmt.Sprintf("\t\tif typed, ok := event.(*%s); ok {", class))
-	file.P("\t\t\thandler(typed)")
+	file.P("\t\t\thandler(typed, control)")
 	file.P("\t\t}")
 	file.P("\t})")
 	file.P("}")
@@ -139,7 +132,8 @@ func sdkEvent(file *protogen.GeneratedFile, declared event) error {
 func sdkDecoder(file *protogen.GeneratedFile, declared event) error {
 	class := declared.SDKType()
 
-	file.P(fmt.Sprintf("func %s(fields []abi.Value) (*%s, error) {", declared.SDKDecoder(), class))
+	file.P(fmt.Sprintf("func %s(fields []abi.Value, sink *effects) (*%s, error) {",
+		declared.SDKDecoder(), class))
 	file.P(fmt.Sprintf("\tif len(fields) != %d {", len(declared.Fields)))
 	file.P(fmt.Sprintf("\t\treturn nil, fmt.Errorf(\"gocraft: %s has %%d fields, want %d\", len(fields))",
 		declared.Type, len(declared.Fields)))
@@ -194,14 +188,14 @@ func sdkDispatch(file *protogen.GeneratedFile, events []event) error {
 	file.P("// rather than being refused. Which layout it should be read against is a")
 	file.P("// fact this build cannot have: it belongs to the manifest of whichever")
 	file.P("// plugin provides it.")
-	file.P("func eventFrom(incoming *abi.Event) (Event, error) {")
+	file.P("func eventFrom(incoming *abi.Event, sink *effects) (Event, error) {")
 	file.P("\tif incoming == nil {")
 	file.P("\t\treturn nil, fmt.Errorf(\"gocraft: missing event\")")
 	file.P("\t}")
 	file.P("\tswitch incoming.Type {")
 	for _, declared := range events {
 		file.P(fmt.Sprintf("\tcase %s:", declared.ConstName()))
-		file.P(fmt.Sprintf("\t\treturn %s(incoming.Fields)", declared.SDKDecoder()))
+		file.P(fmt.Sprintf("\t\treturn %s(incoming.Fields, sink)", declared.SDKDecoder()))
 	}
 	file.P("\tdefault:")
 	file.P("\t\treturn customFrom(incoming)")

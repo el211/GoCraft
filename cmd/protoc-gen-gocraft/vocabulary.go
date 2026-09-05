@@ -46,13 +46,13 @@ type binding struct {
 
 var vocabulary = map[string]binding{
 	"PlayerRef": {
-		SDKType:    "Player",
-		SDKDecode:  "playerFrom({v})",
+		SDKType:    "*PlayerRef",
+		SDKDecode:  "playerFrom({v}, sink)",
 		GoImport:   `"GoCraft/core/player"`,
 		GoType:     "*player.Player",
 		GoEncode:   "playerReference(%s)",
 		JavaType:   "PlayerRef",
-		JavaDecode: "PlayerRef.of(field(%d))",
+		JavaDecode: "PlayerRef.of(field(%d), sink())",
 	},
 	"BlockPos": {
 		SDKType:    "BlockPos",
