@@ -39,12 +39,14 @@ func (s *Server) registerPluginRuntimes(cfg *config.Config) error {
 		TickRate:     pluginTickRate,
 		EventBudget:  time.Duration(cfg.Plugins.EventBudgetMillis) * time.Millisecond,
 		OnRespawn:    s.replayJoins,
+		OnEmit:       s.pluginRegistry.EmitFrom,
 	})); err != nil {
 		return err
 	}
 	return s.pluginRegistry.RegisterRuntime(goplugin.New(goplugin.Config{
 		TickRate:    pluginTickRate,
 		EventBudget: time.Duration(cfg.Plugins.EventBudgetMillis) * time.Millisecond,
+		OnEmit:      s.pluginRegistry.EmitFrom,
 	}))
 }
 
