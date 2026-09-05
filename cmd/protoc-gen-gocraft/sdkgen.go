@@ -188,9 +188,12 @@ func sdkDecoder(file *protogen.GeneratedFile, declared event) error {
 func sdkDispatch(file *protogen.GeneratedFile, events []event) error {
 	file.P("// eventFrom reads one dispatched event.")
 	file.P("//")
-	file.P("// An event this build does not know is refused rather than guessed at: the")
-	file.P("// payload is positional, so reading it against the wrong layout would")
-	file.P("// produce a plausible event rather than an error.")
+	file.P("// A native event is decoded against the layout generated with it. Anything")
+	file.P("// else is plugin-defined by construction — a provided type must contain a")
+	file.P("// slash and no native name has one — so it goes to the positional reader")
+	file.P("// rather than being refused. Which layout it should be read against is a")
+	file.P("// fact this build cannot have: it belongs to the manifest of whichever")
+	file.P("// plugin provides it.")
 	file.P("func eventFrom(incoming *abi.Event) (Event, error) {")
 	file.P("\tif incoming == nil {")
 	file.P("\t\treturn nil, fmt.Errorf(\"gocraft: missing event\")")
@@ -201,7 +204,7 @@ func sdkDispatch(file *protogen.GeneratedFile, events []event) error {
 		file.P(fmt.Sprintf("\t\treturn %s(incoming.Fields)", declared.SDKDecoder()))
 	}
 	file.P("\tdefault:")
-	file.P("\t\treturn nil, fmt.Errorf(\"gocraft: unsupported event %s\", incoming.Type)")
+	file.P("\t\treturn customFrom(incoming)")
 	file.P("\t}")
 	file.P("}")
 	return nil
