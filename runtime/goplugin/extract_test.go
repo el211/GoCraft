@@ -29,6 +29,29 @@ func TestExtractExecutableAndCleanup(t *testing.T) {
 	}
 }
 
+// The bug that stopped the first Go plugin ever loaded on Windows.
+//
+// os/exec resolves a command through PATHEXT even when handed a full path, so
+// an extensionless PE image fails with "executable file not found in %PATH%" —
+// which sends whoever reads it looking at their PATH. The entry in the bundle
+// is what an author named; the extracted file is the host's business.
+func TestExtractedNameIsRunnableOnItsOperatingSystem(t *testing.T) {
+	for _, testCase := range []struct {
+		entry, goos, want string
+	}{
+		{"bin/example", "windows", "plugin.exe"},
+		{"bin/example.exe", "windows", "plugin.exe"},
+		{"bin/example.EXE", "windows", "plugin.EXE"},
+		{"bin/example", "linux", "plugin"},
+		{"bin/example.exe", "linux", "plugin.exe"},
+	} {
+		if got := executableName(testCase.entry, testCase.goos); got != testCase.want {
+			t.Fatalf("executableName(%q, %q) = %q, want %q",
+				testCase.entry, testCase.goos, got, testCase.want)
+		}
+	}
+}
+
 func TestExtractRejectsUnsafeOrMissingEntry(t *testing.T) {
 	bundlePath := writeTestBundle(t, "bin/example", []byte("plugin"))
 	runtime := New(Config{ExtractDirectory: t.TempDir()})

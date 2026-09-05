@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"GoCraft/core/plugin"
@@ -45,7 +46,7 @@ func (r *Runtime) extract(bundle plugin.Bundle) (string, func(), error) {
 		return "", nil, fmt.Errorf("go runtime: create extraction directory: %w", err)
 	}
 	cleanup := func() { _ = os.RemoveAll(directory) }
-	target := filepath.Join(directory, "plugin"+filepath.Ext(entry))
+	target := filepath.Join(directory, executableName(entry, runtime.GOOS))
 	if err := copyExecutable(source, target); err != nil {
 		cleanup()
 		return "", nil, err
@@ -75,6 +76,28 @@ func copyExecutable(source *zip.File, target string) error {
 		return fmt.Errorf("go runtime: executable expanded beyond its size limit")
 	}
 	return nil
+}
+
+// executableName is what the extracted binary has to be called for this
+// operating system to run it.
+//
+// The manifest names a path inside the archive; what the file is called once
+// it is out is the host's business, and on Windows that is not cosmetic.
+// os/exec resolves a command through PATHEXT even when it was handed a full
+// path, so a perfectly valid PE image with no extension fails with "executable
+// file not found in %PATH%" — a message that sends whoever reads it looking at
+// their PATH, which has nothing to do with it.
+//
+// An entry that already ends in .exe keeps it rather than gaining a second one.
+// Elsewhere the name is left alone: a bundle built on Windows and run on Linux
+// extracts as plugin.exe and runs perfectly well, because nothing there reads
+// the extension.
+func executableName(entry, goos string) string {
+	name := "plugin" + path.Ext(entry)
+	if goos == "windows" && !strings.EqualFold(path.Ext(name), ".exe") {
+		name += ".exe"
+	}
+	return name
 }
 
 func validEntry(entry string) bool {
