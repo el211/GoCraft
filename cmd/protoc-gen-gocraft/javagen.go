@@ -48,9 +48,16 @@ func generateJava(plugin *protogen.Plugin, events []event) error {
 func generateJavaRegistry(plugin *protogen.Plugin, events []event) error {
 	path := strings.ReplaceAll(javaPackage, ".", "/") + "/GeneratedEvents.java"
 	file := plugin.NewGeneratedFile(path, "")
+	cancellables := make([]event, 0, len(events))
+	for _, declared := range events {
+		if declared.Cancellable {
+			cancellables = append(cancellables, declared)
+		}
+	}
 	return registryTemplate.Execute(file, map[string]any{
-		"Package": javaPackage,
-		"Events":  events,
+		"Package":      javaPackage,
+		"Events":       events,
+		"Cancellables": cancellables,
 	})
 }
 
@@ -221,19 +228,6 @@ public final class {{ .Class }} extends fr.gocraft.api.Event {
     public void {{ .Method }}({{ .Params }}) {
         effect("{{ .Call }}", {{ .Values }});
     }
-{{ end }}
-{{- if .Cancellable }}
-    /// Prevents the action. The host decides the outcome once every subscriber
-    /// has answered or the budget has run out.
-    ///
-    /// This is where cancelling becomes public. Event.cancel() is protected, so
-    /// an observational event simply does not offer it — the tick never waits
-    /// for one, and a method that silently did nothing would be worse than its
-    /// absence.
-    @Override
-    public void cancel() {
-        super.cancel();
-    }
 {{ end }}}
 `))
 
@@ -290,5 +284,21 @@ public final class GeneratedEvents {
     public static boolean knows(String type) {
         return BY_TYPE.containsKey(type);
     }
+
+    /// Whether a subscriber may refuse this event.
+    ///
+    /// Generated with the rest, because it decides whether a handler is allowed
+    /// to ask for an EventControl — and a list kept by hand would eventually
+    /// refuse a cancel the schema allows, or accept one it does not.
+    public static boolean cancellable(String type) {
+        return CANCELLABLE.contains(type);
+    }
+
+    private static final java.util.Set<String> CANCELLABLE = java.util.Set.of(
+{{- range $index, $event := .Cancellables }}
+{{- if $index }},{{ end }}
+            {{ $event.JavaClass }}.TYPE
+{{- end }}
+    );
 }
 `))
