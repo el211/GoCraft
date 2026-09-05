@@ -69,9 +69,18 @@ func (c *Conn) Request(ctx context.Context, envelope *wire.Envelope) (*wire.Enve
 	if envelope == nil {
 		return nil, fmt.Errorf("ipc: missing envelope")
 	}
-	// Sequence numbers start at 1, so zero always means "unsolicited" and can
-	// never collide with a pending request.
-	seq := c.seq.Add(1)
+	// The host numbers its requests odd: 1, 3, 5. A runtime numbers the only
+	// exchange it starts — EMIT — even, from 2.
+	//
+	// Splitting the space rather than sharing a counter is what keeps a
+	// runtime-initiated request from being mistaken for a reply. Both sides
+	// number from their own counter, so a shared space would eventually put the
+	// same number on a host request in flight and an emission just sent, and
+	// the read loop below would hand the emission to whoever was waiting on
+	// that number. It would look like the runtime answered the wrong question.
+	//
+	// Zero belongs to neither and still means "correlated with nothing".
+	seq := c.seq.Add(2) - 1
 	envelope.Seq = seq
 
 	replies, err := c.expect(seq)
@@ -139,8 +148,15 @@ func (c *Conn) read() {
 			c.shutdown(err)
 			return
 		}
+		// Only an odd sequence number can answer this side's request, so an
+		// even one skips the pending table entirely rather than relying on a
+		// miss. A runtime that echoed a host seq back on an unrelated message
+		// would otherwise be one collision away from waking the wrong caller.
 		c.mu.Lock()
 		replies, waiting := c.pending[envelope.GetSeq()]
+		if envelope.GetSeq()%2 == 0 {
+			replies, waiting = nil, false
+		}
 		if waiting {
 			// Removed on delivery, so a runtime that answers the same request
 			// twice cannot have its second reply mistaken for another one.
