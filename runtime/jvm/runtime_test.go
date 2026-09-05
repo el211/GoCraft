@@ -1,6 +1,7 @@
 package jvm
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"GoCraft/core/dispatch"
 	"GoCraft/core/player"
 	"GoCraft/core/plugin"
+	abi "github.com/GoCraft-MC/gocraft-abi/abi/v1"
 	"github.com/GoCraft-MC/gocraft-abi/command"
 	"github.com/GoCraft-MC/gocraft-abi/gcpkg"
 )
@@ -223,3 +225,28 @@ func (s *stubSender) UUID() [16]byte                 { return [16]byte{} }
 func (s *stubSender) SendMessage(string) error       { return nil }
 func (s *stubSender) Has(permission string) bool     { return s.held[permission] }
 func (s *stubSender) Player() (*player.Player, bool) { return s.player, s.player != nil }
+
+// The respawn path builds its own supervisor, so a transport field added to
+// only one of the two call sites would give a replacement JVM a quietly
+// different connection. One constructor is what keeps them the same; this
+// checks the field that would fail silently — a plugin that came back able to
+// subscribe but no longer able to emit.
+func TestLinkConfigCarriesTheEmissionHook(t *testing.T) {
+	called := false
+	runtime := New(Config{OnEmit: func(context.Context, abi.Emission) abi.EmissionResult {
+		called = true
+		return abi.EmissionResult{}
+	}})
+
+	config := runtime.linkConfig("java", "runtime.jar")
+	if config.OnEmit == nil {
+		t.Fatal("linkConfig() dropped OnEmit, so a plugin could not publish an event")
+	}
+	config.OnEmit(context.Background(), abi.Emission{})
+	if !called {
+		t.Fatal("linkConfig() carried some other function")
+	}
+	if config.Runtime != RuntimeName || config.Spawn == nil {
+		t.Fatalf("linkConfig() = %+v", config)
+	}
+}

@@ -66,6 +66,14 @@ type Config struct {
 	// Respawn decides what happens when the JVM dies while players are online.
 	Respawn Respawn
 
+	// OnEmit dispatches a plugin-defined event one of this runtime's plugins
+	// published.
+	//
+	// The host supplies it rather than this package building one: dispatching
+	// means reaching the registry, and runtime/link must never see core/plugin.
+	// The closure is built where both are already in scope — the server.
+	OnEmit func(ctx context.Context, emission abi.Emission) abi.EmissionResult
+
 	// OnRespawn is called after the runtime came back and its plugins were
 	// reloaded, with the ids that made it.
 	//
@@ -135,6 +143,10 @@ type loadedBundle struct {
 	data        string
 	commandTree string
 	events      []string
+	// eventTypes is replayed with the rest. A plugin that came back without its
+	// id table would load, subscribe, and then fail to emit anything — the one
+	// failure mode a respawn is supposed to hide.
+	eventTypes []abi.EventBinding
 }
 
 // New prepares the runtime. Nothing is spawned and nothing is downloaded until
@@ -185,15 +197,7 @@ func (r *Runtime) Start(ctx context.Context, host plugin.Host) error {
 	r.host = host
 	r.mu.Unlock()
 
-	supervisor := link.NewSupervisor(link.Config{
-		Runtime:      RuntimeName,
-		Directory:    r.socketDirectory(),
-		ABI:          abiVersion,
-		TickRate:     r.config.TickRate,
-		EventBudget:  r.config.EventBudget,
-		StartTimeout: r.config.StartTimeout,
-		Spawn:        r.spawn(java, jar),
-	}, r.config.Liveness)
+	supervisor := link.NewSupervisor(r.linkConfig(java, jar), r.config.Liveness)
 
 	if err := supervisor.Start(ctx); err != nil {
 		return err
@@ -235,6 +239,24 @@ func (r *Runtime) spawn(java, jar string) link.Spawn {
 	}
 }
 
+// linkConfig is the transport configuration for one JVM process.
+//
+// One function rather than a literal at each call site: a respawned runtime is
+// built here too, and a field added to only one of the two would give the
+// replacement a quietly different connection from the one it replaced.
+func (r *Runtime) linkConfig(java, jar string) link.Config {
+	return link.Config{
+		Runtime:      RuntimeName,
+		Directory:    r.socketDirectory(),
+		ABI:          abiVersion,
+		TickRate:     r.config.TickRate,
+		EventBudget:  r.config.EventBudget,
+		StartTimeout: r.config.StartTimeout,
+		Spawn:        r.spawn(java, jar),
+		OnEmit:       r.config.OnEmit,
+	}
+}
+
 func (r *Runtime) socketDirectory() string {
 	if r.config.SocketDirectory != "" {
 		return r.config.SocketDirectory
@@ -260,6 +282,7 @@ func (r *Runtime) Load(ctx context.Context, bundle plugin.Bundle) (plugin.Instan
 		DataDirectory: bundle.DataDirectory,
 		CommandTree:   bundle.Manifest.CommandTree,
 		Events:        events,
+		EventTypes:    bundle.EventTypes,
 	}); err != nil {
 		return nil, err
 	}
@@ -267,6 +290,7 @@ func (r *Runtime) Load(ctx context.Context, bundle plugin.Bundle) (plugin.Instan
 		id: bundle.Manifest.ID, path: bundle.Path,
 		entry: bundle.Manifest.Entry, data: bundle.DataDirectory,
 		commandTree: bundle.Manifest.CommandTree, events: events,
+		eventTypes: bundle.EventTypes,
 	})
 	return &Instance{runtime: r, manifest: bundle.Manifest}, nil
 }

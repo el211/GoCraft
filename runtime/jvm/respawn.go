@@ -147,15 +147,7 @@ func (r *Runtime) respawn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), r.config.StartTimeout)
 	defer cancel()
 
-	supervisor := link.NewSupervisor(link.Config{
-		Runtime:      RuntimeName,
-		Directory:    r.socketDirectory(),
-		ABI:          abiVersion,
-		TickRate:     r.config.TickRate,
-		EventBudget:  r.config.EventBudget,
-		StartTimeout: r.config.StartTimeout,
-		Spawn:        r.spawn(java, jar),
-	}, r.config.Liveness)
+	supervisor := link.NewSupervisor(r.linkConfig(java, jar), r.config.Liveness)
 
 	if err := supervisor.Start(ctx); err != nil {
 		return err
@@ -175,6 +167,7 @@ func (r *Runtime) respawn() error {
 			ID: bundle.id, BundlePath: bundle.path,
 			Entry: bundle.entry, DataDirectory: bundle.data,
 			CommandTree: bundle.commandTree, Events: bundle.events,
+			EventTypes: bundle.eventTypes,
 		}); err != nil {
 			// One plugin refusing to come back must not keep the others down.
 			// It was running a moment ago, so this is worth reporting loudly
