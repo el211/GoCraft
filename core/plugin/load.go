@@ -52,6 +52,11 @@ func (r *Registry) LoadAll(ctx context.Context, bundles []Bundle) error {
 			return rollback(err, nil)
 		}
 		bundle = prepared
+		// The ids come from preflight, which saw every manifest. A caller that
+		// skipped it gets an empty table and a plugin that can emit nothing,
+		// rather than ids assigned from whatever this one bundle happens to
+		// declare — which would differ from the ones its subscribers hold.
+		bundle.EventTypes = r.EventTypes().bindingsFor(bundle.Manifest)
 		runtime, _ := r.Runtime(bundle.Manifest.Runtime)
 		instance, err := runtime.Load(ctx, bundle)
 		if err != nil {

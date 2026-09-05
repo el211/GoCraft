@@ -13,8 +13,24 @@ type namedRuntime struct {
 	runtime Runtime
 }
 
-// Preflight provisions only runtimes required by the scanned manifests.
+// Preflight establishes what has to be true across every scanned bundle before
+// any of them loads, then provisions only the runtimes those manifests require.
+//
+// The cheap checks run first and synchronously. Provisioning may download a
+// JDK; a manifest that cannot be reconciled with the others should cost none of
+// that, and an error arriving before the download starts is also the one an
+// admin can read without scrolling.
 func (r *Registry) Preflight(ctx context.Context, bundles []Bundle) error {
+	eventTypes, err := newEventTypes(bundles)
+	if err != nil {
+		return err
+	}
+	if err := validateSubscriptions(bundles, eventTypes); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.eventTypes = eventTypes
+	r.mu.Unlock()
 	runtimes, err := r.neededRuntimes(bundles)
 	if err != nil {
 		return err

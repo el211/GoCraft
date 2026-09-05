@@ -21,6 +21,7 @@ type Registry struct {
 	instances   map[string]Instance
 	loadOrder   []Instance
 	started     []Runtime
+	eventTypes  *EventTypes
 }
 
 func NewRegistry(ctx context.Context, budget time.Duration, host Host, provisioner Provisioner) *Registry {
