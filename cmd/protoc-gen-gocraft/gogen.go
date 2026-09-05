@@ -44,6 +44,8 @@ func generateGo(plugin *protogen.Plugin, events []event) error {
 	file.P(")")
 	file.P()
 
+	nativeEventPredicate(file, events)
+
 	for _, declared := range events {
 		if err := emitter(file, declared); err != nil {
 			return err
@@ -51,6 +53,49 @@ func generateGo(plugin *protogen.Plugin, events []event) error {
 	}
 
 	return nil
+}
+
+// nativeEventPredicate emits the closed set of events the host itself emits.
+//
+// Generated rather than written beside the vocabulary, because it is only worth
+// anything if it is exhaustive: a hand-kept list that misses the next native
+// event refuses a subscription that would have worked, which is worse than not
+// checking at all. Both forms come out of the same slice here, so the predicate
+// and the listing cannot disagree either.
+func nativeEventPredicate(file *protogen.GeneratedFile, events []event) {
+	names := make([]string, 0, len(events))
+	for _, declared := range events {
+		names = append(names, declared.ConstName())
+	}
+	joined := strings.Join(names, ", ")
+
+	file.P("// IsNativeEvent reports whether the host itself emits this event.")
+	file.P("//")
+	file.P("// Anything else a manifest names has to be a plugin-defined type. If no")
+	file.P("// scanned manifest provides one, the subscription is a typo that would")
+	file.P("// otherwise load cleanly and never fire.")
+	file.P("func IsNativeEvent(eventType string) bool {")
+	if len(names) == 0 {
+		file.P("	return false")
+	} else {
+		file.P("	switch eventType {")
+		file.P("	case " + joined + ":")
+		file.P("		return true")
+		file.P("	}")
+		file.P("	return false")
+	}
+	file.P("}")
+	file.P()
+
+	file.P("// NativeEvents lists them, in schema order, for a message that has to tell")
+	file.P("// someone what they could have subscribed to.")
+	file.P("//")
+	file.P("// A fresh slice every call: the host's vocabulary is fixed at build time and")
+	file.P("// no caller may extend it.")
+	file.P("func NativeEvents() []string {")
+	file.P("	return []string{" + joined + "}")
+	file.P("}")
+	file.P()
 }
 
 // imports lists the vocabulary packages this event set needs, sorted and

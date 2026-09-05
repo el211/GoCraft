@@ -19,6 +19,28 @@ const (
 	EventPlayerJoin = "player.join"
 )
 
+// IsNativeEvent reports whether the host itself emits this event.
+//
+// Anything else a manifest names has to be a plugin-defined type. If no
+// scanned manifest provides one, the subscription is a typo that would
+// otherwise load cleanly and never fire.
+func IsNativeEvent(eventType string) bool {
+	switch eventType {
+	case EventBlockBreak, EventPlayerJoin:
+		return true
+	}
+	return false
+}
+
+// NativeEvents lists them, in schema order, for a message that has to tell
+// someone what they could have subscribed to.
+//
+// A fresh slice every call: the host's vocabulary is fixed at build time and
+// no caller may extend it.
+func NativeEvents() []string {
+	return []string{EventBlockBreak, EventPlayerJoin}
+}
+
 // EmitBlockBreak publishes block.break to every subscriber, in the same shape whatever
 // edition the player is on and whatever runtime the plugin uses.
 //
