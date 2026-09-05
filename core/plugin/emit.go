@@ -41,6 +41,9 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 			b.recordStarved(subscribers[index:], definition.Type)
 			return b.starvedResult(definition, applied)
 		}
+		// One per subscriber, not one for the loop: the fields change between
+		// them, and a subscriber that keeps the event it was handed would
+		// otherwise read the state somebody after it left.
 		event := &abi.Event{
 			Type: definition.Type, TypeID: emission.TypeID, Fields: state,
 			OnFailure: failurePolicy(definition),
@@ -125,16 +128,15 @@ func (b *Bus) starvedResult(definition gcpkg.EventDefinition, applied []abi.Muta
 // makes the emitter's own object the thing the mutations are replayed into: it
 // is the author of that state, not an observer of it.
 func (b *Bus) otherSubscribers(event, emitter string) []*subscriber {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	subscribers := make([]*subscriber, 0, len(b.subs[event]))
-	for _, sub := range b.subs[event] {
+	all := b.subscribers(event)
+	kept := all[:0]
+	for _, sub := range all {
 		if sub.id == emitter {
 			continue
 		}
-		subscribers = append(subscribers, sub)
+		kept = append(kept, sub)
 	}
-	return subscribers
+	return kept
 }
 
 // failurePolicy is the provider's on_failure, as the wire spells it.

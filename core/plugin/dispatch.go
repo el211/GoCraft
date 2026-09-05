@@ -34,7 +34,8 @@ func (b *Bus) EmitCancellable(event *abi.Event) bool {
 		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
 			sub.health.record(time.Now(), true, took)
 			b.recordStarved(subscribers[index+1:], event.Type)
-			slog.Warn("plugin event deadline exceeded", "plugin", sub.id, "event", event.Type)
+			slog.Warn("plugin event deadline exceeded", "plugin", sub.id,
+				"event", event.Type, "took", took, "budget", b.budget)
 			return failureAllows(event)
 		}
 		if err != nil {

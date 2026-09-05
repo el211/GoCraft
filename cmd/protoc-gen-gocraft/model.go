@@ -30,7 +30,6 @@ type event struct {
 	Cancellable   bool
 	Observational bool
 	OnFailure     string
-	Effects       []string
 	Since         uint32
 
 	// Fields in declaration order. The index is the position in the event
@@ -166,7 +165,6 @@ func read(message *protogen.Message) (*event, error) {
 		Cancellable:   declared.GetCancellable(),
 		Observational: declared.GetPhase() == wire.Phase_PHASE_OBSERVATIONAL,
 		OnFailure:     failurePolicy(declared.GetOnFailure()),
-		Effects:       declared.GetEffects(),
 		Since:         declared.GetSince(),
 	}
 	if result.Cancellable && result.Observational {
