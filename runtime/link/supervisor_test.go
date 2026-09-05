@@ -1,6 +1,7 @@
 package link
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -385,5 +386,152 @@ func TestSupervisorSendsEveryLoadField(t *testing.T) {
 	want := "plugins/shop.gcpkg|fr.oreo.shop.ShopPlugin|plugins/fr.oreo.shop|commands.pb"
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("Load() carried %v, want %q", err, want)
+	}
+}
+
+// emitting starts a supervisor whose host answers every emission with answer,
+// and reports each one it was handed.
+func emitting(t *testing.T, answer abi.EmissionResult) (*Supervisor, chan abi.Emission) {
+	t.Helper()
+	emissions := make(chan abi.Emission, 4)
+	config := fakeConfig(t, "emit")
+	config.OnEmit = func(_ context.Context, emission abi.Emission) abi.EmissionResult {
+		emissions <- emission
+		if emission.PluginID == "echo" {
+			return abi.EmissionResult{}
+		}
+		return answer
+	}
+	supervisor := NewSupervisor(config, fastLiveness())
+	t.Cleanup(func() { supervisor.Stop(context.Background()) })
+	if err := supervisor.Start(t.Context()); err != nil {
+		t.Fatalf("Start() = %v", err)
+	}
+	if _, err := supervisor.Load(t.Context(), helloRequest()); err != nil {
+		t.Fatalf("Load() = %v", err)
+	}
+	return supervisor, emissions
+}
+
+func awaitEmission(t *testing.T, emissions chan abi.Emission) abi.Emission {
+	t.Helper()
+	select {
+	case emission := <-emissions:
+		return emission
+	case <-time.After(10 * time.Second):
+		t.Fatal("no emission reached the host")
+		return abi.Emission{}
+	}
+}
+
+// EMIT is the one envelope a runtime may send unasked. It must reach the host
+// rather than be treated as the protocol violation everything else is.
+func TestSupervisorDispatchesAnEmissionRatherThanKilling(t *testing.T) {
+	supervisor, emissions := emitting(t, abi.EmissionResult{})
+
+	emission := awaitEmission(t, emissions)
+	if emission.PluginID != "fr.oreo.shop" || emission.TypeID != 1 {
+		t.Fatalf("OnEmit received %+v", emission)
+	}
+	if len(emission.Fields) != 1 || emission.Fields[0].Double != 1500 {
+		t.Fatalf("OnEmit received fields %+v", emission.Fields)
+	}
+	select {
+	case <-supervisor.Failed():
+		t.Fatalf("an emission was treated as a protocol violation: %v", supervisor.Err())
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// The reply travels back on the sequence number the runtime chose, which is the
+// half of the split the host does not control.
+func TestSupervisorAnswersOnTheRuntimesOwnSequence(t *testing.T) {
+	_, emissions := emitting(t, abi.EmissionResult{
+		Cancelled: true,
+		Mutations: []abi.Mutation{{Path: []uint32{0}, Value: abi.Double(1200)}},
+	})
+
+	awaitEmission(t, emissions) // the publication
+	echo := awaitEmission(t, emissions)
+	if echo.PluginID != "echo" {
+		t.Fatalf("the runtime was never woken with its answer, got %+v", echo)
+	}
+	if !echo.Fields[0].Bool {
+		t.Fatal("the runtime did not see the cancellation")
+	}
+	if echo.Fields[1].String != "" {
+		t.Fatalf("the runtime saw an error: %q", echo.Fields[1].String)
+	}
+	if echo.Fields[2].Int64 != 1 {
+		t.Fatalf("the runtime received %d mutations, want 1", echo.Fields[2].Int64)
+	}
+}
+
+// Dispatching reaches subscribers in this very runtime, and their replies come
+// back on the socket the read loop is standing on. Handling EMIT there would
+// deadlock, so this asks the host to talk to the runtime from inside OnEmit —
+// which only completes if the emission is being handled somewhere else.
+func TestSupervisorHandlesAnEmissionOffTheReadLoop(t *testing.T) {
+	done := make(chan error, 1)
+	config := fakeConfig(t, "emit")
+	var supervisor *Supervisor
+	config.OnEmit = func(ctx context.Context, emission abi.Emission) abi.EmissionResult {
+		if emission.PluginID == "echo" {
+			return abi.EmissionResult{}
+		}
+		roundTrip, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err := supervisor.Dispatch(roundTrip, "fr.oreo.hello", &abi.Event{Type: "block.break"})
+		done <- err
+		return abi.EmissionResult{}
+	}
+	supervisor = NewSupervisor(config, fastLiveness())
+	t.Cleanup(func() { supervisor.Stop(context.Background()) })
+	if err := supervisor.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Load(t.Context(), helloRequest()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Dispatch() from inside OnEmit = %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Dispatch() from inside OnEmit never returned: the read loop is blocked")
+	}
+}
+
+// A host with nothing to dispatch into is a gap in this host, not a runtime
+// speaking the wrong protocol. The plugin is told; the process lives.
+func TestSupervisorReportsAnEmissionItCannotDispatch(t *testing.T) {
+	config := fakeConfig(t, "emit")
+	supervisor := NewSupervisor(config, fastLiveness())
+	t.Cleanup(func() { supervisor.Stop(context.Background()) })
+	if err := supervisor.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Load(t.Context(), helloRequest()); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-supervisor.Failed():
+		t.Fatalf("an undispatchable emission killed the runtime: %v", supervisor.Err())
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// The host assigns the ids, so a table it cannot encode is a host bug and the
+// plugin must not be loaded against a half-built one.
+func TestSupervisorRefusesToLoadWithAnUnusableEventTable(t *testing.T) {
+	supervisor := startedSupervisor(t, "ok")
+	request := helloRequest()
+	request.EventTypes = []abi.EventBinding{{TypeID: 0, Type: "fr.oreo.shop/purchase"}}
+
+	if _, err := supervisor.Load(t.Context(), request); err == nil {
+		t.Fatal("Load() accepted an event bound to the native type id")
 	}
 }

@@ -97,10 +97,30 @@ func runFakeRuntime(behaviour, socket string) {
 			codec.Send(&wire.Envelope{Seq: envelope.GetSeq(), Body: &wire.Envelope_Pong{Pong: &wire.Pong{}}})
 		case *wire.Envelope_Load:
 			codec.Send(fakeLoadReply(behaviour, envelope))
+			if behaviour == "emit" {
+				// A plugin publishing an event, on the runtime's own even
+				// numbering. After LOAD, because that is when it learns the ids.
+				codec.Send(&wire.Envelope{Seq: 2, Body: &wire.Envelope_Emit{Emit: &wire.Emit{
+					PluginId: "fr.oreo.shop", TypeId: 1,
+					Fields: []*wire.Value{{Kind: &wire.Value_DoubleValue{DoubleValue: 1500}}},
+				}}})
+			}
 		case *wire.Envelope_Dispatch:
 			codec.Send(fakeDispatchReply(behaviour, envelope))
 		case *wire.Envelope_Invoke:
 			codec.Send(fakeInvokeReply(behaviour, envelope))
+		case *wire.Envelope_Emitted:
+			// Echo what the host answered back as a second emission, so the
+			// test can assert the runtime was woken with the right reply on its
+			// own sequence number.
+			codec.Send(&wire.Envelope{Seq: 4, Body: &wire.Envelope_Emit{Emit: &wire.Emit{
+				PluginId: "echo", TypeId: 1,
+				Fields: []*wire.Value{
+					{Kind: &wire.Value_BoolValue{BoolValue: envelope.GetEmitted().GetCancelled()}},
+					{Kind: &wire.Value_StringValue{StringValue: envelope.GetEmitted().GetError()}},
+					{Kind: &wire.Value_Int64Value{Int64Value: int64(len(envelope.GetEmitted().GetMutations()))}},
+				},
+			}}})
 		}
 	}
 }
