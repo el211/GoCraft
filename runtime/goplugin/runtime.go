@@ -10,6 +10,7 @@ import (
 
 	"GoCraft/core/plugin"
 	"GoCraft/runtime/link"
+	abi "github.com/GoCraft-MC/gocraft-abi/abi/v1"
 )
 
 const (
@@ -26,6 +27,13 @@ type Config struct {
 	Liveness         link.Liveness
 	Stdout           io.Writer
 	Stderr           io.Writer
+	// OnEmit dispatches a plugin-defined event this runtime's plugin published.
+	//
+	// The host supplies it rather than this package building one, because
+	// dispatching means reaching the registry and runtime/link must never see
+	// core/plugin. The closure is built where both are already in scope: the
+	// server.
+	OnEmit func(ctx context.Context, emission abi.Emission) abi.EmissionResult
 	// Spawn replaces process creation in tests.
 	Spawn func(executable string) link.Spawn
 }

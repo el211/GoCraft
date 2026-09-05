@@ -24,6 +24,7 @@ func (r *Runtime) newSupervisor(pluginID, executable string) *link.Supervisor {
 		EventBudget:  r.config.EventBudget,
 		StartTimeout: r.config.StartTimeout,
 		Spawn:        spawn,
+		OnEmit:       r.config.OnEmit,
 	}, r.config.Liveness)
 }
 
