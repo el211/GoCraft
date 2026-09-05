@@ -11,10 +11,13 @@ import (
 	"github.com/GoCraft-MC/gocraft-abi/command"
 )
 
-// EffectMessage delivers one line to whoever an effect names. It is the only
-// host call the server implements so far, and both the queue and the command
-// path have to agree on the string.
-const EffectMessage = "chat.message"
+// EffectMessage delivers one line to whoever an effect names.
+//
+// Re-exported from the contract rather than spelled again: a plugin asks for it
+// by that string and this host dispatches on it, so the two cannot be allowed
+// to drift. Kept as a name here because the queue and the command path both
+// reach for it and neither should have to import the contract to say "a reply".
+const EffectMessage = abi.EffectMessage
 
 // deliverCommandEffects performs what a command handler asked for.
 //
