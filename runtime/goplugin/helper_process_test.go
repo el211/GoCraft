@@ -17,8 +17,8 @@ func (*helperPlugin) OnLoad(context gocraft.Context) error {
 	if os.Getenv("GOCRAFT_NATIVE_PLUGIN_FAILURE") == "load" {
 		return errors.New("load failure")
 	}
-	if err := context.Events().OnBlockBreak(func(event *gocraft.BlockBreakEvent) {
-		event.Cancel()
+	if err := context.Events().OnBlockBreak(func(event *gocraft.BlockBreakEvent, control gocraft.EventControl) {
+		control.Cancel()
 	}); err != nil {
 		return err
 	}
