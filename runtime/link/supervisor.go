@@ -55,6 +55,7 @@ type Supervisor struct {
 	mu          sync.RWMutex
 	child       *Child
 	cancelWatch context.CancelFunc
+	emitCtx     context.Context
 	failed      chan struct{}
 	failClosed  bool
 	stopping    bool
@@ -100,6 +101,15 @@ type LoadRequest struct {
 	// Events are the subscriptions the manifest declared. What the runtime
 	// reports back is checked against them.
 	Events []string
+
+	// EventTypes binds the plugin-defined event types this plugin provides or
+	// subscribes to, to the ids the host assigned them.
+	//
+	// Only this plugin's own types: a runtime has no use for the id of an event
+	// none of its plugins can see. Empty for a plugin that touches none, which
+	// is every plugin that declares no [[events.provides]] and subscribes to
+	// nothing namespaced.
+	EventTypes []abi.EventBinding
 }
 
 // NewSupervisor prepares a supervisor for one runtime process. Nothing is
@@ -154,6 +164,10 @@ func (s *Supervisor) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.child = child
 	s.cancelWatch = cancel
+	// Emissions live as long as the process does, not as long as the boot
+	// context: a plugin publishing an event an hour after startup must not
+	// inherit a context that was cancelled the moment boot finished.
+	s.emitCtx = watchCtx
 	s.failed = make(chan struct{})
 	s.failClosed, s.stopping = false, false
 	protocolBroken := s.protocolErr != nil
@@ -175,6 +189,10 @@ func (s *Supervisor) Load(ctx context.Context, request LoadRequest) ([]string, e
 	if strings.TrimSpace(request.ID) == "" {
 		return nil, fmt.Errorf("ipc: %s: load request has no plugin id", s.config.Runtime)
 	}
+	bindings, err := ipc.EncodeEventBindings(request.EventTypes)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: %s: load %s: %w", s.config.Runtime, request.ID, err)
+	}
 	conn, err := s.conn()
 	if err != nil {
 		return nil, err
@@ -185,6 +203,7 @@ func (s *Supervisor) Load(ctx context.Context, request LoadRequest) ([]string, e
 		Entry:         request.Entry,
 		DataDirectory: request.DataDirectory,
 		CommandTree:   request.CommandTree,
+		EventTypes:    bindings,
 	}}})
 	if err != nil {
 		return nil, fmt.Errorf("ipc: %s: load %s: %w", s.config.Runtime, request.ID, err)
@@ -424,11 +443,21 @@ func (s *Supervisor) watch(ctx context.Context, child *Child) {
 // terminates the child asynchronously: while it runs, nothing is being read
 // off the socket.
 //
-// Every envelope the host expects is a reply to a request it made. Anything
-// else means the runtime is speaking a protocol this host does not, which does
-// not heal on its own — the first one is kept and the rest ignored, because the
-// cause is more useful than the count.
+// Almost every envelope the host expects is a reply to a request it made.
+// Anything else means the runtime is speaking a protocol this host does not,
+// which does not heal on its own — the first one is kept and the rest ignored,
+// because the cause is more useful than the count.
+//
+// EMIT is the one exception, and it is narrow: a plugin publishing a
+// plugin-defined event is the only exchange a runtime starts. It is handed to a
+// goroutine rather than answered here, because dispatching it reaches
+// subscribers in this same runtime and their replies arrive on the socket this
+// function is standing on.
 func (s *Supervisor) unsolicited(envelope *wire.Envelope) {
+	if emit := envelope.GetEmit(); emit != nil {
+		go s.emit(envelope.GetSeq(), emit)
+		return
+	}
 	s.mu.Lock()
 	if s.protocolErr != nil || s.stopping {
 		s.mu.Unlock()
@@ -441,4 +470,61 @@ func (s *Supervisor) unsolicited(envelope *wire.Envelope) {
 	if child != nil {
 		go kill(child.command)
 	}
+}
+
+// emit dispatches one published event and answers on the sequence number the
+// runtime chose.
+//
+// Every failure is reported in EMITTED rather than by killing the child. A
+// malformed emission, an unknown type, a host with nothing to dispatch into —
+// all of them are faults of one plugin, and in a runtime that hosts several,
+// killing the process would punish the ones that did nothing wrong. That is the
+// difference between this and the protocol violations above, which say the
+// runtime itself is not speaking this protocol.
+func (s *Supervisor) emit(seq uint64, emit *wire.Emit) {
+	s.mu.RLock()
+	child, stopping := s.child, s.stopping
+	s.mu.RUnlock()
+	if child == nil || stopping {
+		return
+	}
+	result := s.dispatchEmission(emit)
+	answer, err := ipc.EncodeEmissionResult(result)
+	if err != nil {
+		// The result is the host's own, so failing to encode it is a host bug
+		// and not something the plugin can be told about in a field that also
+		// failed to encode. Send the reason alone, so the emitter is woken.
+		answer = &wire.Emitted{Error: err.Error()}
+	}
+	envelope := &wire.Envelope{Seq: seq, Body: &wire.Envelope_Emitted{Emitted: answer}}
+	if err := child.conn.Send(envelope); err != nil {
+		// Nothing to escalate: a send that fails means the connection is gone,
+		// which the read loop is already reporting through Failed().
+		return
+	}
+}
+
+// dispatchEmission decodes an emission and hands it to the host, or explains
+// why it could not.
+func (s *Supervisor) dispatchEmission(emit *wire.Emit) abi.EmissionResult {
+	if s.config.OnEmit == nil {
+		return abi.EmissionResult{Error: fmt.Sprintf(
+			"runtime %s cannot publish events: this host dispatches none", s.config.Runtime)}
+	}
+	emission, err := ipc.DecodeEmission(emit)
+	if err != nil {
+		return abi.EmissionResult{Error: err.Error()}
+	}
+	return s.config.OnEmit(s.emissionContext(), emission)
+}
+
+// emissionContext is the running process's own context, so a dispatch is
+// abandoned when the runtime goes down rather than outliving it.
+func (s *Supervisor) emissionContext() context.Context {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.emitCtx == nil {
+		return context.Background()
+	}
+	return s.emitCtx
 }

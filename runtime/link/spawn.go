@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	abi "github.com/GoCraft-MC/gocraft-abi/abi/v1"
 	wire "github.com/GoCraft-MC/gocraft-abi/abi/v1/wire"
 	"github.com/GoCraft-MC/gocraft-abi/ipc"
 )
@@ -47,6 +48,19 @@ type Config struct {
 	// Handler receives envelopes that answer no request. It runs on the read
 	// goroutine and must not block.
 	Handler func(*wire.Envelope)
+
+	// OnEmit dispatches a plugin-defined event the runtime published, and
+	// answers what the subscribers did to it.
+	//
+	// It runs on its own goroutine, never on the read loop: dispatching reaches
+	// subscribers in this very runtime, and every reply from them has to be
+	// read off the socket the loop would be blocked on. ctx is the supervisor's
+	// own, so an emission outlives the request that caused it only as long as
+	// the process does.
+	//
+	// Nil means this host has nothing to dispatch into, which a plugin learns
+	// as an error in EMITTED rather than as a dead runtime.
+	OnEmit func(ctx context.Context, emission abi.Emission) abi.EmissionResult
 }
 
 const defaultStartTimeout = 30 * time.Second
