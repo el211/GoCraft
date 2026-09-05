@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -72,5 +73,40 @@ func TestBlockBreakPayloadIsEditionNeutral(t *testing.T) {
 	build, trusted := permissions[0].List, permissions[1].List
 	if build[0].String != "zone.build" || !build[1].Bool || trusted[0].String != "zone.trusted" || trusted[1].Bool {
 		t.Fatalf("resolved permissions = %+v", permissions)
+	}
+}
+
+// Two shapes name a recipient, because two kinds of event do.
+//
+// A native event passes back the whole PlayerRef it carried. A plugin-defined
+// one has no PlayerRef to pass — its author may declare primitives, a string
+// and a byte slice — so a bare uuid has to work, or a subscriber cannot answer
+// the player its event is about.
+func TestPlayerUUIDFromReadsBothShapes(t *testing.T) {
+	raw := make([]byte, 16)
+	for index := range raw {
+		raw[index] = byte(index)
+	}
+	for name, value := range map[string]abi.Value{
+		"a whole PlayerRef": abi.List(abi.Bytes(raw), abi.String("oreo"), abi.String("java")),
+		"a bare uuid":       abi.Bytes(raw),
+	} {
+		uuid, ok := PlayerUUIDFrom(value)
+		if !ok {
+			t.Fatalf("PlayerUUIDFrom(%s) refused it", name)
+		}
+		if !bytes.Equal(uuid[:], raw) {
+			t.Fatalf("PlayerUUIDFrom(%s) = %x, want %x", name, uuid, raw)
+		}
+	}
+	for name, value := range map[string]abi.Value{
+		"an empty list":      abi.List(),
+		"a short uuid":       abi.Bytes(raw[:8]),
+		"a number":           abi.Int64(7),
+		"a list of no bytes": abi.List(abi.String("oreo")),
+	} {
+		if _, ok := PlayerUUIDFrom(value); ok {
+			t.Fatalf("PlayerUUIDFrom(%s) accepted it as a recipient", name)
+		}
 	}
 }

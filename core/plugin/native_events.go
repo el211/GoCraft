@@ -116,25 +116,43 @@ func itemValue(stack player.ItemStack) abi.Value {
 		abi.Int64(int64(stack.Damage)))
 }
 
-// PlayerUUIDFrom reads the uuid out of a PlayerRef value.
+// PlayerUUIDFrom reads the uuid a host call names its recipient by.
 //
-// The inverse of playerReference, and it lives beside it so the two shapes
-// cannot drift: an effect carries the same PlayerRef the event did, and the
-// host has to read back exactly what it wrote.
+// Two shapes, because two kinds of event name a player. A native one carries a
+// whole PlayerRef and its effects pass the same value straight back, so the
+// host reads exactly what it wrote — that is the inverse of playerReference and
+// why the two live side by side.
+//
+// A plugin-defined event has no PlayerRef to pass: its layout is whatever its
+// author declared, and the vocabulary they may declare is primitives, a string
+// and a byte slice. So a bare sixteen-byte value is accepted as a recipient
+// too. Anything else would mean a subscriber cannot answer the player an event
+// is about, which is most of what a subscriber is for.
 //
 // It reports false for the empty list an absent player serialises to, which is
 // not an error — a block broken by a piston has nobody to send a message to.
 func PlayerUUIDFrom(value abi.Value) ([16]byte, bool) {
 	var uuid [16]byte
-	if value.Kind != abi.ValueList || len(value.List) == 0 {
+	switch value.Kind {
+	case abi.ValueBytes:
+		if len(value.Bytes) != len(uuid) {
+			return uuid, false
+		}
+		copy(uuid[:], value.Bytes)
+		return uuid, true
+	case abi.ValueList:
+		if len(value.List) == 0 {
+			return uuid, false
+		}
+		raw := value.List[0]
+		if raw.Kind != abi.ValueBytes || len(raw.Bytes) != len(uuid) {
+			return uuid, false
+		}
+		copy(uuid[:], raw.Bytes)
+		return uuid, true
+	default:
 		return uuid, false
 	}
-	raw := value.List[0]
-	if raw.Kind != abi.ValueBytes || len(raw.Bytes) != len(uuid) {
-		return uuid, false
-	}
-	copy(uuid[:], raw.Bytes)
-	return uuid, true
 }
 
 // TextFrom reads a string carried by a host call.
