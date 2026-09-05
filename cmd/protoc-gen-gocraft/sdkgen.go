@@ -198,7 +198,7 @@ func sdkDispatch(file *protogen.GeneratedFile, events []event) error {
 		file.P(fmt.Sprintf("\t\treturn %s(incoming.Fields, sink)", declared.SDKDecoder()))
 	}
 	file.P("\tdefault:")
-	file.P("\t\treturn customFrom(incoming)")
+	file.P("\t\treturn customFrom(incoming, sink)")
 	file.P("\t}")
 	file.P("}")
 	return nil
