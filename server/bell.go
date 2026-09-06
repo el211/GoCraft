@@ -1,6 +1,9 @@
 package server
 
 import (
+	"math"
+	"strconv"
+
 	"GoCraft/core/intent"
 	"GoCraft/core/player"
 	"GoCraft/core/spatial"
@@ -26,6 +29,22 @@ func (s *Server) applyBellRing(i intent.BellRingIntent) {
 	if valid {
 		s.ringBell(world, p.Dimension, i.Position, direction)
 	}
+}
+
+// playNoteBlock broadcasts the note sound when a note block is powered by
+// redstone. The instrument is derived from the block below (or from the stored
+// block state when already set), and the pitch from the note value.
+func (s *Server) playNoteBlock(x, y, z int, block coreworld.Block) {
+	instrument := block.Properties["instrument"]
+	if instrument == "" {
+		below := s.world.GetBlock(x, y-1, z)
+		instrument = coreworld.NoteBlockInstrument(below)
+	}
+	note, _ := strconv.Atoi(block.Properties["note"])
+	pitch := float32(math.Pow(2, (float64(note)-12)/12))
+	handler.BroadcastSoundAtDimension(s.sessions, s.simulationDimension,
+		"minecraft:block.note_block."+instrument, 1, // category: blocks
+		float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 3, pitch)
 }
 
 func (s *Server) ringBell(world *coreworld.World, dimension int32, position spatial.BlockPos, direction string) {

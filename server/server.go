@@ -5294,6 +5294,8 @@ func (s *Server) tickBlockPhysicsWorld() {
 			s.ringBell(s.world, s.simulationDimension, position, coreworld.BellFacingDirection(block))
 		case "minecraft:piston", "minecraft:sticky_piston":
 			blockChanges = append(blockChanges, s.world.ApplyPistonPower(pos[0], pos[1], pos[2], true)...)
+		case "minecraft:note_block":
+			s.playNoteBlock(pos[0], pos[1], pos[2], block)
 		}
 		// Pistons are handled by their dedicated movement system.
 	}

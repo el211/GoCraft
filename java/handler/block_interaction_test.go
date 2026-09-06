@@ -1102,6 +1102,8 @@ func TestJavaTunesNoteBlock(t *testing.T) {
 	p.GameMode = player.GameModeSurvival
 	w := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
 	defer w.Close()
+	// Place clay below so instrument derives to "flute".
+	w.SetBlock(2, 63, 0, coreworld.Block{Namespace: "minecraft", Name: "clay"})
 	w.SetBlock(2, 64, 0, coreworld.Block{
 		Namespace: "minecraft",
 		Name:      "note_block",
@@ -1115,7 +1117,8 @@ func TestJavaTunesNoteBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := w.GetBlock(2, 64, 0)
-	if got.Properties["note"] != "0" || got.Properties["instrument"] != "harp" || got.Properties["powered"] != "false" {
+	// note wraps from 24 → 0; instrument updates to "flute" (block below = clay).
+	if got.Properties["note"] != "0" || got.Properties["instrument"] != "flute" || got.Properties["powered"] != "false" {
 		t.Fatalf("tuned note block = %s", got.Key())
 	}
 }

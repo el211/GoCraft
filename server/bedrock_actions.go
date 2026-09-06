@@ -574,7 +574,8 @@ func (s *Server) applyBedrockBlockActivation(p *player.Player, pos spatial.Block
 		return true
 	}
 	if name == "minecraft:note_block" {
-		if replacement, ok := coreworld.TuneNoteBlock(block); ok {
+		blockBelow := s.bedrockWorld().GetBlock(x, y-1, z)
+		if replacement, ok := coreworld.TuneNoteBlock(block, blockBelow); ok {
 			s.setBedrockActionBlock(x, y, z, replacement)
 			return true
 		}
@@ -871,7 +872,8 @@ func (s *Server) bedrockPlacementState(p *player.Player, block coreworld.Block, 
 		}
 		props = map[string]string{"facing": frontFacing, "eye": "false"}
 	case name == "minecraft:note_block":
-		props = map[string]string{"instrument": "harp", "note": "0", "powered": "false"}
+		instrument := coreworld.NoteBlockInstrument(s.bedrockWorld().GetBlock(x, y-1, z))
+		props = map[string]string{"instrument": instrument, "note": "0", "powered": "false"}
 	case name == "minecraft:chest" || name == "minecraft:trapped_chest":
 		props = map[string]string{"facing": frontFacing, "type": "single", "waterlogged": "false"}
 	case name == "minecraft:barrel":

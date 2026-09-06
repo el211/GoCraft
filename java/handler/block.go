@@ -1138,7 +1138,8 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 		return nil
 	}
 	if !bypassActivation && targetBlock.ResourceLocation() == "minecraft:note_block" {
-		if tuned, ok := coreworld.TuneNoteBlock(targetBlock); ok {
+		blockBelow := w.GetBlock(int(bx), int(by)-1, int(bz))
+		if tuned, ok := coreworld.TuneNoteBlock(targetBlock, blockBelow); ok {
 			applyBlockChange(int(bx), int(by), int(bz), tuned, w, mgr)
 			instrument := tuned.Properties["instrument"]
 			if instrument == "" {
