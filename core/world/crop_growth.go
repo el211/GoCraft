@@ -652,7 +652,7 @@ func (w *World) ApplyBoneMeal(x, y, z int, seed uint64) (changes []BlockChange, 
 	}
 	age := CropAge(crop)
 	maximum, supported := CropMaxAge(name)
-	if !supported || name == "minecraft:nether_wart" || name == "minecraft:cocoa" || name == "minecraft:pitcher_crop" || age >= maximum {
+	if !supported || name == "minecraft:nether_wart" || age >= maximum {
 		return nil, false
 	}
 

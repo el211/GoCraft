@@ -98,12 +98,13 @@ implementation order; the largest remaining structural gaps first.
 2. **Remaining stateful block entities.** Banner patterns, item/glow item frames.
 3. **Entity interactions.** Leads & leash knots, horse/llama equipment UI, chest
    boats & storage minecarts, armour stands.
-4. **Remaining random-tick / neighbour behaviour (order 7).** Cocoa jungle-log
-   survival + bone meal, full fluid flow vectors / finite levels, fire flammability nuances.
-5. **Workstation operations.** Beacon effects, enchanting offers, grindstone disenchant,
+4. **Remaining random-tick / neighbour behaviour.** Cocoa jungle-log survival,
+   full fluid flow vectors / finite levels, fire flammability nuances. Bone meal
+   on grass area features (flowers, moss, mangrove, fungi/nylium).
+5. **Workstation operations.** Beacon effects, enchanting offers,
    smithing trims, loom patterns, cartography scaling — screens open but the defining
-   operation is absent.
-6. **Combat & survival depth (order 8).** Tipped/spectral arrows, and the remaining
+   operation is absent. (Grindstone disenchant and XP refund now done — batch 7.)
+6. **Combat & survival depth.** Tipped/spectral arrows, and the remaining
    exhaustion/hazard sources.
 7. **Items still missing outright.** Fishing rod, brush, writable/written book editing,
    bundles, and maps.
@@ -199,16 +200,16 @@ inventory move, save, cross-edition sync, or restart.
 | Compass / recovery compass | Partial | Partial | Static item identity exists. Lodestone target, dimension, tracking flag, last-death target, and canonical compass state are absent. |
 | Empty map / filled map | Partial | Partial | Empty map converts to a filled-map item and cartography accepts it, but map allocation, scale, lock, dimension, colours, decorations, exploration-map target, and live map packets are absent. |
 | Writable and written books | Missing | Missing | Pages, title, author, generation, editing/signing packets, validation, copying, and open-book interaction are absent. |
-| Music discs | Missing | Missing | Items exist, but insertion/ejection and playback require the missing jukebox behaviour. |
+| Music discs | Implemented (new) | Implemented (new) | Jukebox insert/eject and 19 disc sound events are fully implemented. Comparator signal now outputs the disc-specific value (1–15). |
 | Dyes, ink sacs, glow ink sacs | Partial | Partial | Sheep dyeing, sign text colour, glowing sign text (glow ink sac), and collar colour (wolf/cat) now work (batch 6). Loom pattern preservation, cauldron leather/banner washing, and banner pattern application are still absent. |
 | Shears | Partial | Partial | Carving pumpkins, harvesting beehives, sheep shearing (batch 4), mooshroom conversion, snow-golem pumpkin removal, and tripwire disarm (batch 6) now work on both editions. Complete sounds/durability rules still need verification. |
 | Glass bottle | Partial | Partial | Bedrock fills from a full beehive. Java does not. Water-source and water-cauldron filling, dragon-breath collection, incremental cauldron levels, and complete remainders are missing. |
 | Water/lava/powder-snow buckets | Partial | Partial | Basic source and full-cauldron transfer works. Fish, axolotl, tadpole, and entity capture/release; waterlogging/unwaterlogging; ultrawarm evaporation; and full dispenser/cauldron cases are incomplete. |
-| Spawn eggs | Partial | Partial | A dispenser can spawn a generic entity. Player block/entity use, baby spawning, mob-specific NBT/state, placement validation, and unsupported-entity rejection are absent. |
+| Spawn eggs | Partial | Partial | Player block use (spawns entity adjacent to clicked face) works on both editions. Right-clicking a matching adult mob with its spawn egg spawns a baby. Mob-specific NBT/state, and complete placement validation remain absent. |
 | Armour stand item | Missing | Missing | No placeable armour-stand entity, pose, equipment interaction, damage rules, or drops. |
 | Item frame / glow item frame | Missing | Missing | No placement, support validation, contained stack, rotation, map mode, comparator signal, punch removal, or glow behaviour. |
 | Bundle | Missing | Missing | No contents/weight component or insert/extract interaction. |
-| Shulker-box items | Partial | Partial | Placed storage works, but breaking spills contents and drops a separate empty box. Vanilla must keep the inventory inside the dropped shulker item. |
+| Shulker-box items | Implemented (new) | Implemented (new) | Breaking packs container items into the `minecraft:container` component of the dropped shulker-box item. The box re-opens with its inventory intact when re-placed. |
 
 ### Tools and block-use items
 
@@ -305,7 +306,7 @@ adapters unless noted:
 | Interaction | Status | Gap |
 | --- | --- | --- |
 | Sheep shearing and dyeing | Implemented (new) | Shearing, dyeing, wool regrowth, mooshroom conversion, snow-golem pumpkin removal, and Bedrock wool-color/sheared metadata all implemented. |
-| Cow/mooshroom milking | Implemented (new) | Bucket → milk bucket via shared interactAnimal path on both editions. Mooshroom mushroom-stew bowl, suspicious stew, and mooshroom→cow conversion remain. |
+| Cow/mooshroom milking | Implemented (new) | Bucket → milk bucket via shared interactAnimal path on both editions. Bowl on mooshroom → mushroom stew. Shearing mooshroom drops 5 mushrooms and converts to a plain cow. Suspicious stew interaction remains. |
 | Fish/axolotl/tadpole bucket capture | Missing | No capture/release data, bucket replacement, variant preservation, or water placement. |
 | Leads and leash knots | Missing | No leash ownership, fence knot entity, distance physics, drop, or detach interaction. |
 | Name tags | Implemented (new) | Applying a name tag on both editions sets DisplayName and CustomNameVisible; metadata broadcast to all viewers. DisplayName() helper reads minecraft:custom_name component. Anvil naming prerequisite and persistence across restart remain. |
