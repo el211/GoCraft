@@ -11,6 +11,7 @@ package handler
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"math"
@@ -1781,6 +1782,28 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 		}
 	}
 
+	if entityType := fishBucketEntity(held.ItemID); entityType != "" && nextEntityID != nil {
+		if face < 0 || int(face) >= len(faceOffset) {
+			return false
+		}
+		offset := faceOffset[face]
+		px, py, pz := x+int(offset[0]), y+int(offset[1]), z+int(offset[2])
+		if py >= coreworld.WorldMinY && py <= coreworld.WorldMaxY && placementReplaceable(w.GetBlock(px, py, pz).ResourceLocation()) {
+			applyBlockChange(px, py, pz, coreworld.MakeFluid("minecraft:water", 0), w, mgr)
+			var uuid [16]byte
+			id := nextEntityID()
+			binary.BigEndian.PutUint32(uuid[:4], uint32(id))
+			fish := corentity.New(id, uuid, entityType, float64(px)+0.5, float64(py)+0.5, float64(pz)+0.5)
+			fish.OnGround = true
+			w.Entities.Add(fish)
+			BroadcastSpawnMobInDimension(fish, mgr, p.Dimension)
+			replaceJavaBucket(p, "minecraft:bucket")
+			broadcastSoundAt(mgr, "minecraft:item.bucket.empty_fish", soundCategoryPlayers,
+				float64(px)+0.5, float64(py)+0.5, float64(pz)+0.5, 1, 1)
+		}
+		return true
+	}
+
 	if held.ItemID == "minecraft:water_bucket" || held.ItemID == "minecraft:lava_bucket" || held.ItemID == "minecraft:powder_snow_bucket" {
 		if strings.HasSuffix(target.ResourceLocation(), "_cauldron") {
 			return true
@@ -2160,6 +2183,26 @@ func replaceJavaBucket(p *player.Player, replacement string) {
 	}
 	p.Inventory[slot].Count--
 	p.GiveItem(player.ItemStack{ItemID: replacement, Count: 1})
+}
+
+// fishBucketEntity returns the entity type for a filled fish/aquatic bucket, or "".
+func fishBucketEntity(itemID string) corentity.EntityType {
+	switch itemID {
+	case "minecraft:cod_bucket":
+		return corentity.TypeCod
+	case "minecraft:salmon_bucket":
+		return corentity.TypeSalmon
+	case "minecraft:pufferfish_bucket":
+		return corentity.TypePufferfish
+	case "minecraft:tropical_fish_bucket":
+		return corentity.TypeTropicalFish
+	case "minecraft:axolotl_bucket":
+		return corentity.TypeAxolotl
+	case "minecraft:tadpole_bucket":
+		return corentity.TypeTadpole
+	default:
+		return ""
+	}
 }
 
 func isChestBlock(blockName string) bool {

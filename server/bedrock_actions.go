@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"GoCraft/core/blockloot"
+	corentity "GoCraft/core/entity"
 	"GoCraft/core/intent"
 	"GoCraft/core/itemregistry"
 	"GoCraft/core/player"
@@ -212,6 +213,22 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 			return true
 		}
 	}
+	if entityType := bedrockFishBucketEntity(item); entityType != "" && s.game != nil {
+		dx, dy, dz := bedrockFaceOffset(i.Face)
+		px, py, pz := x+dx, y+dy, z+dz
+		w := s.bedrockWorld()
+		if py >= coreworld.WorldMinY && py <= coreworld.WorldMaxY && bedrockPlacementReplaceable(w.GetBlock(px, py, pz).ResourceLocation()) {
+			s.setBedrockActionBlock(px, py, pz, coreworld.MakeFluid("minecraft:water", 0))
+			fish := corentity.New(s.game.NextEntityID(), newRandomUUID(), entityType,
+				float64(px)+0.5, float64(py)+0.5, float64(pz)+0.5)
+			fish.OnGround = true
+			w.Entities.Add(fish)
+			handler.BroadcastSpawnMobInDimension(fish, s.sessions, p.Dimension)
+			s.replaceBedrockHeldItem(p, "minecraft:bucket")
+		}
+		return true
+	}
+
 	if item == "minecraft:water_bucket" || item == "minecraft:lava_bucket" || item == "minecraft:powder_snow_bucket" {
 		if name == "minecraft:cauldron" {
 			var filled coreworld.Block
@@ -1435,4 +1452,23 @@ func bedrockDoorHinge(facing string, clickX, clickZ float32) string {
 func bedrockSignRotation(yaw float32) int {
 	rotation := int((yaw+180)*16/360+0.5) & 15
 	return rotation
+}
+
+func bedrockFishBucketEntity(itemID string) corentity.EntityType {
+	switch itemID {
+	case "minecraft:cod_bucket":
+		return corentity.TypeCod
+	case "minecraft:salmon_bucket":
+		return corentity.TypeSalmon
+	case "minecraft:pufferfish_bucket":
+		return corentity.TypePufferfish
+	case "minecraft:tropical_fish_bucket":
+		return corentity.TypeTropicalFish
+	case "minecraft:axolotl_bucket":
+		return corentity.TypeAxolotl
+	case "minecraft:tadpole_bucket":
+		return corentity.TypeTadpole
+	default:
+		return ""
+	}
 }
