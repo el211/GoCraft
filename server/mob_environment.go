@@ -2,6 +2,7 @@ package server
 
 import (
 	"math"
+	"strconv"
 
 	corentity "GoCraft/core/entity"
 	"GoCraft/core/player"
@@ -51,6 +52,10 @@ func (s *Server) tickMobSunlight(entity *corentity.Entity, hurtEntities *[]*core
 		return
 	}
 	s.tickEndermanWater(entity, hurtEntities)
+	// Water cauldron extinguishes fire for any burning entity.
+	if entity.FireTicks > 0 {
+		s.tryExtinguishInCauldron(entity)
+	}
 	if s.simulationDimension != dimensionOverworld || !burnsInDaylight(entity.Type) {
 		return
 	}
@@ -70,6 +75,32 @@ func (s *Server) tickMobSunlight(entity *corentity.Entity, hurtEntities *[]*core
 	if wasBurning != (entity.FireTicks > 0) {
 		handler.BroadcastMobFireState(entity, s.sessions)
 	}
+}
+
+// tryExtinguishInCauldron clears FireTicks and reduces the water cauldron
+// level when a burning entity stands inside a water cauldron.
+func (s *Server) tryExtinguishInCauldron(entity *corentity.Entity) {
+	x := int(math.Floor(entity.Position.X))
+	y := int(math.Floor(entity.Position.Y))
+	z := int(math.Floor(entity.Position.Z))
+	block := s.world.GetBlock(x, y, z)
+	if block.ResourceLocation() != "minecraft:water_cauldron" {
+		return
+	}
+	level, _ := strconv.Atoi(block.Properties["level"])
+	if level <= 0 {
+		return
+	}
+	entity.FireTicks = 0
+	level--
+	var replacement coreworld.Block
+	if level == 0 {
+		replacement = coreworld.Block{Namespace: "minecraft", Name: "cauldron"}
+	} else {
+		replacement = coreworld.Block{Namespace: "minecraft", Name: "water_cauldron",
+			Properties: map[string]string{"level": strconv.Itoa(level)}}
+	}
+	s.world.SetBlock(x, y, z, replacement)
 }
 
 func (s *Server) mobInDirectDaylight(entity *corentity.Entity) bool {
