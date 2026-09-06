@@ -273,6 +273,17 @@ func handleUseItem(pkt *protocol.Packet, p *player.Player, conn *network.ClientC
 		p.UsingItemID = "minecraft:spyglass"
 		p.UsingItemSince = time.Now()
 		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
+	case "minecraft:carrot_on_a_stick", "minecraft:warped_fungus_on_a_stick":
+		// Steering rod: damage the item 7 durability per use when riding.
+		if p.VehicleEntityID != 0 && p.GameMode != player.GameModeCreative {
+			p.Inventory[heldSlot].ApplyDamage(7)
+			normalizeStack(&p.Inventory[heldSlot])
+			p.ContainerStateID++
+			if err := sendSetContainerContent(conn, p, p.ContainerStateID); err != nil {
+				return err
+			}
+		}
+		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 	}
 	armorSlot := armorInventorySlot(p.Inventory[heldSlot].ItemID)
 	if armorSlot < 5 {

@@ -1379,6 +1379,11 @@ func (s *Server) applyBedrockStartUseItem(i intent.StartUseItemIntent) {
 		p.UsingItemSince = time.Now()
 		return
 	}
+	if (stack.ItemID == "minecraft:carrot_on_a_stick" || stack.ItemID == "minecraft:warped_fungus_on_a_stick") &&
+		p.VehicleEntityID != 0 && p.GameMode != player.GameModeCreative {
+		s.damageBedrockHeldItem(p, 7)
+		return
+	}
 	if stack.ItemID == "minecraft:wind_charge" {
 		previousHeldSlot := p.HeldSlot
 		p.HeldSlot = hotbar
