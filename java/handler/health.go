@@ -150,7 +150,19 @@ func reducedDamage(p *player.Player, damage float32, legacyArmor bool) float32 {
 	}
 	toughness := p.ArmorToughness()
 	reduction := float32(math.Min(20, math.Max(float64(armour/5), float64(armour-damage/(2+toughness/4)))))
-	return damage * (1 - reduction/25)
+	damage = damage * (1 - reduction/25)
+	// Protection enchantment: 4 EPF per level, capped at 20 total.
+	epf := 0
+	for i := 5; i <= 8; i++ {
+		epf += p.Inventory[i].EnchantmentLevel("minecraft:protection") * 4
+	}
+	if epf > 20 {
+		epf = 20
+	}
+	if epf > 0 {
+		damage = damage * float32(25-epf) / 25
+	}
+	return damage
 }
 
 // DamagePlayer applies a normal survival hit using modern armour reduction.
