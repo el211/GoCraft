@@ -20,13 +20,20 @@ type subscriber struct {
 	instance    Instance
 	health      *healthTracker
 	permissions []string
+	// cold remembers which event types this subscriber has answered, so the
+	// first of each gets the grace its process genuinely needs.
+	cold *coldStarts
 }
 
 // Bus routes events to subscriptions declared before plugin code starts.
 type Bus struct {
 	ctx    context.Context
 	budget time.Duration
-	host   Host
+	// coldGrace is added to an event's budget the first time a subscriber sees
+	// it. See coldstart.go for what it is paying for and why it is not §06's
+	// budget being widened.
+	coldGrace time.Duration
+	host      Host
 
 	mu                 sync.RWMutex
 	subs               map[string][]*subscriber
@@ -49,7 +56,7 @@ func newBus(ctx context.Context, budget time.Duration, host Host) *Bus {
 		host = NewMutationQueue()
 	}
 	return &Bus{
-		ctx: ctx, budget: budget, host: host,
+		ctx: ctx, budget: budget, coldGrace: defaultColdGrace, host: host,
 		subs: make(map[string][]*subscriber), health: make(map[string]*healthTracker),
 	}
 }
@@ -87,6 +94,7 @@ func (b *Bus) Attach(instance Instance) error {
 		sub := &subscriber{
 			id: manifest.ID, priority: declared.Priority, instance: instance, health: tracker,
 			permissions: append([]string(nil), declared.Permissions...),
+			cold:        newColdStarts(),
 		}
 		b.subs[declared.Event] = append(b.subs[declared.Event], sub)
 		sort.Slice(b.subs[declared.Event], func(i, j int) bool {

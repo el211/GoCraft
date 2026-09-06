@@ -27,7 +27,8 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 	if len(subscribers) == 0 {
 		return abi.EmissionResult{}
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, b.budget)
+	budget, _ := b.budgetFor(subscribers, definition.Type)
+	ctx, cancel := context.WithTimeout(b.ctx, budget)
 	defer cancel()
 
 	state := emission.Fields
@@ -48,8 +49,10 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 			OnFailure: failurePolicy(definition),
 		}
 		started := time.Now()
+		firstOfItsKind := sub.cold.cold(definition.Type)
 		verdict, err := sub.instance.Dispatch(ctx, event)
 		took := time.Since(started)
+		sub.cold.ran(definition.Type)
 		if budgetEnded(err) {
 			sub.health.record(time.Now(), true, took)
 			b.recordStarved(subscribers[index+1:], definition.Type)
@@ -58,7 +61,7 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 			// that spent a hundred milliseconds on its first dispatch, and
 			// those two are not the same problem.
 			slog.Warn("plugin event deadline exceeded", "plugin", sub.id,
-				"event", definition.Type, "took", took, "budget", b.budget)
+				"event", definition.Type, "took", took, "budget", budget)
 			return b.starvedResult(definition, applied)
 		}
 		if err != nil {
@@ -70,6 +73,7 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 			continue
 		}
 		sub.health.record(time.Now(), false, took)
+		b.reportColdStart(firstOfItsKind, sub, definition.Type, took)
 		b.reportLateVerdict(ctx, sub, definition.Type, took)
 		b.enqueueEffects(sub, definition.Type, verdict.Effects)
 		state, applied = b.applyMutations(sub, definition, state, applied, verdict.Mutations)

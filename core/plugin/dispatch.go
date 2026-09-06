@@ -18,7 +18,8 @@ func (b *Bus) EmitCancellable(event *abi.Event) bool {
 	if len(subscribers) == 0 {
 		return true
 	}
-	ctx, cancel := context.WithTimeout(b.ctx, b.budget)
+	budget, _ := b.budgetFor(subscribers, event.Type)
+	ctx, cancel := context.WithTimeout(b.ctx, budget)
 	defer cancel()
 	for index, sub := range subscribers {
 		if sub.health.isDisabled() {
@@ -29,13 +30,15 @@ func (b *Bus) EmitCancellable(event *abi.Event) bool {
 			return failureAllows(event)
 		}
 		started := time.Now()
+		firstOfItsKind := sub.cold.cold(event.Type)
 		verdict, err := sub.instance.Dispatch(ctx, event)
 		took := time.Since(started)
+		sub.cold.ran(event.Type)
 		if budgetEnded(err) {
 			sub.health.record(time.Now(), true, took)
 			b.recordStarved(subscribers[index+1:], event.Type)
 			slog.Warn("plugin event deadline exceeded", "plugin", sub.id,
-				"event", event.Type, "took", took, "budget", b.budget)
+				"event", event.Type, "took", took, "budget", budget)
 			return failureAllows(event)
 		}
 		if err != nil {
@@ -47,6 +50,7 @@ func (b *Bus) EmitCancellable(event *abi.Event) bool {
 			continue
 		}
 		sub.health.record(time.Now(), false, took)
+		b.reportColdStart(firstOfItsKind, sub, event.Type, took)
 		b.reportLateVerdict(ctx, sub, event.Type, took)
 		b.enqueueEffects(sub, event.Type, verdict.Effects)
 		if verdict.Cancelled {
@@ -79,6 +83,20 @@ func budgetEnded(err error) bool {
 // The verdict counts — it arrived — but everyone after it is starved, so this
 // is the line that says who spent the event. Without it the starvation counters
 // name the victims and nothing names the cause.
+// reportColdStart names a first dispatch that would not have fitted the plain
+// budget, at a level that says "this was expected" rather than "this is wrong".
+//
+// Said out loud all the same. It is the one moment where a plugin's own code
+// costs milliseconds instead of microseconds, and an admin comparing two plugins
+// should be able to see which of them is slow to wake.
+func (b *Bus) reportColdStart(cold bool, sub *subscriber, event string, took time.Duration) {
+	if !cold || took <= b.budget {
+		return
+	}
+	slog.Info("plugin event warmed on its first dispatch", "plugin", sub.id,
+		"event", event, "took", took, "budget", b.budget, "grace", b.coldGrace)
+}
+
 func (b *Bus) reportLateVerdict(ctx context.Context, sub *subscriber, event string, took time.Duration) {
 	if ctx.Err() == nil {
 		return
