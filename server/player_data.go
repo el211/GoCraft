@@ -44,6 +44,7 @@ type persistedPlayerData struct {
 	HeldSlot      int                                    `json:"held_slot"`
 	SpawnPoint    spatial.BlockPos                       `json:"spawn_point"`
 	HasSpawnPoint bool                                   `json:"has_spawn_point"`
+	SpawnIsAnchor bool                                   `json:"spawn_is_anchor,omitempty"`
 	Dimension     int32                                  `json:"dimension"`
 }
 
@@ -75,7 +76,7 @@ func snapshotPlayerData(p *player.Player) persistedPlayerData {
 		Health: health, Dead: dead, Food: food, Saturation: saturation, Exhaustion: exhaustion, Experience: experience, Tags: p.Tags(),
 		Absorption: p.AbsorptionSnapshot(), StatusEffects: p.StatusEffectsSnapshot(),
 		Inventory: p.Inventory, EnderChest: p.EnderChestInventory, HeldSlot: p.HeldSlot,
-		SpawnPoint: p.SpawnPoint, HasSpawnPoint: p.HasSpawnPoint,
+		SpawnPoint: p.SpawnPoint, HasSpawnPoint: p.HasSpawnPoint, SpawnIsAnchor: p.SpawnIsAnchor,
 		Dimension: p.Dimension,
 	}
 }
@@ -209,6 +210,7 @@ func applyPersistedPlayerData(p *player.Player, data persistedPlayerData) error 
 	p.HeldSlot = data.HeldSlot
 	p.SpawnPoint = data.SpawnPoint
 	p.HasSpawnPoint = data.HasSpawnPoint
+	p.SpawnIsAnchor = data.SpawnIsAnchor
 	p.Dimension = data.Dimension
 	return nil
 }

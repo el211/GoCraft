@@ -186,13 +186,18 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		s.consumeBedrockHeldItem(p, 1)
 		return true
 	}
-
-	if item == "minecraft:bone_meal" {
-		if name == "minecraft:grass_block" && s.bedrockWorld().GetBlock(x, y+1, z).IsAir() {
-			s.setBedrockActionBlock(x, y+1, z, bedrockBlock("short_grass", nil))
-			s.consumeBedrockHeldItem(p, 1)
+	// Right-clicking a charged anchor without glowstone in the Nether sets spawn.
+	if name == "minecraft:respawn_anchor" && p.Dimension == dimensionNether {
+		charges, _ := strconv.Atoi(target.Properties["charges"])
+		if charges > 0 {
+			p.SpawnPoint = spatial.BlockPos{X: int32(x), Y: int32(y), Z: int32(z)}
+			p.HasSpawnPoint = true
+			p.SpawnIsAnchor = true
 			return true
 		}
+	}
+
+	if item == "minecraft:bone_meal" {
 		seed := uint64(s.worldAge) + uint64(coreworld.CropAge(target)+1)*0x9e3779b97f4a7c15
 		if changes, used := s.bedrockWorld().ApplyBoneMeal(x, y, z, seed); used {
 			s.broadcastCanonicalCropChanges(changes)
