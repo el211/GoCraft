@@ -343,6 +343,21 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		return true
 	}
 
+	if strings.HasSuffix(item, "_spawn_egg") && s.game != nil {
+		entityType := corentity.EntityType("minecraft:" + strings.TrimSuffix(strings.TrimPrefix(item, "minecraft:"), "_spawn_egg"))
+		if corentity.DefaultMaxHealth(entityType) > 0 {
+			dx, dy, dz := bedrockFaceOffset(i.Face)
+			sx, sy, sz := x+dx, y+dy, z+dz
+			e := corentity.New(s.game.NextEntityID(), newRandomUUID(), entityType,
+				float64(sx)+0.5, float64(sy)+0.5, float64(sz)+0.5)
+			e.OnGround = true
+			s.bedrockWorld().Entities.Add(e)
+			handler.BroadcastSpawnMobInDimension(e, s.sessions, p.Dimension)
+			s.consumeBedrockHeldItem(p, 1)
+			return true
+		}
+	}
+
 	if item == "minecraft:flint_and_steel" || item == "minecraft:fire_charge" {
 		if name == "minecraft:tnt" {
 			var changes []coreworld.BlockChange

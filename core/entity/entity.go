@@ -454,6 +454,11 @@ func NewPrimedTNT(id int32, uuid [16]byte, x, y, z float64) *Entity {
 
 // defaultMaxHealth returns the base max health for all entity types.
 // Unknown types default to 20 (10 hearts).
+// DefaultMaxHealth returns the base max health for a given entity type, or 0
+// when the type is unknown / not a living entity. Used by spawn-egg handlers
+// to validate the entity type before spawning.
+func DefaultMaxHealth(t EntityType) float32 { return defaultMaxHealth(t) }
+
 func defaultMaxHealth(t EntityType) float32 {
 	switch t {
 	// Passive — low health

@@ -2074,6 +2074,30 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 		return true
 	}
 
+	if strings.HasSuffix(held.ItemID, "_spawn_egg") && nextEntityID != nil {
+		entityType := corentity.EntityType("minecraft:" + strings.TrimSuffix(strings.TrimPrefix(held.ItemID, "minecraft:"), "_spawn_egg"))
+		if corentity.DefaultMaxHealth(entityType) > 0 {
+			if face < 0 || int(face) >= len(faceOffset) {
+				return false
+			}
+			offset := faceOffset[face]
+			sx, sy, sz := x+int(offset[0]), y+int(offset[1]), z+int(offset[2])
+			id := nextEntityID()
+			var uuid [16]byte
+			binary.BigEndian.PutUint32(uuid[:4], uint32(id))
+			e := corentity.New(id, uuid, entityType, float64(sx)+0.5, float64(sy)+0.5, float64(sz)+0.5)
+			e.OnGround = true
+			w.Entities.Add(e)
+			BroadcastSpawnMobInDimension(e, mgr, p.Dimension)
+			if p.GameMode != player.GameModeCreative {
+				slot := player.HotbarStart + p.HeldSlot
+				p.Inventory[slot].Count--
+				normalizeStack(&p.Inventory[slot])
+			}
+			return true
+		}
+	}
+
 	if face != 1 || !w.GetBlock(x, y+1, z).IsAir() {
 		return false
 	}
