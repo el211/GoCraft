@@ -2599,7 +2599,7 @@ func (s *Server) applyBedrockConsumableEffects(p *player.Player, stack player.It
 		if effectType := bedrockEffectType(stored.ID); effectType != 0 && s.bedrockListener != nil {
 			s.bedrockListener.SendPlayerMobEffect(p, effectType, stored.Amplifier, stored.Duration)
 		}
-		if stored.ID == "minecraft:glowing" && p.Edition == player.ClientEditionJava {
+		if (stored.ID == "minecraft:glowing" || stored.ID == "minecraft:invisibility") && p.Edition == player.ClientEditionJava {
 			glowingApplied = true
 		}
 	}

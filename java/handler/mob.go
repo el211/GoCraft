@@ -388,9 +388,12 @@ func BroadcastMobMetadataInDimension(e *corentity.Entity, mgr *session.Manager, 
 }
 
 // PlayerSharedFlags computes the shared entity flags byte for a player.
-// Bit 0x40 = Glowing effect active (visible outline through walls).
+// Bit 0x20 = Invisibility effect active; bit 0x40 = Glowing effect active.
 func PlayerSharedFlags(p *player.Player) byte {
 	flags := byte(0)
+	if _, ok := p.StatusEffect("minecraft:invisibility"); ok {
+		flags |= 0x20
+	}
 	if _, ok := p.StatusEffect("minecraft:glowing"); ok {
 		flags |= 0x40
 	}

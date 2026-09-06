@@ -55,7 +55,7 @@ func (s *Server) applyPotionOutcome(target *session.Session, outcome player.Poti
 		}
 		if p.Edition == player.ClientEditionJava {
 			handler.SendMobEffect(target.Conn, p, stored.ID, stored.Amplifier, stored.Duration)
-			if stored.ID == "minecraft:glowing" {
+			if stored.ID == "minecraft:glowing" || stored.ID == "minecraft:invisibility" {
 				glowingChanged = true
 			}
 		} else if effectType := bedrockEffectType(stored.ID); effectType != 0 && s.bedrockListener != nil {

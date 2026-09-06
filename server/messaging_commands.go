@@ -121,7 +121,7 @@ func (s *Server) syncPlayerStatusEffect(target *player.Player, effect player.Sta
 		for _, viewer := range s.sessions.SnapshotAll() {
 			handler.SendMobEffect(viewer.Conn, target, effect.ID, effect.Amplifier, effect.Duration)
 		}
-		if effect.ID == "minecraft:glowing" && target.Edition == player.ClientEditionJava {
+		if (effect.ID == "minecraft:glowing" || effect.ID == "minecraft:invisibility") && target.Edition == player.ClientEditionJava {
 			handler.BroadcastPlayerSharedFlags(target.EntityID, handler.PlayerSharedFlags(target), s.sessions)
 		}
 	}
