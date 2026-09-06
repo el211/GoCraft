@@ -81,10 +81,12 @@ func isCanonicalCrop(name string) bool {
 }
 
 // isTickableGrowth reports whether a block participates in the crop scan: a
-// canonical crop, a self-paced tall plant (sugar cane, cactus), or a kelp tip.
+// canonical crop, a self-paced tall plant (sugar cane, cactus), a kelp tip,
+// a nether vine head, or a bamboo segment/sapling.
 func isTickableGrowth(name string) bool {
 	return isCanonicalCrop(name) || isTallPlantGrowth(name) ||
-		name == "minecraft:kelp" || isNetherVineHead(name)
+		name == "minecraft:kelp" || isNetherVineHead(name) ||
+		isBambooGrowthBlock(name)
 }
 
 func standardMoistureCrop(name string) bool {
@@ -348,6 +350,9 @@ func (w *World) tickCropAt(x, y, z int, crop Block, tick int64, changeBudget int
 	}
 	if isNetherVineHead(name) {
 		return w.tickNetherVineAt(x, y, z, crop, tick)
+	}
+	if isBambooGrowthBlock(name) {
+		return w.tickBambooAt(x, y, z, crop, tick)
 	}
 	if !w.cropCanSurviveAt(x, y, z, crop) {
 		w.SetBlock(x, y, z, Air)
