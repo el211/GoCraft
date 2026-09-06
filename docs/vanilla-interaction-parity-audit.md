@@ -79,6 +79,7 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Dragon egg teleport.** Right-clicking or beginning to punch the dragon egg in non-creative mode now teleports it to a random replaceable position (±7 x/z, ±1 y, up to 1 000 attempts). Creative players can break it normally. Both Java and Bedrock.
 - **Sponge nether instant drying.** Wet sponge placed in the Nether (ultrawarm world) instantly converts to a dry sponge. `World.SetUltrawarm(true)` enables the flag; the nether world sets it on startup.
 - **Cauldron entity fire extinguish.** A burning mob standing inside a `minecraft:water_cauldron` block now has its `FireTicks` cleared and the cauldron's water level decremented (level 1 → empty cauldron). Checked every entity tick for any entity with `FireTicks > 0`.
+- **Bone meal on bamboo and kelp.** `ApplyBoneMeal` now handles `minecraft:bamboo_sapling` (converts to first segment unconditionally), `minecraft:bamboo` tip (grows one block up if below target height), and `minecraft:kelp` tip (grows one block up if below age 25 and water above). Both Java and Bedrock via shared `w.ApplyBoneMeal`.
 
 ## Still left to do (as of batch 6)
 
@@ -269,8 +270,8 @@ operations before adding Java calls — was followed for all nine.
 | Coral and coral blocks | Implemented (new) | Live coral now schedules a death check 60 ticks after losing water contact and converts to its dead variant; waterlogged or water-adjacent coral survives. Bone-meal coral-block spreading remains. |
 | Cactus | Implemented (new) | Random growth to a three-block height with the age counter, refusing to grow beside a solid block. Contact damage and support removal were already present. Item destruction and entity collision detail remain. |
 | Sugar cane | Implemented (new) | Random growth to a three-block height through the age counter. Placement/support removal was already present. Water-adjacency survival is still enforced only by block physics. |
-| Bamboo / bamboo sapling | Implemented (new) | Sapling conversion (~1-in-3 ticks), random upward growth, position-seeded height cap (12–16 blocks), and correct small/large/none leaf transitions are implemented. Bone-meal growth remains. |
-| Kelp | Implemented (new) | Random column growth through water: the age-0..25 tip advances into source water above, leaving kelp_plant bodies behind. Bone-meal growth and break-from-below rules remain. |
+| Bamboo / bamboo sapling | Implemented (new) | Sapling conversion (~1-in-3 ticks), random upward growth, position-seeded height cap (12–16 blocks), and correct small/large/none leaf transitions are implemented. Bone meal now converts sapling to segment and advances the tip by one block. Break-from-below rules remain. |
+| Kelp | Implemented (new) | Random column growth through water: the age-0..25 tip advances into source water above, leaving kelp_plant bodies behind. Bone meal now advances the tip one block (no random gate). Break-from-below rules remain. |
 | Vines / cave vines / twisting and weeping vines | Partial | Twisting/weeping vines grow via the age-0..25 tip mechanic. Cave vines grow downward and grow berries; harvest wired. Ordinary vine now spreads downward and horizontally via random tick (batch 4). Climbing state, bone meal, and shears rules are still absent. |
 | Cocoa | Partial | A bounded legacy growth tick exists. Correct jungle-log attachment/facing survival, placement interaction, and bone meal are absent. |
 | Fire | Partial | Placement, scheduled spread/burnout, and contact damage exist. Fire immunity/effects, rain extinguishing, portal interaction details, gamerules, block-specific flammability, and complete soul-fire rules remain. |

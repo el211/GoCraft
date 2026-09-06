@@ -508,6 +508,74 @@ func (w *World) TickCrops(tick int64, maxChanges int) []BlockChange {
 func (w *World) ApplyBoneMeal(x, y, z int, seed uint64) (changes []BlockChange, used bool) {
 	crop := w.GetBlock(x, y, z)
 	name := crop.ResourceLocation()
+
+	// Bamboo sapling: convert to first bamboo segment unconditionally.
+	if name == "minecraft:bamboo_sapling" {
+		below, loaded := w.blockIfLoaded(x, y-1, z)
+		if !loaded || !validBambooSoil(below.ResourceLocation()) {
+			return nil, false
+		}
+		above, aLoaded := w.blockIfLoaded(x, y+1, z)
+		if !aLoaded || !above.IsAir() {
+			return nil, false
+		}
+		segment := makeBambooBlock("small")
+		w.SetBlock(x, y, z, segment)
+		return []BlockChange{{X: x, Y: y, Z: z, Block: segment}}, true
+	}
+
+	// Bamboo tip: grow one block upward if below target height.
+	if name == "minecraft:bamboo" {
+		abv, loaded := w.blockIfLoaded(x, y+1, z)
+		if !loaded || !abv.IsAir() {
+			return nil, false
+		}
+		height := w.bambooColumnHeight(x, y, z)
+		baseY := y - height + 1
+		target := bambooTargetHeight(x, baseY, z)
+		if height >= target {
+			return nil, false
+		}
+		newTip := makeBambooBlock("small")
+		w.SetBlock(x, y+1, z, newTip)
+		cs := []BlockChange{{X: x, Y: y + 1, Z: z, Block: newTip}}
+		// Update current segment leaves.
+		if height >= 1 {
+			updated := makeBambooBlock(bambooLeaves(0, height+1))
+			w.SetBlock(x, y, z, updated)
+			cs = append(cs, BlockChange{X: x, Y: y, Z: z, Block: updated})
+		}
+		if height >= 2 {
+			prev := w.GetBlock(x, y-1, z)
+			if prev.ResourceLocation() == "minecraft:bamboo" {
+				updated := makeBambooBlock(bambooLeaves(1, height+1))
+				w.SetBlock(x, y-1, z, updated)
+				cs = append(cs, BlockChange{X: x, Y: y - 1, Z: z, Block: updated})
+			}
+		}
+		return cs, true
+	}
+
+	// Kelp tip: grow one block upward (no age gate).
+	if name == "minecraft:kelp" {
+		age := kelpAge(crop)
+		if age >= kelpMaxAge {
+			return nil, false
+		}
+		abv, loaded := w.blockIfLoaded(x, y+1, z)
+		if !loaded || abv.ResourceLocation() != "minecraft:water" || FluidLevel(abv) != 0 {
+			return nil, false
+		}
+		newTip := Block{Namespace: "minecraft", Name: "kelp", Properties: map[string]string{"age": strconv.Itoa(age + 1)}}
+		body := Block{Namespace: "minecraft", Name: "kelp_plant"}
+		w.SetBlock(x, y+1, z, newTip)
+		w.SetBlock(x, y, z, body)
+		return []BlockChange{
+			{X: x, Y: y + 1, Z: z, Block: newTip},
+			{X: x, Y: y, Z: z, Block: body},
+		}, true
+	}
+
 	if (strings.HasSuffix(name, "_sapling") && name != "minecraft:bamboo_sapling") || name == "minecraft:mangrove_propagule" {
 		stage, _ := strconv.Atoi(crop.Properties["stage"])
 		if stage <= 0 {
