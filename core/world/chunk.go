@@ -56,6 +56,11 @@ type BlockEntity struct {
 	SignBackGlowing  bool
 	SignFrontColor   string // "" means default ("black")
 	SignBackColor    string // "" means default ("black")
+
+	// LastBookshelfSlot is the 1-based slot index (1–6) of the most recent
+	// insert or eject on a chiseled bookshelf. 0 means no interaction yet.
+	// The comparator output equals this value directly (0–6).
+	LastBookshelfSlot int8
 }
 
 // ContainerItem is an edition-independent item stored in a block container.

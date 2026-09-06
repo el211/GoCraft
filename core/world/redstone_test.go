@@ -267,3 +267,37 @@ func TestCopperBulbTogglesOnlyOnRisingEdge(t *testing.T) {
 		t.Fatalf("unpowered bulb = %s", got.Key())
 	}
 }
+
+func TestChiseledBookshelfComparatorSignal(t *testing.T) {
+	w := New(&FlatGenerator{}, nil, false)
+	defer w.Close()
+	bs := Block{Namespace: "minecraft", Name: "chiseled_bookshelf",
+		Properties: map[string]string{
+			"facing": "south", "slot_0_occupied": "false", "slot_1_occupied": "false",
+			"slot_2_occupied": "false", "slot_3_occupied": "false",
+			"slot_4_occupied": "false", "slot_5_occupied": "false",
+		}}
+	w.SetBlock(0, 64, -1, bs)
+	w.SetBlock(0, 64, 0, Block{Namespace: "minecraft", Name: "comparator",
+		Properties: map[string]string{"facing": "north", "mode": "compare", "powered": "false"}})
+
+	// No interaction: output should be 0.
+	w.Redstone.FlushUpdates()
+	if got := w.Redstone.PowerAt(0, 64, 0); got != 0 {
+		t.Fatalf("empty bookshelf comparator = %d, want 0", got)
+	}
+
+	// Simulate insert at slot 2 (1-based = 3).
+	w.SetBookshelfLastSlot(0, 64, -1, 3)
+	w.Redstone.FlushUpdates()
+	if got := w.Redstone.PowerAt(0, 64, 0); got != 3 {
+		t.Fatalf("bookshelf comparator after slot 3 insert = %d, want 3", got)
+	}
+
+	// Eject from slot 5 (1-based = 6).
+	w.SetBookshelfLastSlot(0, 64, -1, 6)
+	w.Redstone.FlushUpdates()
+	if got := w.Redstone.PowerAt(0, 64, 0); got != 6 {
+		t.Fatalf("bookshelf comparator after slot 6 eject = %d, want 6", got)
+	}
+}

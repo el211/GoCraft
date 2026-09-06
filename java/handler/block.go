@@ -957,6 +957,7 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 					}
 				}
 				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:chiseled_bookshelf", newItems)
+				w.SetBookshelfLastSlot(int(bx), int(by), int(bz), slot+1)
 				drop := player.ItemStack{ItemID: storedID, Count: 1}
 				if !p.GiveItem(drop) {
 					spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
@@ -975,6 +976,7 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 				applyBlockChange(int(bx), int(by), int(bz), updated, w, mgr)
 				newItems := append(be.Items, coreworld.ContainerItem{Slot: slot, ItemID: held.ItemID, Count: 1})
 				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:chiseled_bookshelf", newItems)
+				w.SetBookshelfLastSlot(int(bx), int(by), int(bz), slot+1)
 				if p.GameMode != player.GameModeCreative {
 					heldInvSlot := player.HotbarStart + p.HeldSlot
 					p.Inventory[heldInvSlot].Count--

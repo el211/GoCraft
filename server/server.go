@@ -1914,6 +1914,7 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 						}
 					}
 					actionWorld.SetContainerItems(bx2, by2, bz2, "minecraft:chiseled_bookshelf", newItems)
+					actionWorld.SetBookshelfLastSlot(bx2, by2, bz2, slot+1)
 					s.giveBedrockActionItem(p, player.ItemStack{ItemID: storedID, Count: 1})
 				}
 			} else if coreworld.IsBookshelfBook(held.ItemID) {
@@ -1921,6 +1922,7 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 					s.setBedrockActionBlock(bx2, by2, bz2, updated)
 					newItems := append(be.Items, coreworld.ContainerItem{Slot: slot, ItemID: held.ItemID, Count: 1})
 					actionWorld.SetContainerItems(bx2, by2, bz2, "minecraft:chiseled_bookshelf", newItems)
+					actionWorld.SetBookshelfLastSlot(bx2, by2, bz2, slot+1)
 					s.consumeBedrockHeldItem(p, 1)
 				}
 			}

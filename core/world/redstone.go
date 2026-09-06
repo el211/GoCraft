@@ -336,6 +336,9 @@ func (re *RedstoneEngine) analogOutputAt(x, y, z int) int {
 			return JukeboxComparatorSignal(JukeboxRecordItem(be))
 		}
 		return 0
+	case "minecraft:chiseled_bookshelf":
+		be := re.world.GetBlockEntity(x, y, z)
+		return int(be.LastBookshelfSlot) // 0 = no interaction, 1-6 = last slot
 	}
 	slots := redstoneContainerSlots(block.ResourceLocation())
 	if slots == 0 {

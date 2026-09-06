@@ -1017,6 +1017,32 @@ func (w *World) SetContainerItems(x, y, z int, blockEntityType string, items []C
 	w.Redstone.NotifyChange(x, y, z)
 }
 
+// SetBookshelfLastSlot records which slot (1-based, 1–6) was most recently
+// interacted with on a chiseled bookshelf at (x,y,z). This drives the
+// comparator output. Call after every insert or eject.
+func (w *World) SetBookshelfLastSlot(x, y, z, slot int) {
+	cx := int32(math.Floor(float64(x) / SectionSize))
+	cz := int32(math.Floor(float64(z) / SectionSize))
+	c := w.Chunk(cx, cz)
+	w.containerMu.Lock()
+	for i := range c.BlockEntities {
+		e := &c.BlockEntities[i]
+		if e.X == x && e.Y == y && e.Z == z {
+			e.LastBookshelfSlot = int8(slot)
+			w.containerMu.Unlock()
+			w.Redstone.NotifyChange(x, y, z)
+			return
+		}
+	}
+	// No existing entity — create one and record the slot.
+	c.BlockEntities = append(c.BlockEntities, BlockEntity{
+		X: x, Y: y, Z: z, Type: "minecraft:chiseled_bookshelf",
+		Data: []byte{10, 0}, LastBookshelfSlot: int8(slot),
+	})
+	w.containerMu.Unlock()
+	w.Redstone.NotifyChange(x, y, z)
+}
+
 // SetBlockEntity stores or replaces the non-container block entity at a world
 // position. Data must be an anonymous network-NBT compound. It is copied so
 // callers cannot mutate persisted chunk state after this method returns.
