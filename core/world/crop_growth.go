@@ -576,6 +576,69 @@ func (w *World) ApplyBoneMeal(x, y, z int, seed uint64) (changes []BlockChange, 
 		}, true
 	}
 
+	// Cave vine tip: grow one block downward into air (no random gate).
+	if isCaveVineTip(name) {
+		age := kelpAge(crop)
+		if age >= caveVineMaxAge {
+			return nil, false
+		}
+		below, loaded := w.blockIfLoaded(x, y-1, z)
+		if !loaded || !below.IsAir() {
+			return nil, false
+		}
+		plant := Block{Namespace: "minecraft", Name: "cave_vines_plant",
+			Properties: map[string]string{"berries": crop.Properties["berries"]}}
+		w.SetBlock(x, y, z, plant)
+		newTip := Block{Namespace: "minecraft", Name: "cave_vines",
+			Properties: map[string]string{"age": strconv.Itoa(age + 1), "berries": "false"}}
+		w.SetBlock(x, y-1, z, newTip)
+		return []BlockChange{
+			{X: x, Y: y, Z: z, Block: plant},
+			{X: x, Y: y - 1, Z: z, Block: newTip},
+		}, true
+	}
+
+	// Twisting/weeping vine tip: grow one block into air (no age gate).
+	if isNetherVineHead(name) {
+		age := kelpAge(crop)
+		if age >= kelpMaxAge {
+			return nil, false
+		}
+		dy := netherVineDirection(name)
+		target, loaded := w.blockIfLoaded(x, y+dy, z)
+		if !loaded || !target.IsAir() {
+			return nil, false
+		}
+		newTip := Block{Namespace: "minecraft", Name: name[len("minecraft:"):], Properties: map[string]string{"age": strconv.Itoa(age + 1)}}
+		body := Block{Namespace: "minecraft", Name: netherVineBody(name)}
+		w.SetBlock(x, y+dy, z, newTip)
+		w.SetBlock(x, y, z, body)
+		return []BlockChange{
+			{X: x, Y: y + dy, Z: z, Block: newTip},
+			{X: x, Y: y, Z: z, Block: body},
+		}, true
+	}
+
+	// Sea pickles: add one pickle per bone meal use when underwater (max 4).
+	if name == "minecraft:sea_pickle" {
+		pickles, _ := strconv.Atoi(crop.Properties["pickles"])
+		if pickles <= 0 {
+			pickles = 1
+		}
+		if pickles >= 4 {
+			return nil, false
+		}
+		// Sea pickles require a water block at their position or above.
+		here, loaded := w.blockIfLoaded(x, y, z)
+		if !loaded || here.Properties["waterlogged"] != "true" {
+			return nil, false
+		}
+		updated := copyWorldBlock(crop)
+		updated.Properties["pickles"] = strconv.Itoa(pickles + 1)
+		w.SetBlock(x, y, z, updated)
+		return []BlockChange{{X: x, Y: y, Z: z, Block: updated}}, true
+	}
+
 	if (strings.HasSuffix(name, "_sapling") && name != "minecraft:bamboo_sapling") || name == "minecraft:mangrove_propagule" {
 		stage, _ := strconv.Atoi(crop.Properties["stage"])
 		if stage <= 0 {
