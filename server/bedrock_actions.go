@@ -119,6 +119,12 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 			s.consumeBedrockHeldItem(p, 1)
 			return true
 		}
+		if handler.IsSignBlock(name) {
+			if s.bedrockWorld().WaxSign(x, y, z) {
+				s.consumeBedrockHeldItem(p, 1)
+				return true
+			}
+		}
 	}
 
 	if item == "minecraft:shears" && name == "minecraft:tripwire" && target.Properties["disarmed"] != "true" {
@@ -217,6 +223,7 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
 				FrontGlowing: glowing, BackGlowing: entity.SignBackGlowing,
 				FrontColor: entity.SignFrontColor, BackColor: entity.SignBackColor,
+				Waxed: entity.SignWaxed,
 			}
 			data := handler.BuildSignNBTFromState(state)
 			s.bedrockWorld().SetBlockEntitySign(x, y, z, data, state)
@@ -232,6 +239,7 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
 				FrontGlowing: entity.SignFrontGlowing, BackGlowing: entity.SignBackGlowing,
 				FrontColor: color, BackColor: entity.SignBackColor,
+				Waxed: entity.SignWaxed,
 			}
 			data := handler.BuildSignNBTFromState(state)
 			s.bedrockWorld().SetBlockEntitySign(x, y, z, data, state)

@@ -52,13 +52,17 @@ func handleSignUpdate(pkt *protocol.Packet, p *player.Player, w *coreworld.World
 		return nil
 	}
 
-	// Preserve existing glowing/color state across text edits.
+	// Preserve existing glowing/color/waxed state across text edits.
 	existing := w.GetBlockEntity(bx, by, bz)
+	if existing.SignWaxed {
+		return nil // waxed signs cannot be edited
+	}
 	state := coreworld.SignState{
 		FrontGlowing: existing.SignFrontGlowing,
 		BackGlowing:  existing.SignBackGlowing,
 		FrontColor:   existing.SignFrontColor,
 		BackColor:    existing.SignBackColor,
+		Waxed:        existing.SignWaxed,
 	}
 	if isFront {
 		state.FrontLines = lines
@@ -198,6 +202,14 @@ func buildSignNBTFromState(state coreworld.SignState) []byte {
 	buf.WriteByte(0x0A) // root TAG_Compound
 	writeSignTextNBT(&buf, "front_text", state.FrontLines, state.FrontGlowing, state.FrontColor)
 	writeSignTextNBT(&buf, "back_text", state.BackLines, state.BackGlowing, state.BackColor)
+	// TAG_Byte "is_waxed"
+	buf.WriteByte(0x01)
+	writeNBTKey(&buf, "is_waxed")
+	if state.Waxed {
+		buf.WriteByte(1)
+	} else {
+		buf.WriteByte(0)
+	}
 	buf.WriteByte(0x00) // TAG_End
 	return buf.Bytes()
 }

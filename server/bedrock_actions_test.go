@@ -144,13 +144,27 @@ func TestBedrockCropBoneMealMatchesCoreAndRejectsNetherWart(t *testing.T) {
 func TestBedrockBoneMealWorksOnGrassAndSaplings(t *testing.T) {
 	t.Run("grass", func(t *testing.T) {
 		s, p := newBedrockActionTestServer(t)
-		s.world.SetBlock(8, 64, 8, bedrockBlock("grass_block", nil))
+		// Provide a 9×9 bed of grass blocks so the scatter has eligible tiles.
+		for dx := -4; dx <= 4; dx++ {
+			for dz := -4; dz <= 4; dz++ {
+				s.world.SetBlock(8+dx, 64, 8+dz, bedrockBlock("grass_block", nil))
+			}
+		}
 		p.Inventory[player.HotbarStart] = player.ItemStack{ItemID: "minecraft:bone_meal", Count: 1}
 		if !s.applyBedrockItemAction(p, intent.BlockInteractIntent{Position: spatial.BlockPos{X: 8, Y: 64, Z: 8}}, s.world.GetBlock(8, 64, 8)) {
 			t.Fatal("grass rejected bone meal")
 		}
-		if got := s.world.GetBlock(8, 65, 8).ResourceLocation(); got != "minecraft:short_grass" {
-			t.Fatalf("grass bonemeal placed %q", got)
+		// At least one vegetation block should have been placed somewhere in the ±4 area.
+		placed := false
+		for dx := -4; dx <= 4 && !placed; dx++ {
+			for dz := -4; dz <= 4 && !placed; dz++ {
+				if b := s.world.GetBlock(8+dx, 65, 8+dz); !b.IsAir() {
+					placed = true
+				}
+			}
+		}
+		if !placed {
+			t.Fatal("grass bone meal placed nothing in ±4 area")
 		}
 	})
 

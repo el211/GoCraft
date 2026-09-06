@@ -723,6 +723,24 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 			sendAcknowledgeBlockChange(mgr, p, seq)
 			return nil
 		}
+		if isSignBlock(targetBlock.ResourceLocation()) {
+			if w.WaxSign(int(bx), int(by), int(bz)) {
+				if p.GameMode != player.GameModeCreative {
+					slot := player.HotbarStart + p.HeldSlot
+					p.Inventory[slot].Count--
+					normalizeStack(&p.Inventory[slot])
+					if conn != nil {
+						_ = SyncPlayerInventory(conn, p)
+					} else {
+						p.ContainerStateID++
+					}
+				}
+				broadcastSoundAt(mgr, "minecraft:item.honeycomb.wax_on", soundCategoryBlocks,
+					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		}
 	}
 	if hand == 0 && held.ItemID == "minecraft:shears" && p.GameMode != player.GameModeSpectator {
 		if targetBlock.ResourceLocation() == "minecraft:tripwire" && targetBlock.Properties["disarmed"] != "true" {
@@ -2017,6 +2035,7 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
 				FrontGlowing: glowing, BackGlowing: entity.SignBackGlowing,
 				FrontColor: entity.SignFrontColor, BackColor: entity.SignBackColor,
+				Waxed: entity.SignWaxed,
 			}
 			data := buildSignNBTFromState(state)
 			w.SetBlockEntitySign(x, y, z, data, state)
@@ -2042,6 +2061,7 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
 				FrontGlowing: entity.SignFrontGlowing, BackGlowing: entity.SignBackGlowing,
 				FrontColor: color, BackColor: entity.SignBackColor,
+				Waxed: entity.SignWaxed,
 			}
 			data := buildSignNBTFromState(state)
 			w.SetBlockEntitySign(x, y, z, data, state)

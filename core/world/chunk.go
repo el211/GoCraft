@@ -56,6 +56,7 @@ type BlockEntity struct {
 	SignBackGlowing  bool
 	SignFrontColor   string // "" means default ("black")
 	SignBackColor    string // "" means default ("black")
+	SignWaxed        bool   // honeycomb has been applied; text editing is locked
 
 	// LastBookshelfSlot is the 1-based slot index (1–6) of the most recent
 	// insert or eject on a chiseled bookshelf. 0 means no interaction yet.

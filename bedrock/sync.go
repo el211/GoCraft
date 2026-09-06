@@ -2211,7 +2211,11 @@ func bedrockBlockEntityData(entity coreworld.BlockEntity, block coreworld.Block)
 		position["sherds"] = []string{decorations[0], decorations[1], decorations[2], decorations[3]}
 	case "sign", "hanging_sign":
 		position["id"] = "Sign"
-		position["IsWaxed"] = uint8(0)
+		if entity.SignWaxed {
+			position["IsWaxed"] = uint8(1)
+		} else {
+			position["IsWaxed"] = uint8(0)
+		}
 		position["FrontText"] = emptyBedrockSignSide()
 		position["BackText"] = emptyBedrockSignSide()
 	case "banner":

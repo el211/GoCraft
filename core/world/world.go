@@ -1090,6 +1090,7 @@ type SignState struct {
 	BackGlowing  bool
 	FrontColor   string // "" = default ("black")
 	BackColor    string // "" = default ("black")
+	Waxed        bool   // honeycomb applied; editing locked
 }
 
 // SetBlockEntitySign stores or replaces a sign block entity, persisting the
@@ -1113,6 +1114,7 @@ func (w *World) SetBlockEntitySign(x, y, z int, data []byte, state SignState) {
 			entity.SignBackGlowing = state.BackGlowing
 			entity.SignFrontColor = state.FrontColor
 			entity.SignBackColor = state.BackColor
+			entity.SignWaxed = state.Waxed
 			snapshot = *entity
 			updated = true
 			break
@@ -1125,6 +1127,7 @@ func (w *World) SetBlockEntitySign(x, y, z int, data []byte, state SignState) {
 			SignFrontLines:   state.FrontLines, SignBackLines: state.BackLines,
 			SignFrontGlowing: state.FrontGlowing, SignBackGlowing: state.BackGlowing,
 			SignFrontColor:   state.FrontColor, SignBackColor: state.BackColor,
+			SignWaxed:        state.Waxed,
 		}
 		c.BlockEntities = append(c.BlockEntities, snapshot)
 	}
@@ -1137,6 +1140,46 @@ func (w *World) SetBlockEntitySign(x, y, z int, data []byte, state SignState) {
 	w.dirty[key] = struct{}{}
 	w.mu.Unlock()
 	w.notifyBlockEntityObserver(snapshot)
+}
+
+// WaxSign locks a sign against further text editing by setting SignWaxed=true.
+// Returns false if there is no sign block entity at the given position.
+func (w *World) WaxSign(x, y, z int) bool {
+	cx := int32(math.Floor(float64(x) / SectionSize))
+	cz := int32(math.Floor(float64(z) / SectionSize))
+	c := w.Chunk(cx, cz)
+
+	w.containerMu.Lock()
+	var snapshot BlockEntity
+	found := false
+	for index := range c.BlockEntities {
+		entity := &c.BlockEntities[index]
+		if entity.X == x && entity.Y == y && entity.Z == z {
+			if entity.SignWaxed {
+				w.containerMu.Unlock()
+				return false // already waxed
+			}
+			entity.SignWaxed = true
+			snapshot = *entity
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Create a minimal block entity with just the waxed flag set.
+		snapshot = BlockEntity{X: x, Y: y, Z: z, Type: "minecraft:sign", SignWaxed: true}
+		c.BlockEntities = append(c.BlockEntities, snapshot)
+	}
+	w.containerMu.Unlock()
+
+	w.mu.Lock()
+	key := [2]int32{cx, cz}
+	w.chunks[key] = c
+	w.touchChunkLocked(key)
+	w.dirty[key] = struct{}{}
+	w.mu.Unlock()
+	w.notifyBlockEntityObserver(snapshot)
+	return true
 }
 
 // SetBlock places block at absolute world coordinates (x, y, z).

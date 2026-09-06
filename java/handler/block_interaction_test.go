@@ -1122,3 +1122,55 @@ func TestJavaTunesNoteBlock(t *testing.T) {
 		t.Fatalf("tuned note block = %s", got.Key())
 	}
 }
+
+func TestHoneycombWaxesSignAndBlocksEditing(t *testing.T) {
+	p := player.New([16]byte{1}, "dave", player.ClientEditionJava)
+	p.GameMode = player.GameModeSurvival
+	p.Inventory[player.HotbarStart] = player.ItemStack{ItemID: "minecraft:honeycomb", Count: 3}
+	w := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
+	mgr := session.NewManager()
+	w.SetBlock(0, 64, 0, coreworld.Block{Namespace: "minecraft", Name: "oak_sign",
+		Properties: map[string]string{"rotation": "0", "waterlogged": "false"}})
+
+	// Set some initial text so there is a block entity to wax.
+	state := coreworld.SignState{FrontLines: [4]string{"hello", "", "", ""}}
+	w.SetBlockEntitySign(0, 64, 0, nil, state)
+
+	// Wax the sign with honeycomb.
+	if err := handleUseItemOn(useItemOnPacket(0, 64, 0, 1, 400),
+		p, w, mgr, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !w.GetBlockEntity(0, 64, 0).SignWaxed {
+		t.Fatal("sign should be waxed after honeycomb use")
+	}
+	if p.Inventory[player.HotbarStart].Count != 2 {
+		t.Fatalf("honeycomb count = %d, want 2", p.Inventory[player.HotbarStart].Count)
+	}
+
+	// Attempt to edit the sign — should be rejected.
+	signPkt := protocol.NewBuilder(packetIDSignUpdate).
+		Long(packBlockPos(0, 64, 0)).
+		Bool(true). // is_front_text
+		String("new text").
+		String("").
+		String("").
+		String("").
+		Build()
+	if err := handleSignUpdate(signPkt, p, w, mgr); err != nil {
+		t.Fatalf("handleSignUpdate: %v", err)
+	}
+	if w.GetBlockEntity(0, 64, 0).SignFrontLines[0] != "hello" {
+		t.Fatal("waxed sign text should not be editable")
+	}
+
+	// Second honeycomb on already-waxed sign should be a no-op (returns false from WaxSign).
+	countBefore := p.Inventory[player.HotbarStart].Count
+	if err := handleUseItemOn(useItemOnPacket(0, 64, 0, 1, 401),
+		p, w, mgr, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if p.Inventory[player.HotbarStart].Count != countBefore {
+		t.Fatal("honeycomb consumed on already-waxed sign")
+	}
+}
