@@ -156,6 +156,20 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 		}
 	}
 
+	// Capture aquatic mobs with a water bucket.
+	if item == "minecraft:water_bucket" && !e.IsBaby {
+		if bucket := fishBucketForType(e.Type); bucket != "" {
+			if !s.consumeAnimalItem(p, bucket) {
+				return false
+			}
+			// Remove the entity from the world.
+			world := s.worldForPlayer(p)
+			world.Entities.Remove(e.EntityID)
+			handler.BroadcastRemoveEntity(e.EntityID, s.sessions)
+			return true
+		}
+	}
+
 	// Milk a cow or mooshroom: replaces one bucket in hand with a milk bucket.
 	if item == "minecraft:bucket" && !e.IsBaby &&
 		(e.Type == corentity.TypeCow || e.Type == corentity.TypeMooshroom) {
@@ -342,6 +356,26 @@ func (s *Server) dismountPlayer(p *player.Player) bool {
 	}
 	handler.BroadcastSetPassengers(vehicleID, nil, s.sessions)
 	return true
+}
+
+// fishBucketForType returns the filled bucket item ID for capturable aquatic mobs, or "".
+func fishBucketForType(t corentity.EntityType) string {
+	switch t {
+	case corentity.TypeCod:
+		return "minecraft:cod_bucket"
+	case corentity.TypeSalmon:
+		return "minecraft:salmon_bucket"
+	case corentity.TypePufferfish:
+		return "minecraft:pufferfish_bucket"
+	case corentity.TypeTropicalFish:
+		return "minecraft:tropical_fish_bucket"
+	case corentity.TypeAxolotl:
+		return "minecraft:axolotl_bucket"
+	case corentity.TypeTadpole:
+		return "minecraft:tadpole_bucket"
+	default:
+		return ""
+	}
 }
 
 // sheepDyeColor returns the canonical colour name if itemID is a dye, else "".
