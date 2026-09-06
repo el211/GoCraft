@@ -147,10 +147,12 @@ type Player struct {
 	VehicleEntityID int32
 
 	// SpawnPoint is the player's individual respawn position (set by sleeping in
-	// a bed).  HasSpawnPoint is false until the player has slept in a bed, in
-	// which case the world spawn is used on death.
+	// a bed or right-clicking a charged respawn anchor in the Nether).
+	// HasSpawnPoint is false until one of these is used; world spawn is used on death.
+	// SpawnIsAnchor distinguishes a respawn-anchor spawn from a bed spawn.
 	SpawnPoint    spatial.BlockPos
 	HasSpawnPoint bool
+	SpawnIsAnchor bool // true when SpawnPoint is a respawn anchor in the Nether
 	WorldSpawn    spatial.Vec3
 	Raining       bool
 	Thundering    bool

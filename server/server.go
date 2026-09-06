@@ -2244,15 +2244,19 @@ func (s *Server) applyBedrockRespawn(i intent.RespawnIntent) {
 		s.dismountPlayer(p)
 	}
 	previousDimension := p.Dimension
-	p.Dimension = dimensionOverworld
 	p.Revive()
-	if bedSpawn, ok := handler.ResolveBedRespawn(p, s.world); ok {
+	if anchorSpawn, ok := handler.ResolveAnchorRespawn(p, s.netherWorld); ok {
+		p.Dimension = dimensionNether
+		p.Position = anchorSpawn
+	} else if bedSpawn, ok := handler.ResolveBedRespawn(p, s.world); ok {
+		p.Dimension = dimensionOverworld
 		p.Position = bedSpawn
 	} else {
+		p.Dimension = dimensionOverworld
 		p.Position = p.WorldSpawn
 	}
-	if previousDimension != dimensionOverworld && s.bedrockListener != nil {
-		s.bedrockListener.ChangeDimensionForRespawn(p, dimensionOverworld, p.Position)
+	if previousDimension != p.Dimension && s.bedrockListener != nil {
+		s.bedrockListener.ChangeDimensionForRespawn(p, p.Dimension, p.Position)
 	}
 }
 

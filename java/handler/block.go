@@ -882,6 +882,19 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 			sendAcknowledgeBlockChange(mgr, p, seq)
 			return nil
 		}
+		// Right-clicking a charged anchor without glowstone in the Nether sets spawn.
+		if targetBlock.ResourceLocation() == "minecraft:respawn_anchor" && p.Dimension == 1 {
+			charges, _ := strconv.Atoi(targetBlock.Properties["charges"])
+			if charges > 0 {
+				p.SpawnPoint = spatial.BlockPos{X: int32(bx), Y: int32(by), Z: int32(bz)}
+				p.HasSpawnPoint = true
+				p.SpawnIsAnchor = true
+				broadcastSoundAt(mgr, "minecraft:block.respawn_anchor.set_spawn", soundCategoryBlocks,
+					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		}
 	}
 
 	// Jukebox: insert a music disc or eject the current one.

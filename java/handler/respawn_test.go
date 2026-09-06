@@ -47,6 +47,50 @@ func TestMissingBedFallsBackToWorldSpawn(t *testing.T) {
 	}
 }
 
+func TestAnchorRespawnDecrementsChargeAndPositionsPlayer(t *testing.T) {
+	nether := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
+	defer nether.Close()
+	// Anchor at (5,64,5) with 2 charges; stone floor and open air beside it.
+	nether.SetBlock(5, 64, 5, coreworld.Block{Namespace: "minecraft", Name: "respawn_anchor",
+		Properties: map[string]string{"charges": "2"}})
+	nether.SetBlock(5, 63, 5, coreworld.Block{Namespace: "minecraft", Name: "stone"})
+	nether.SetBlock(6, 64, 5, coreworld.Air)
+	nether.SetBlock(6, 65, 5, coreworld.Air)
+	nether.SetBlock(6, 63, 5, coreworld.Block{Namespace: "minecraft", Name: "stone"})
+
+	p := player.New([16]byte{42}, "nether_player", player.ClientEditionJava)
+	p.HasSpawnPoint = true
+	p.SpawnIsAnchor = true
+	p.SpawnPoint = spatial.BlockPos{X: 5, Y: 64, Z: 5}
+
+	pos, ok := ResolveAnchorRespawn(p, nether)
+	if !ok {
+		t.Fatal("ResolveAnchorRespawn returned false for valid anchor")
+	}
+	if pos.X == 5.5 && pos.Z == 5.5 {
+		t.Fatalf("respawn position remained inside anchor: %+v", pos)
+	}
+	anchor := nether.GetBlock(5, 64, 5)
+	if anchor.Properties["charges"] != "1" {
+		t.Fatalf("anchor charges after respawn = %q, want 1", anchor.Properties["charges"])
+	}
+}
+
+func TestAnchorRespawnClearsSpawnWhenDepleted(t *testing.T) {
+	nether := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
+	defer nether.Close()
+	nether.SetBlock(0, 64, 0, coreworld.Block{Namespace: "minecraft", Name: "respawn_anchor",
+		Properties: map[string]string{"charges": "0"}})
+	p := player.New([16]byte{43}, "lost_player", player.ClientEditionJava)
+	p.HasSpawnPoint = true
+	p.SpawnIsAnchor = true
+	p.SpawnPoint = spatial.BlockPos{X: 0, Y: 64, Z: 0}
+
+	if _, ok := ResolveAnchorRespawn(p, nether); ok || p.HasSpawnPoint {
+		t.Fatal("depleted anchor should have cleared spawn and returned false")
+	}
+}
+
 func TestDeathRespawnMovesFromEndToOverworldBed(t *testing.T) {
 	w := coreworld.New(&coreworld.FlatGenerator{}, nil, false)
 	defer w.Close()

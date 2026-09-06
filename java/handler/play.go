@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -1072,6 +1073,55 @@ func resolveBedRespawn(p *player.Player, w *coreworld.World) (spatial.Vec3, bool
 // Bedrock respawn intent without duplicating safety rules in another adapter.
 func ResolveBedRespawn(p *player.Player, w *coreworld.World) (spatial.Vec3, bool) {
 	return resolveBedRespawn(p, w)
+}
+
+// ResolveAnchorRespawn validates the player's respawn-anchor spawn point.
+// netherWorld must be the Nether world. On success it decrements the anchor's
+// charge and returns the position to spawn at (inside the Nether). On failure
+// it clears the spawn point and returns false, causing a fall-through to world
+// spawn.
+func ResolveAnchorRespawn(p *player.Player, netherWorld *coreworld.World) (spatial.Vec3, bool) {
+	if p == nil || netherWorld == nil || !p.HasSpawnPoint || !p.SpawnIsAnchor {
+		return spatial.Vec3{}, false
+	}
+	x, y, z := int(p.SpawnPoint.X), int(p.SpawnPoint.Y), int(p.SpawnPoint.Z)
+	anchor := netherWorld.GetBlock(x, y, z)
+	if anchor.ResourceLocation() != "minecraft:respawn_anchor" {
+		p.HasSpawnPoint = false
+		p.SpawnIsAnchor = false
+		return spatial.Vec3{}, false
+	}
+	charges, _ := strconv.Atoi(anchor.Properties["charges"])
+	if charges <= 0 {
+		p.HasSpawnPoint = false
+		p.SpawnIsAnchor = false
+		return spatial.Vec3{}, false
+	}
+	// Find a safe spot adjacent or above the anchor.
+	offsets := [4][2]int{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}
+	for _, off := range offsets {
+		tx, tz := x+off[0], z+off[1]
+		if safeRespawnSpace(netherWorld, tx, y, tz) {
+			decrementAnchorCharge(netherWorld, x, y, z, anchor, charges)
+			return spatial.Vec3{X: float64(tx) + 0.5, Y: float64(y), Z: float64(tz) + 0.5}, true
+		}
+	}
+	if respawnPassable(netherWorld.GetBlock(x, y+1, z)) && respawnPassable(netherWorld.GetBlock(x, y+2, z)) {
+		decrementAnchorCharge(netherWorld, x, y, z, anchor, charges)
+		return spatial.Vec3{X: float64(x) + 0.5, Y: float64(y + 1), Z: float64(z) + 0.5}, true
+	}
+	p.HasSpawnPoint = false
+	p.SpawnIsAnchor = false
+	return spatial.Vec3{}, false
+}
+
+func decrementAnchorCharge(w *coreworld.World, x, y, z int, anchor coreworld.Block, charges int) {
+	props := make(map[string]string, len(anchor.Properties))
+	for k, v := range anchor.Properties {
+		props[k] = v
+	}
+	props["charges"] = strconv.Itoa(charges - 1)
+	w.SetBlock(x, y, z, coreworld.Block{Namespace: anchor.Namespace, Name: anchor.Name, Properties: props})
 }
 
 func respawnPlayerInOverworld(p *player.Player, w *coreworld.World) {
