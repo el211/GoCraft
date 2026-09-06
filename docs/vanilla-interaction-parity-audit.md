@@ -1,7 +1,7 @@
 # Dragonfly gameplay and interaction parity audit
 
 Audit date: 2026-09-02. GoCraft baseline: `missing-items` at `00685b7`.
-Progress update: 2026-09-06 (batch 3: bamboo, cave vines, jukebox, name tags, goat horn, spyglass, sign text).
+Progress update: 2026-09-06 (batch 3: bamboo, cave vines, jukebox, name tags, goat horn, spyglass, sign text; batch 4: sheep shearing, cow milking, Bedrock jukebox/name tags/goat horn/spyglass, ordinary vine spread).
 Reference implementation: Dragonfly v0.11.0 from the resolved Go module source.
 Protocol targets: Java Edition 1.21.4 and Bedrock Edition 1.26.45.
 
@@ -51,7 +51,17 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Spyglass.** Right-clicking sets UsingItemID="minecraft:spyglass" so other players see the use animation. Stop is handled by the existing use-item release path.
 - **Sign text editing.** minecraft:sign_update serverbound packet (ID 52) registered and dispatched. Lines validated (≤15 chars each), encoded as network-NBT front_text/back_text compound with messages list, stored via SetBlockEntity, and broadcast to all dimension viewers via BroadcastBlockEntityDataInDimension. openSignEditor (packetIDOpenSignEditor = 0x36) registered for future placement path.
 
-## Still left to do (as of batch 3)
+## Completed in batch 4 (2026-09-06)
+
+- **Sheep shearing.** Holding shears and interacting with an unsheared, adult sheep drops 1–3 wool of the sheep's colour, marks Sheared=true, broadcasts metadata (index 17: flags byte with colour bits 0-3 and sheared bit 4), and damages the shears. WoolColor and Sheared fields added to core/entity.Entity.
+- **Cow/mooshroom milking.** Holding a bucket and interacting with an adult cow or mooshroom replaces the bucket with a milk bucket via consumeAnimalItem (works on both editions via the shared interactAnimal path).
+- **Jukebox (Bedrock).** Holding a music disc and interacting with a jukebox inserts it (sets has_record=true, stores in slot 0). Interacting with a loaded jukebox ejects the disc (clears block entity, gives disc to player). Mirrors the Java implementation.
+- **Name tags (Bedrock).** Right-clicking an entity with a named name tag on Bedrock sets DisplayName and CustomNameVisible and broadcasts metadata to all Java viewers.
+- **Goat horn (Bedrock).** applyBedrockStartUseItem now triggers the instrument sound with the 7-second cooldown, matching the Java path.
+- **Spyglass (Bedrock).** applyBedrockStartUseItem sets UsingItemID/UsingItemSince, matching the Java use-state path.
+- **Ordinary vine spread.** minecraft:vine participates in the random-tick crop scan. 25% gate; 50% chance to spread downward (copies face set); horizontal spread picks a random face direction and places a new vine with supported faces. Tests: downward spread, horizontal spread.
+
+## Still left to do (as of batch 4)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -164,8 +174,8 @@ inventory move, save, cross-edition sync, or restart.
 | Firework star | Partial | Partial | Some crafting/component decoding exists, but a firework-star component is not preserved as an item stack and all crafting transformations are not round-trippable. |
 | Elytra | Partial | Partial | Equipping is possible. Java accepts the start-fall-flying action only by resetting fall distance; no canonical gliding flag or glide physics exists. Bedrock glide input is not modelled, and rocket boost is missing on both. |
 | Totem of undying | Partial | Partial | Canonical death prevention and consumption run for both editions, and the granted survival effects are now stored authoritatively through the status-effect engine. Bedrock still does not receive the totem animation/effect packets through the totem path. |
-| Goat horn | Implemented (new) | Missing | Java plays the instrument sound (8 vanilla variants via component) with a 7 s cooldown. Bedrock use path not yet wired. |
-| Spyglass | Implemented (new) | Missing | Java sets UsingItemID so other players see the animation. Bedrock use path not yet wired. |
+| Goat horn | Implemented (new) | Implemented (new) | Both editions play the instrument sound (8 vanilla variants via component) with a 7 s cooldown. |
+| Spyglass | Implemented (new) | Implemented (new) | Both editions set UsingItemID so other players see the use animation. |
 | Fishing rod | Missing | Missing | No hook entity, cast/reel state, bobber physics, hooked entity/item handling, durability, or fishing loot. |
 | Brush | Missing | Missing | No brushing progress, cooldown, suspicious sand/gravel dust states, block entity, archaeology loot, or durability. |
 | Carrot on a stick / warped fungus on a stick | Missing | Missing | Pig/strider steering boost and durability are absent even though riding exists. |
@@ -174,7 +184,7 @@ inventory move, save, cross-edition sync, or restart.
 | Writable and written books | Missing | Missing | Pages, title, author, generation, editing/signing packets, validation, copying, and open-book interaction are absent. |
 | Music discs | Missing | Missing | Items exist, but insertion/ejection and playback require the missing jukebox behaviour. |
 | Dyes, ink sacs, glow ink sacs | Missing | Missing | No sheep dye, sign text colour, glowing sign text, collar colour, or other entity/block dye interaction. The loom accepts dye but cannot preserve a pattern result. |
-| Shears | Partial | Partial | Bedrock carves pumpkins and harvests full hives; Java has neither action. Loot-sensitive block breaking exists, but sheep shearing, mooshroom conversion, snow-golem carving, tripwire disarm, entity drops, and complete sounds/durability are absent. |
+| Shears | Partial | Partial | Carving pumpkins (both editions), harvesting beehives (both editions), and sheep shearing (both editions, batch 4) now work. Mooshroom conversion, snow-golem carving, tripwire disarm, and complete sounds/durability are still absent. |
 | Glass bottle | Partial | Partial | Bedrock fills from a full beehive. Java does not. Water-source and water-cauldron filling, dragon-breath collection, incremental cauldron levels, and complete remainders are missing. |
 | Water/lava/powder-snow buckets | Partial | Partial | Basic source and full-cauldron transfer works. Fish, axolotl, tadpole, and entity capture/release; waterlogging/unwaterlogging; ultrawarm evaporation; and full dispenser/cauldron cases are incomplete. |
 | Spawn eggs | Partial | Partial | A dispenser can spawn a generic entity. Player block/entity use, baby spawning, mob-specific NBT/state, placement validation, and unsupported-entity rejection are absent. |
@@ -222,7 +232,7 @@ operations before adding Java calls — was followed for all nine.
 
 | Block or family | Status | Missing or incomplete behaviour |
 | --- | --- | --- |
-| Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on Java. All 19 vanilla disc sound events mapped. Comparator output and Bedrock wiring remain. |
+| Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on both Java and Bedrock. All 19 vanilla disc sound events mapped. Comparator output remains. |
 | Lectern | Missing | Book insert/remove, pages, current page, UI, page-turn events, comparator output, redstone pulse, and persistence. It currently exists only as a generated village workstation/redstone name. |
 | Chiseled bookshelf | Missing | Six-slot inventory, targeted slot selection, book insertion/removal, block state, comparator signal, vibration, and persistence. |
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
@@ -250,7 +260,7 @@ operations before adding Java calls — was followed for all nine.
 | Sugar cane | Implemented (new) | Random growth to a three-block height through the age counter. Placement/support removal was already present. Water-adjacency survival is still enforced only by block physics. |
 | Bamboo / bamboo sapling | Implemented (new) | Sapling conversion (~1-in-3 ticks), random upward growth, position-seeded height cap (12–16 blocks), and correct small/large/none leaf transitions are implemented. Bone-meal growth remains. |
 | Kelp | Implemented (new) | Random column growth through water: the age-0..25 tip advances into source water above, leaving kelp_plant bodies behind. Bone-meal growth and break-from-below rules remain. |
-| Vines / cave vines / twisting and weeping vines | Partial | Twisting (upward) and weeping (downward) vines grow via the age-0..25 tip mechanic. Cave vines now grow downward and grow berries (~1-in-11 per tick); glow berry harvest wired. Ordinary vine spread, climbing state, bone meal, and shears rules are still absent. |
+| Vines / cave vines / twisting and weeping vines | Partial | Twisting/weeping vines grow via the age-0..25 tip mechanic. Cave vines grow downward and grow berries; harvest wired. Ordinary vine now spreads downward and horizontally via random tick (batch 4). Climbing state, bone meal, and shears rules are still absent. |
 | Cocoa | Partial | A bounded legacy growth tick exists. Correct jungle-log attachment/facing survival, placement interaction, and bone meal are absent. |
 | Fire | Partial | Placement, scheduled spread/burnout, and contact damage exist. Fire immunity/effects, rain extinguishing, portal interaction details, gamerules, block-specific flammability, and complete soul-fire rules remain. |
 | Fluids and waterlogging | Partial | Source placement, simple spread, collision checks, and lava/water hardening exist. Flow vectors, finite levels/source formation, waterlogged fluid ticking, ultrawarm evaporation, entity pushing, dripstone, and many replaceability rules are incomplete. |
@@ -277,11 +287,11 @@ adapters unless noted:
 
 | Interaction | Status | Gap |
 | --- | --- | --- |
-| Sheep shearing and dyeing | Missing | No wool colour/state, regrowth, sheared flag, drops, sound, or tool durability action. |
-| Cow/mooshroom/goat milking | Missing | Buckets cannot create milk; mooshroom bowls/stew and conversion interactions are absent. |
+| Sheep shearing and dyeing | Implemented (new) | Shearing drops 1–3 wool, marks Sheared=true, damages shears, broadcasts metadata on both editions. Regrowth (Sheared reset), dyeing, mooshroom conversion, and snow-golem carving remain. |
+| Cow/mooshroom milking | Implemented (new) | Bucket → milk bucket via shared interactAnimal path on both editions. Mooshroom mushroom-stew bowl, suspicious stew, and mooshroom→cow conversion remain. |
 | Fish/axolotl/tadpole bucket capture | Missing | No capture/release data, bucket replacement, variant preservation, or water placement. |
 | Leads and leash knots | Missing | No leash ownership, fence knot entity, distance physics, drop, or detach interaction. |
-| Name tags | Implemented (new) | Applying a name tag sets DisplayName and CustomNameVisible on the entity; metadata (index 2 Optional Text Component, index 3 Boolean) broadcast to all viewers. DisplayName() helper reads minecraft:custom_name component. Anvil naming prerequisite and persistence across restart remain. |
+| Name tags | Implemented (new) | Applying a name tag on both editions sets DisplayName and CustomNameVisible; metadata broadcast to all viewers. DisplayName() helper reads minecraft:custom_name component. Anvil naming prerequisite and persistence across restart remain. |
 | Horse/donkey/llama equipment | Partial | Saddling/mounting exists. Inventory UI, armour, carpet, chest attachment, storage, jump charge, temper/buck details, and equipment persistence are absent. |
 | Wolf/cat/parrot ownership | Partial | Taming and sit toggle exist. Collar dye, follow/teleport rules, owner defence breadth, shoulder parrots, gifts, and complete metadata are absent. |
 | Turtle/frog/sniffer/armadillo special actions | Partial | Generic food/breeding tables exist, but egg laying, scute/drop timing, frogspawn, sniff/dig, brushing, rolling, and species-specific goals are absent. |
