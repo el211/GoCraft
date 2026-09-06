@@ -120,6 +120,17 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		}
 	}
 
+	if item == "minecraft:shears" && name == "minecraft:tripwire" && target.Properties["disarmed"] != "true" {
+		disarmed := bedrockCopyBlock(target)
+		disarmed.Properties["disarmed"] = "true"
+		s.setBedrockActionBlock(x, y, z, disarmed)
+		if target.Properties["powered"] != "true" {
+			s.giveBedrockActionItem(p, player.ItemStack{ItemID: "minecraft:string", Count: 1})
+		}
+		s.damageBedrockHeldItem(p, 1)
+		return true
+	}
+
 	if item == "minecraft:shears" && name == "minecraft:pumpkin" {
 		carved, _ := coreworld.CarvePumpkin(target, bedrockOppositeFacing(bedrockPlayerFacing(p.Rotation.Yaw)))
 		s.setBedrockActionBlock(x, y, z, carved)

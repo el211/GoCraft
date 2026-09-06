@@ -713,6 +713,22 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 		}
 	}
 	if hand == 0 && held.ItemID == "minecraft:shears" && p.GameMode != player.GameModeSpectator {
+		if targetBlock.ResourceLocation() == "minecraft:tripwire" && targetBlock.Properties["disarmed"] != "true" {
+			disarmed := copyBlockProperties(targetBlock)
+			disarmed.Properties["disarmed"] = "true"
+			applyBlockChange(int(bx), int(by), int(bz), disarmed, w, mgr)
+			if targetBlock.Properties["powered"] != "true" {
+				str := player.ItemStack{ItemID: "minecraft:string", Count: 1}
+				if !p.GiveItem(str) {
+					spawnBlockDrop(w, nextEntityID, p.Position, str, 0, mgr, p.Dimension)
+				}
+			}
+			damageHeldItem(p, conn, 1)
+			broadcastSoundAt(mgr, "minecraft:block.tripwire.detach", soundCategoryBlocks,
+				float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 1)
+			sendAcknowledgeBlockChange(mgr, p, seq)
+			return nil
+		}
 		if carved, ok := coreworld.CarvePumpkin(targetBlock, chestFacingFromYaw(p.Rotation.Yaw)); ok {
 			applyBlockChange(int(bx), int(by), int(bz), carved, w, mgr)
 			seeds := player.ItemStack{ItemID: "minecraft:pumpkin_seeds", Count: 4}

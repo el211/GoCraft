@@ -207,6 +207,18 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 		return true
 	}
 
+	// Shear a snow golem: remove pumpkin face, drop carved_pumpkin.
+	if item == "minecraft:shears" && e.Type == corentity.TypeSnowGolem && e.HasPumpkin {
+		e.HasPumpkin = false
+		s.broadcastAnimalState(e)
+		drop := player.ItemStack{ItemID: "minecraft:carved_pumpkin", Count: 1}
+		if !p.GiveItem(drop) {
+			s.newDroppedItemForPlayer(p, drop, e.Position, 0)
+		}
+		s.damageBedrockHeldItem(p, 1)
+		return true
+	}
+
 	// Dye a tamed wolf or cat collar.
 	if (e.Type == corentity.TypeWolf || e.Type == corentity.TypeCat) && e.Tamed && animalOwnedBy(e, p) {
 		if color := sheepDyeColor(item); color != "" {

@@ -254,6 +254,11 @@ type Entity struct {
 	// "red" (vanilla default). Only meaningful when Tamed == true.
 	CollarColor string
 
+	// SnowGolem fields — only used when Type == TypeSnowGolem.
+	// HasPumpkin tracks whether the golem still has its pumpkin head. Starts true;
+	// shears interaction removes it, drops a carved pumpkin.
+	HasPumpkin bool
+
 	// Enderman fields - only used when type == TypeEnderman
 	// EndermanCarriedBlock is the canonical resource location of the block
 	// an enderman is holding, or "" when empty. Adapters resolve their own IDs.
@@ -418,6 +423,9 @@ func New(id int32, uuid [16]byte, t EntityType, x, y, z float64) *Entity {
 	}
 	if t == TypeSkeletonHorse || t == TypeZombieHorse {
 		e.Tamed = true
+	}
+	if t == TypeSnowGolem {
+		e.HasPumpkin = true
 	}
 	if t == TypeTNTMinecart {
 		e.FuseTicks = -1

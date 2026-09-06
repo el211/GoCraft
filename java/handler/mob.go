@@ -221,6 +221,15 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 		b = b.Byte(17).VarInt(0).Byte(flags)
 		hasMetadata = true
 	}
+	if e.Type == corentity.TypeSnowGolem {
+		// Index 17 flags byte: bit 0x10 = has pumpkin.
+		flags := byte(0)
+		if e.HasPumpkin {
+			flags |= 0x10
+		}
+		b = b.Byte(17).VarInt(0).Byte(flags)
+		hasMetadata = true
+	}
 	if e.Type == corentity.TypeEnderman && e.EndermanCarriedBlock != "" {
 		b = b.Byte(endermanMetadataCarriedBlockIndex).
 			VarInt(metadataTypeOptionalBlockState).
