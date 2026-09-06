@@ -124,3 +124,31 @@ func TestGrindstoneStripsEnchantmentsAndReturnsXP(t *testing.T) {
 		t.Fatalf("grindstone result dropped vanishing_curse: %s", result.Enchantments)
 	}
 }
+
+func TestAnvilEnchantedBookTransfersToItem(t *testing.T) {
+	book := player.ItemStack{ItemID: "minecraft:enchanted_book", Count: 1}
+	book.Enchant("minecraft:sharpness", 3)
+	sword := player.ItemStack{ItemID: "minecraft:diamond_sword", Count: 1}
+	slots := []player.ItemStack{sword, book, {}}
+	UpdateWorkstationResult("minecraft:anvil", slots, 0)
+	if got := slots[2]; got.IsEmpty() || got.EnchantmentLevel("minecraft:sharpness") != 3 {
+		t.Fatalf("anvil book-transfer output = %+v", got)
+	}
+	result, _, ok := TakeWorkstationResult("minecraft:anvil", slots, 0)
+	if !ok || result.ItemID != "minecraft:diamond_sword" || result.EnchantmentLevel("minecraft:sharpness") != 3 {
+		t.Fatalf("anvil result = %+v, ok=%v", result, ok)
+	}
+}
+
+func TestAnvilMergesSameLevelEnchantmentsToNextLevel(t *testing.T) {
+	left := player.ItemStack{ItemID: "minecraft:diamond_sword", Count: 1}
+	left.Enchant("minecraft:sharpness", 2)
+	right := player.ItemStack{ItemID: "minecraft:diamond_sword", Count: 1}
+	right.Enchant("minecraft:sharpness", 2)
+	slots := []player.ItemStack{left, right, {}}
+	UpdateWorkstationResult("minecraft:anvil", slots, 0)
+	if got := slots[2]; got.IsEmpty() || got.EnchantmentLevel("minecraft:sharpness") != 3 {
+		t.Fatalf("anvil same-level merge output sharpness = %d, want 3; got %+v",
+			got.EnchantmentLevel("minecraft:sharpness"), got)
+	}
+}

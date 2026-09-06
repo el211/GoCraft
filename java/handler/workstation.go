@@ -524,12 +524,30 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 		result.Count = 1
 		return workstationOperation{result: result, consume: []int{1, 0}}
 	}
+	name := left.DisplayName()
+
+	// Enchanted book: transfer enchantments to the left item.
+	if right.ItemID == "minecraft:enchanted_book" && player.MaxDurability(left.ItemID) > 0 {
+		result := left
+		result.Count = 1
+		if name != "" {
+			_ = result.SetComponent("minecraft:custom_name", name)
+		}
+		if mergeEnchantments(&result, right) {
+			return workstationOperation{result: result, consume: []int{1, 1}}
+		}
+		return workstationOperation{}
+	}
+
 	if player.MaxDurability(left.ItemID) == 0 {
 		return workstationOperation{}
 	}
-	name := left.DisplayName()
 	if left.ItemID == right.ItemID {
 		result := repairedStack(left, right, 12)
+		// Carry left's enchantments and name into the repaired result, then merge right's.
+		result.Enchantments = left.Enchantments
+		result.Components = left.Components
+		mergeEnchantments(&result, right)
 		if name != "" {
 			_ = result.SetComponent("minecraft:custom_name", name)
 		}
@@ -548,6 +566,45 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 		_ = result.SetComponent("minecraft:custom_name", name)
 	}
 	return workstationOperation{result: result, consume: []int{1, 1}}
+}
+
+// mergeEnchantments applies compatible enchantments from src to dst. It uses
+// vanilla merging rules: same level → combined to level+1 (capped at MaxLevel);
+// src level higher → src level wins; dst level higher → dst wins (no change).
+// Returns true if at least one enchantment was added or upgraded.
+func mergeEnchantments(dst *player.ItemStack, src player.ItemStack) bool {
+	srcLevels := src.EnchantmentLevels()
+	if len(srcLevels) == 0 {
+		return false
+	}
+	changed := false
+	for _, el := range srcLevels {
+		ench, ok := player.EnchantmentByID(el.ID)
+		if !ok {
+			continue
+		}
+		// Check compatibility: skip enchantments that conflict with existing ones.
+		if !ench.CompatibleWith(*dst) && dst.EnchantmentLevel(el.ID) == 0 {
+			continue
+		}
+		// Check the enchantment is valid for this item type (unless it's a book destination).
+		if dst.ItemID != "minecraft:enchanted_book" && !ench.Supports(dst.ItemID) {
+			continue
+		}
+		existing := dst.EnchantmentLevel(el.ID)
+		var newLevel int
+		if existing == el.Level {
+			newLevel = min(el.Level+1, ench.MaxLevel)
+		} else if el.Level > existing {
+			newLevel = el.Level
+		} else {
+			continue // dst already has higher level
+		}
+		if dst.Enchant(el.ID, newLevel) {
+			changed = true
+		}
+	}
+	return changed
 }
 
 func grindstoneOperation(slots []player.ItemStack) workstationOperation {
