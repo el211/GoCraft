@@ -189,6 +189,38 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		}
 	}
 
+	if item == "minecraft:glass_bottle" {
+		var waterBottle player.ItemStack
+		waterBottle.ItemID = "minecraft:potion"
+		waterBottle.Count = 1
+		_ = waterBottle.SetComponent("potion_contents", map[string]string{"potion": "minecraft:water"})
+		switch {
+		case name == "minecraft:water" && coreworld.FluidLevel(target) == 0:
+			s.replaceBedrockHeldItem(p, "")
+			s.giveBedrockActionItem(p, waterBottle)
+			return true
+		case name == "minecraft:water_cauldron":
+			levelStr := target.Properties["level"]
+			level := 0
+			if levelStr != "" {
+				level, _ = strconv.Atoi(levelStr)
+			}
+			if level > 0 {
+				s.giveBedrockActionItem(p, waterBottle)
+				s.consumeBedrockHeldItem(p, 1)
+				newLevel := level - 1
+				if newLevel <= 0 {
+					s.setBedrockActionBlock(x, y, z, bedrockBlock("cauldron", nil))
+				} else {
+					updated := bedrockCopyBlock(target)
+					updated.Properties["level"] = strconv.Itoa(newLevel)
+					s.setBedrockActionBlock(x, y, z, updated)
+				}
+				return true
+			}
+		}
+	}
+
 	if item == "minecraft:bucket" {
 		var filled string
 		switch {

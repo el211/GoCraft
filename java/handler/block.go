@@ -1782,6 +1782,57 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 		}
 	}
 
+	if held.ItemID == "minecraft:glass_bottle" {
+		var waterBottle player.ItemStack
+		if err := waterBottle.SetComponent("potion_contents", map[string]string{"potion": "minecraft:water"}); err == nil {
+			waterBottle.ItemID = "minecraft:potion"
+			waterBottle.Count = 1
+		}
+		switch target.ResourceLocation() {
+		case "minecraft:water":
+			if coreworld.FluidLevel(target) == 0 {
+				replaceJavaBucket(p, "")
+				slot := player.HotbarStart + p.HeldSlot
+				if p.GameMode != player.GameModeCreative {
+					if p.Inventory[slot].Count <= 1 {
+						p.Inventory[slot] = waterBottle
+					} else {
+						p.Inventory[slot].Count--
+						p.GiveItem(waterBottle)
+					}
+				}
+				broadcastSoundAt(mgr, "minecraft:item.bottle.fill", soundCategoryPlayers, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+				return true
+			}
+		case "minecraft:water_cauldron":
+			level := 0
+			if l := target.Properties["level"]; l != "" {
+				level, _ = strconv.Atoi(l)
+			}
+			if level > 0 {
+				if p.GameMode != player.GameModeCreative {
+					slot := player.HotbarStart + p.HeldSlot
+					if p.Inventory[slot].Count <= 1 {
+						p.Inventory[slot] = waterBottle
+					} else {
+						p.Inventory[slot].Count--
+						p.GiveItem(waterBottle)
+					}
+					newLevel := level - 1
+					if newLevel <= 0 {
+						applyBlockChange(x, y, z, coreworld.Block{Namespace: "minecraft", Name: "cauldron"}, w, mgr)
+					} else {
+						updated := copyBlockProperties(target)
+						updated.Properties["level"] = strconv.Itoa(newLevel)
+						applyBlockChange(x, y, z, updated, w, mgr)
+					}
+				}
+				broadcastSoundAt(mgr, "minecraft:item.bottle.fill", soundCategoryPlayers, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+				return true
+			}
+		}
+	}
+
 	if entityType := fishBucketEntity(held.ItemID); entityType != "" && nextEntityID != nil {
 		if face < 0 || int(face) >= len(faceOffset) {
 			return false
