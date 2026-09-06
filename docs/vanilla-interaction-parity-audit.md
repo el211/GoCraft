@@ -1,7 +1,7 @@
 # Dragonfly gameplay and interaction parity audit
 
 Audit date: 2026-09-02. GoCraft baseline: `missing-items` at `00685b7`.
-Progress update: 2026-09-03 (batch 2, random-tick block growth).
+Progress update: 2026-09-06 (batch 3: bamboo, cave vines, jukebox, name tags, goat horn, spyglass, sign text).
 Reference implementation: Dragonfly v0.11.0 from the resolved Go module source.
 Protocol targets: Java Edition 1.21.4 and Bedrock Edition 1.26.45.
 
@@ -41,7 +41,17 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Coral death** — live coral dies to its dead variant 60 ticks after losing
   water contact, scheduled through the block-physics engine.
 
-## Still left to do (as of batch 2)
+## Completed in batch 3 (2026-09-06)
+
+- **Bamboo growth.** Sapling converts to trunk on random tick (~1-in-3). Tip grows upward with a position-seeded target height (12–16 blocks). Leaf transitions: top="small", second="large", rest="none". Tested: sapling conversion, upward growth, leaf transitions, height cap.
+- **Cave vine growth.** Tip (cave_vines age 0..25) grows downward into air, leaving cave_vines_plant body. Berries grow independently (~1-in-11 per tick). Harvest interaction (HarvestCaveVineBerries) strips berries and returns glow_berries. Tested: downward growth, berry growth, harvest.
+- **Jukebox record insert and eject.** Right-clicking a jukebox with a music disc sets has_record=true, stores the disc in the block entity slot 0, and plays the disc sound (category: record). Right-clicking a loaded jukebox ejects the disc into the player's inventory or drops it, plays the stop sound. All 19 vanilla disc variants mapped. GetBlockEntity added to World API. Tested: insert, reject-non-disc, reject-full, eject, empty-eject guard, slot read.
+- **Name tags.** DisplayName and CustomNameVisible fields added to core/entity.Entity. Applying a name tag in main hand to any entity sets the custom name and broadcasts metadata (index 2: Optional Text Component, index 3: Boolean). DisplayName() helper added to ItemStack reading the minecraft:custom_name component. Consumes one name tag in survival.
+- **Goat horn.** Right-clicking plays the instrument sound (8 vanilla sounds mapped via minecraft:instrument component) with a 7-second cooldown. Sound broadcast at range 64. LastGoatHornUse field added to Player.
+- **Spyglass.** Right-clicking sets UsingItemID="minecraft:spyglass" so other players see the use animation. Stop is handled by the existing use-item release path.
+- **Sign text editing.** minecraft:sign_update serverbound packet (ID 52) registered and dispatched. Lines validated (≤15 chars each), encoded as network-NBT front_text/back_text compound with messages list, stored via SetBlockEntity, and broadcast to all dimension viewers via BroadcastBlockEntityDataInDimension. openSignEditor (packetIDOpenSignEditor = 0x36) registered for future placement path.
+
+## Still left to do (as of batch 3)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -154,8 +164,8 @@ inventory move, save, cross-edition sync, or restart.
 | Firework star | Partial | Partial | Some crafting/component decoding exists, but a firework-star component is not preserved as an item stack and all crafting transformations are not round-trippable. |
 | Elytra | Partial | Partial | Equipping is possible. Java accepts the start-fall-flying action only by resetting fall distance; no canonical gliding flag or glide physics exists. Bedrock glide input is not modelled, and rocket boost is missing on both. |
 | Totem of undying | Partial | Partial | Canonical death prevention and consumption run for both editions, and the granted survival effects are now stored authoritatively through the status-effect engine. Bedrock still does not receive the totem animation/effect packets through the totem path. |
-| Goat horn | Missing | Missing | Dragonfly plays the selected instrument with use duration/cooldown. GoCraft stores neither instrument nor cooldown and has no use action. |
-| Spyglass | Missing | Missing | No start/stop use state or remote-player using-item metadata. |
+| Goat horn | Implemented (new) | Missing | Java plays the instrument sound (8 vanilla variants via component) with a 7 s cooldown. Bedrock use path not yet wired. |
+| Spyglass | Implemented (new) | Missing | Java sets UsingItemID so other players see the animation. Bedrock use path not yet wired. |
 | Fishing rod | Missing | Missing | No hook entity, cast/reel state, bobber physics, hooked entity/item handling, durability, or fishing loot. |
 | Brush | Missing | Missing | No brushing progress, cooldown, suspicious sand/gravel dust states, block entity, archaeology loot, or durability. |
 | Carrot on a stick / warped fungus on a stick | Missing | Missing | Pig/strider steering boost and durability are absent even though riding exists. |
@@ -212,13 +222,13 @@ operations before adding Java calls — was followed for all nine.
 
 | Block or family | Status | Missing or incomplete behaviour |
 | --- | --- | --- |
-| Jukebox | Missing | Record insert/eject, stored record, playback event, stop event, comparator output, note particle, persistence, and cross-edition sound translation. |
+| Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on Java. All 19 vanilla disc sound events mapped. Comparator output and Bedrock wiring remain. |
 | Lectern | Missing | Book insert/remove, pages, current page, UI, page-turn events, comparator output, redstone pulse, and persistence. It currently exists only as a generated village workstation/redstone name. |
 | Chiseled bookshelf | Missing | Six-slot inventory, targeted slot selection, book insertion/removal, block state, comparator signal, vibration, and persistence. |
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
 | Dragon egg | Partial | Gravity is registered, but activate/punch teleport, particles, and creative exception are absent. |
 | Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument-from-block-below and canonical note sound/particle on rising edge still need coverage. |
-| Signs and hanging signs | Partial | Placement and empty block entities work. Text editing, front/back text, filtering, wax, dye/glow, click events, and persistence/round-trip of text components are absent. |
+| Signs and hanging signs | Partial | Placement, empty block entities, and text editing (front/back, 4 lines, 15-char cap, JSON component NBT, broadcast) now work on Java. Wax, dye/glow, click events, and Bedrock text editing remain. |
 | Banners | Partial | Placement works. Pattern layers, loom output, shields carrying patterns, map markers, block-entity persistence, and wash-off in cauldrons are absent. |
 | Beacon | Partial | Both adapters can open a one-slot screen. Pyramid level, beam obstruction/colour, payment validation, selected effects, periodic area application, and persistence are absent. |
 | Enchanting table | Partial | The screen accepts item/lapis slots, but offers, bookshelf power, seed, XP/lapis cost, selection packet, and enchant application are absent. |
@@ -238,9 +248,9 @@ operations before adding Java calls — was followed for all nine.
 | Coral and coral blocks | Implemented (new) | Live coral now schedules a death check 60 ticks after losing water contact and converts to its dead variant; waterlogged or water-adjacent coral survives. Bone-meal coral-block spreading remains. |
 | Cactus | Implemented (new) | Random growth to a three-block height with the age counter, refusing to grow beside a solid block. Contact damage and support removal were already present. Item destruction and entity collision detail remain. |
 | Sugar cane | Implemented (new) | Random growth to a three-block height through the age counter. Placement/support removal was already present. Water-adjacency survival is still enforced only by block physics. |
-| Bamboo / bamboo sapling | Partial | Generation, placement, support, and bamboo block axis exist. Sapling conversion, random growth, leaves/stage/age transitions, height selection, and bone-meal growth are absent. |
+| Bamboo / bamboo sapling | Implemented (new) | Sapling conversion (~1-in-3 ticks), random upward growth, position-seeded height cap (12–16 blocks), and correct small/large/none leaf transitions are implemented. Bone-meal growth remains. |
 | Kelp | Implemented (new) | Random column growth through water: the age-0..25 tip advances into source water above, leaving kelp_plant bodies behind. Bone-meal growth and break-from-below rules remain. |
-| Vines / cave vines / twisting and weeping vines | Partial | Twisting (upward) and weeping (downward) vines now grow randomly into air via the age-0..25 tip mechanic, leaving _plant bodies (new). Ordinary/cave vine spread, berry harvest, climbing state, bone meal, and shears rules are still absent. |
+| Vines / cave vines / twisting and weeping vines | Partial | Twisting (upward) and weeping (downward) vines grow via the age-0..25 tip mechanic. Cave vines now grow downward and grow berries (~1-in-11 per tick); glow berry harvest wired. Ordinary vine spread, climbing state, bone meal, and shears rules are still absent. |
 | Cocoa | Partial | A bounded legacy growth tick exists. Correct jungle-log attachment/facing survival, placement interaction, and bone meal are absent. |
 | Fire | Partial | Placement, scheduled spread/burnout, and contact damage exist. Fire immunity/effects, rain extinguishing, portal interaction details, gamerules, block-specific flammability, and complete soul-fire rules remain. |
 | Fluids and waterlogging | Partial | Source placement, simple spread, collision checks, and lava/water hardening exist. Flow vectors, finite levels/source formation, waterlogged fluid ticking, ultrawarm evaporation, entity pushing, dripstone, and many replaceability rules are incomplete. |
@@ -271,7 +281,7 @@ adapters unless noted:
 | Cow/mooshroom/goat milking | Missing | Buckets cannot create milk; mooshroom bowls/stew and conversion interactions are absent. |
 | Fish/axolotl/tadpole bucket capture | Missing | No capture/release data, bucket replacement, variant preservation, or water placement. |
 | Leads and leash knots | Missing | No leash ownership, fence knot entity, distance physics, drop, or detach interaction. |
-| Name tags | Missing | No custom-name component, anvil naming prerequisite, entity naming, persistence, or visibility rules. |
+| Name tags | Implemented (new) | Applying a name tag sets DisplayName and CustomNameVisible on the entity; metadata (index 2 Optional Text Component, index 3 Boolean) broadcast to all viewers. DisplayName() helper reads minecraft:custom_name component. Anvil naming prerequisite and persistence across restart remain. |
 | Horse/donkey/llama equipment | Partial | Saddling/mounting exists. Inventory UI, armour, carpet, chest attachment, storage, jump charge, temper/buck details, and equipment persistence are absent. |
 | Wolf/cat/parrot ownership | Partial | Taming and sit toggle exist. Collar dye, follow/teleport rules, owner defence breadth, shoulder parrots, gifts, and complete metadata are absent. |
 | Turtle/frog/sniffer/armadillo special actions | Partial | Generic food/breeding tables exist, but egg laying, scute/drop timing, frogspawn, sniff/dig, brushing, rolling, and species-specific goals are absent. |
