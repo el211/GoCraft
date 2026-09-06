@@ -88,6 +88,7 @@
 	"minecraft:paddle_boat": 33,
 	"minecraft:player_input": 41,
 	"minecraft:player_command": 40,
-		"minecraft:sign_update": 52
+		"minecraft:sign_update": 52,
+		"minecraft:rename_item": 48
   }
 }

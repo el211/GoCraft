@@ -421,6 +421,33 @@ func WorkstationOutputIndex(kind string) int {
 	}
 }
 
+// SyncWorkstationToConn sends the current workstation slot contents to the
+// player's open container. Used by the brewing stand ticker to push slot
+// updates without reopening the screen.
+func SyncWorkstationToConn(conn *network.ClientConn, p *player.Player) error {
+	if conn == nil || p == nil {
+		return nil
+	}
+	return sendChestContainerContent(conn, p)
+}
+
+// SyncBrewingContainer sends the two brewing stand progress properties to the
+// player who currently has the block open. brewTime counts down 400→0,
+// fuelAmount is the remaining brews from the last blaze powder (0-20).
+func SyncBrewingContainer(conn *network.ClientConn, p *player.Player, brewTime, fuelAmount int) error {
+	if conn == nil || p == nil || p.OpenContainerKind != "minecraft:brewing_stand" {
+		return nil
+	}
+	for prop, value := range [2]int{brewTime, fuelAmount} {
+		pkt := protocol.NewBuilder(packetIDSetContainerData).
+			VarInt(workstationContainerID).Short(int16(prop)).Short(int16(value)).Build()
+		if err := conn.WritePacket(pkt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 type workstationOperation struct {
 	result  player.ItemStack
 	consume []int

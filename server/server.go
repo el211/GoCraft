@@ -148,6 +148,7 @@ type Server struct {
 	spawnRNG                *rand.Rand
 	creaturePopulatedChunks map[[2]int32]struct{}
 	furnaces                map[furnaceKey]*furnaceState
+	brewingStands           map[brewingKey]*brewingState
 	campfireCooking         map[campfireCookKey]int64
 
 	// sleepAllTick is the worldAge tick at which ALL online players were first
@@ -957,6 +958,7 @@ func (s *Server) safeTick() {
 	s.tickBedrockItemUse()
 	s.tickJavaItemUse()
 	s.tickFurnaces()
+	s.tickBrewingStands()
 	s.tickContainerAutomation()
 	s.tickEntities()
 	s.tickAuxiliaryDimensionItems()
@@ -1929,6 +1931,9 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 			if s.bedrockListener.OpenContainerBlock(p.UUID, int32(x), int32(y), int32(z), clicked.ResourceLocation()) {
 				if isBedrockGenericContainer(clicked.ResourceLocation()) {
 					s.bedrockListener.SyncGenericContainer(p)
+				} else if clicked.ResourceLocation() == "minecraft:brewing_stand" {
+					state := s.brewingStateForDimension(p.Dimension, i.Position)
+					s.bedrockListener.SyncBrewingContainer(p, state.BrewTime, state.FuelAmount)
 				} else if isBedrockWorkstation(clicked.ResourceLocation()) {
 					s.bedrockListener.SyncWorkstationContainer(p)
 				} else if !handler.IsFurnaceContainer(clicked.ResourceLocation()) {

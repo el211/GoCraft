@@ -1586,6 +1586,23 @@ func (l *Listener) SyncFurnaceContainer(p *player.Player, cookTime, burnTime, bu
 	}
 }
 
+// SyncBrewingContainer sends updated brewing stand slot contents and the two
+// progress data values (key 0 = brew_time 400→0, key 1 = fuel_amount 0-20).
+func (l *Listener) SyncBrewingContainer(p *player.Player, brewTime, fuelAmount int) {
+	if p == nil || p.OpenContainerKind != "minecraft:brewing_stand" {
+		return
+	}
+	l.SyncWorkstationContainer(p)
+	l.sessionsMu.RLock()
+	viewer := l.sessions[p.UUID]
+	l.sessionsMu.RUnlock()
+	if viewer == nil {
+		return
+	}
+	_ = viewer.conn.WritePacket(&packet.ContainerSetData{WindowID: 1, Key: 0, Value: int32(brewTime)})
+	_ = viewer.conn.WritePacket(&packet.ContainerSetData{WindowID: 1, Key: 1, Value: int32(fuelAmount)})
+}
+
 // bedrockContainerType maps a block resource location to the Bedrock protocol
 // container type used in the ContainerOpen packet. Returns false if the block
 // is not an interactive container.

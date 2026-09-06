@@ -51,11 +51,32 @@ func (s *Server) openBedrockWorkstation(p *player.Player, pos spatial.BlockPos, 
 	p.OpenContainerHasPartner = false
 	p.ContainerSlots = make([]player.ItemStack, bedrockWorkstationSlotCount(blockID))
 	p.WorkstationSelection = 0
+	// Brewing stands persist items in the block entity; load them now.
+	if blockID == "minecraft:brewing_stand" {
+		w := s.worldForPlayer(p)
+		for _, ci := range w.ContainerItems(int(pos.X), int(pos.Y), int(pos.Z)) {
+			if ci.Slot >= 0 && ci.Slot < len(p.ContainerSlots) {
+				p.ContainerSlots[ci.Slot] = ci.Stack()
+			}
+		}
+	}
 	handler.UpdateWorkstationResult(blockID, p.ContainerSlots, p.WorkstationSelection)
 }
 
 func (s *Server) returnBedrockWorkstationItems(p *player.Player) {
 	if p == nil || !isBedrockWorkstation(p.OpenContainerKind) {
+		return
+	}
+	// Brewing stand items are persistent — save them back to block entity.
+	if p.OpenContainerKind == "minecraft:brewing_stand" {
+		items := make([]coreworld.ContainerItem, 0, len(p.ContainerSlots))
+		for slot, stack := range p.ContainerSlots {
+			if !stack.IsEmpty() {
+				items = append(items, coreworld.ContainerItemFromStack(slot, stack))
+			}
+		}
+		w := s.worldForPlayer(p)
+		w.SetContainerItems(int(p.OpenContainerPos.X), int(p.OpenContainerPos.Y), int(p.OpenContainerPos.Z), p.OpenContainerKind, items)
 		return
 	}
 	for index, stack := range p.ContainerSlots {
