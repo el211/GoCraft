@@ -1352,7 +1352,9 @@ func applyPlayerFallDamage(sess *session.Session, previousY float64, previousOnG
 	if !previousOnGround {
 		fallDistance := p.FallDistance
 		p.FallDistance = 0
-		damage := float32(math.Floor(fallDistance - 3))
+		// Feather Falling reduces safe fall height by 3 blocks per level.
+		safeHeight := 3.0 + float64(p.Inventory[8].EnchantmentLevel("minecraft:feather_falling"))*3.0
+		damage := float32(math.Floor(fallDistance - safeHeight))
 		if damage > 0 {
 			DamagePlayer(sess, damage, "hit the ground too hard", mgr)
 		}

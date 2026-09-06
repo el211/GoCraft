@@ -1621,7 +1621,8 @@ func (s *Server) applyBedrockMovementDamage(p *player.Player, previousPosition s
 	} else if !previousOnGround {
 		fallDistance := p.FallDistance
 		p.FallDistance = 0
-		if damage := float32(math.Floor(fallDistance - 3)); damage > 0 {
+		safeHeight := 3.0 + float64(p.Inventory[8].EnchantmentLevel("minecraft:feather_falling"))*3.0
+		if damage := float32(math.Floor(fallDistance - safeHeight)); damage > 0 {
 			handler.DamagePlayer(target, damage, "hit the ground too hard", s.sessions)
 		}
 	}
