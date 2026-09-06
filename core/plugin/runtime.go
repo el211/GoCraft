@@ -59,7 +59,7 @@ type Instance interface {
 // waits through without a budget. What the runtime does with it is its own
 // business, except for the one thing it must not do: run a handler.
 type Warmer interface {
-	Warm(ctx context.Context, event string) error
+	Warm(ctx context.Context, event *abi.Event) error
 }
 
 // CommandInstance is implemented by runtimes that loaded a command tree.

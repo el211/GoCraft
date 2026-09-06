@@ -18,6 +18,15 @@ type ProvidedEvent struct {
 	TypeID     uint32
 	Provider   string
 	Definition gcpkg.EventDefinition
+
+	// Records are the compound values this event's fields name, as its provider
+	// declared them.
+	//
+	// Kept beside the definition because a field's type is a name until
+	// something resolves it, and the only manifest that can is the provider's.
+	// The host needs them to build a payload of the event's shape for a warm
+	// dispatch; nothing at dispatch reads them, since values move positionally.
+	Records []gcpkg.EventRecord
 }
 
 // EventTypes is every event type the scanned bundles declare between them.
@@ -42,6 +51,7 @@ type EventTypes struct {
 func newEventTypes(bundles []Bundle) (*EventTypes, error) {
 	providers := make(map[string]string)
 	definitions := make(map[string]gcpkg.EventDefinition)
+	records := make(map[string][]gcpkg.EventRecord)
 	for _, bundle := range bundles {
 		for _, definition := range bundle.Manifest.Provides {
 			if owner, taken := providers[definition.Type]; taken {
@@ -50,6 +60,7 @@ func newEventTypes(bundles []Bundle) (*EventTypes, error) {
 			}
 			providers[definition.Type] = bundle.Manifest.ID
 			definitions[definition.Type] = definition
+			records[definition.Type] = bundle.Manifest.Records
 		}
 	}
 	names := make([]string, 0, len(providers))
@@ -71,6 +82,7 @@ func newEventTypes(bundles []Bundle) (*EventTypes, error) {
 			TypeID:     uint32(index) + 1,
 			Provider:   providers[name],
 			Definition: definitions[name],
+			Records:    records[name],
 		}
 		types.byName[name] = provided
 		types.byID[provided.TypeID] = provided

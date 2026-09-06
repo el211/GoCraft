@@ -416,7 +416,7 @@ func (i *Instance) Dispatch(ctx context.Context, event *abi.Event) (abi.Verdict,
 //
 // The rounds are the host's, not a constant buried in the runtime, because the
 // host is what pays for them: they run between LOAD and READY while it waits.
-func (i *Instance) Warm(ctx context.Context, event string) error {
+func (i *Instance) Warm(ctx context.Context, event *abi.Event) error {
 	supervisor, err := i.runtime.running()
 	if err != nil {
 		return err
