@@ -2,7 +2,6 @@ package plugin
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -51,7 +50,7 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 		started := time.Now()
 		verdict, err := sub.instance.Dispatch(ctx, event)
 		took := time.Since(started)
-		if ctx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		if budgetEnded(err) {
 			sub.health.record(time.Now(), true, took)
 			b.recordStarved(subscribers[index+1:], definition.Type)
 			// How long it actually took, and what it was allowed. "Exceeded"
@@ -71,6 +70,7 @@ func (b *Bus) EmitCustom(definition gcpkg.EventDefinition, emission abi.Emission
 			continue
 		}
 		sub.health.record(time.Now(), false, took)
+		b.reportLateVerdict(ctx, sub, definition.Type, took)
 		b.enqueueEffects(sub, definition.Type, verdict.Effects)
 		state, applied = b.applyMutations(sub, definition, state, applied, verdict.Mutations)
 		if verdict.Cancelled {
