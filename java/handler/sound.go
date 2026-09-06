@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	soundCategoryRecords int32 = 3
 	soundCategoryBlocks  int32 = 4
 	soundCategoryNeutral int32 = 6
 	soundCategoryPlayers int32 = 7

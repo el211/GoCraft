@@ -848,6 +848,54 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 		}
 	}
 
+	// Jukebox: insert a music disc or eject the current one.
+	if hand == 0 && p.GameMode != player.GameModeSpectator &&
+		targetBlock.ResourceLocation() == "minecraft:jukebox" {
+		be := w.GetBlockEntity(int(bx), int(by), int(bz))
+		stored := coreworld.JukeboxRecordItem(be)
+		if stored != "" {
+			// Eject current record.
+			if ejected, cleared, ok := coreworld.EjectJukeboxRecord(targetBlock, stored); ok {
+				applyBlockChange(int(bx), int(by), int(bz), cleared, w, mgr)
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:jukebox", nil)
+				drop := player.ItemStack{ItemID: ejected, Count: 1}
+				if !p.GiveItem(drop) {
+					spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
+				}
+				if conn != nil {
+					_ = SyncPlayerInventory(conn, p)
+				} else {
+					p.ContainerStateID++
+				}
+				broadcastSoundAt(mgr, "minecraft:block.jukebox.stop_record", soundCategoryBlocks,
+					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 1, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		} else if coreworld.IsMusicDisc(held.ItemID) {
+			// Insert new record.
+			if updated, ok := coreworld.InsertJukeboxRecord(targetBlock, held.ItemID); ok {
+				applyBlockChange(int(bx), int(by), int(bz), updated, w, mgr)
+				items := []coreworld.ContainerItem{{Slot: 0, ItemID: held.ItemID, Count: 1}}
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:jukebox", items)
+				if p.GameMode != player.GameModeCreative {
+					slot := player.HotbarStart + p.HeldSlot
+					p.Inventory[slot].Count--
+					normalizeStack(&p.Inventory[slot])
+					if conn != nil {
+						_ = SyncPlayerInventory(conn, p)
+					} else {
+						p.ContainerStateID++
+					}
+				}
+				broadcastSoundAt(mgr, coreworld.MusicDiscSound(held.ItemID), soundCategoryRecords,
+					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 4, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		}
+	}
+
 	// Sneaking with an item bypasses block activation so a block can be placed
 	// against doors, containers, workstations, composters, and other UIs.
 	bypassActivation := p.Sneaking && !held.IsEmpty()

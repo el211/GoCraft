@@ -902,6 +902,25 @@ func (w *World) ContainerItems(x, y, z int) []ContainerItem {
 	return nil
 }
 
+// GetBlockEntity returns a snapshot of the block entity at (x, y, z), or a
+// zero-value BlockEntity when none is stored there.
+func (w *World) GetBlockEntity(x, y, z int) BlockEntity {
+	cx := int32(math.Floor(float64(x) / SectionSize))
+	cz := int32(math.Floor(float64(z) / SectionSize))
+	c := w.Chunk(cx, cz)
+	w.containerMu.RLock()
+	defer w.containerMu.RUnlock()
+	for _, entity := range c.BlockEntities {
+		if entity.X == x && entity.Y == y && entity.Z == z {
+			copy := entity
+			copy.Items = append([]ContainerItem(nil), entity.Items...)
+			copy.Data = append([]byte(nil), entity.Data...)
+			return copy
+		}
+	}
+	return BlockEntity{}
+}
+
 // LoadedBlockEntities returns a deep snapshot of block entities from chunks
 // already resident in memory. Automation uses this to tick hoppers without
 // generating or loading unrelated chunks.
