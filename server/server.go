@@ -1801,7 +1801,8 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 		containerItems := []coreworld.ContainerItem(nil)
 		if bedrockSpillingContainer(block.ResourceLocation()) ||
 			block.ResourceLocation() == "minecraft:jukebox" ||
-			block.ResourceLocation() == "minecraft:lectern" {
+			block.ResourceLocation() == "minecraft:lectern" ||
+			block.ResourceLocation() == "minecraft:chiseled_bookshelf" {
 			containerItems = actionWorld.ContainerItems(x, y, z)
 		}
 		partnerY, partnerHalf, hasPartner := coreworld.DoublePlantPartnerY(block, y)
@@ -1853,7 +1854,8 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 		}
 		if bedrockSpillingContainer(block.ResourceLocation()) ||
 			block.ResourceLocation() == "minecraft:jukebox" ||
-			block.ResourceLocation() == "minecraft:lectern" {
+			block.ResourceLocation() == "minecraft:lectern" ||
+			block.ResourceLocation() == "minecraft:chiseled_bookshelf" {
 			actionWorld.SetContainerItems(x, y, z, block.ResourceLocation(), nil)
 		}
 
@@ -1871,6 +1873,41 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 				s.ringBell(actionWorld, p.Dimension, i.Position, direction)
 				return
 			}
+		}
+		if !bypassActivation && coreworld.IsChiseledBookshelf(clicked.ResourceLocation()) && p.GameMode != player.GameModeSpectator {
+			bx2, by2, bz2 := int(i.Position.X), int(i.Position.Y), int(i.Position.Z)
+			facing := clicked.Properties["facing"]
+			slot := coreworld.ChiseledBookshelfSlot(facing, float64(i.ClickX), float64(i.ClickY), float64(i.ClickZ))
+			be := actionWorld.GetBlockEntity(bx2, by2, bz2)
+			slotProp := fmt.Sprintf("slot_%d_occupied", slot)
+			if clicked.Properties[slotProp] == "true" {
+				storedID := ""
+				for _, ci := range be.Items {
+					if ci.Slot == slot {
+						storedID = ci.ItemID
+						break
+					}
+				}
+				if _, cleared, ok2 := coreworld.EjectBookshelfBook(clicked, slot, storedID); ok2 {
+					s.setBedrockActionBlock(bx2, by2, bz2, cleared)
+					newItems := make([]coreworld.ContainerItem, 0, 6)
+					for _, ci := range be.Items {
+						if ci.Slot != slot {
+							newItems = append(newItems, ci)
+						}
+					}
+					actionWorld.SetContainerItems(bx2, by2, bz2, "minecraft:chiseled_bookshelf", newItems)
+					s.giveBedrockActionItem(p, player.ItemStack{ItemID: storedID, Count: 1})
+				}
+			} else if coreworld.IsBookshelfBook(held.ItemID) {
+				if updated, ok2 := coreworld.InsertBookshelfBook(clicked, slot, held.ItemID); ok2 {
+					s.setBedrockActionBlock(bx2, by2, bz2, updated)
+					newItems := append(be.Items, coreworld.ContainerItem{Slot: slot, ItemID: held.ItemID, Count: 1})
+					actionWorld.SetContainerItems(bx2, by2, bz2, "minecraft:chiseled_bookshelf", newItems)
+					s.consumeBedrockHeldItem(p, 1)
+				}
+			}
+			return
 		}
 		if !bypassActivation && s.applyBedrockBlockActivation(p, i.Position, clicked) {
 			return

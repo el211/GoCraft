@@ -212,7 +212,7 @@ func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *co
 						drops[i2] = coreworld.ShulkerBoxDropItem(drop.ItemID, containerItems)
 					}
 				}
-			} else if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:jukebox" || broken.ResourceLocation() == "minecraft:lectern" {
+			} else if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:jukebox" || broken.ResourceLocation() == "minecraft:lectern" || broken.ResourceLocation() == "minecraft:chiseled_bookshelf" {
 				for _, item := range containerItems {
 					if item.ItemID != "" && item.Count > 0 {
 						spawnBlockDrop(w, nextEntityID, dropPosition, item.Stack(), ordinal, mgr, p.Dimension)
@@ -897,6 +897,65 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 				}
 				broadcastSoundAt(mgr, coreworld.MusicDiscSound(held.ItemID), soundCategoryRecords,
 					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 4, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		}
+	}
+
+	// Chiseled bookshelf: targeted book insert/remove.
+	if hand == 0 && p.GameMode != player.GameModeSpectator &&
+		targetBlock.ResourceLocation() == "minecraft:chiseled_bookshelf" {
+		facing := targetBlock.Properties["facing"]
+		slot := coreworld.ChiseledBookshelfSlot(facing, float64(cursorX), float64(cursorY), float64(cursorZ))
+		be := w.GetBlockEntity(int(bx), int(by), int(bz))
+		slotProp := fmt.Sprintf("slot_%d_occupied", slot)
+		if targetBlock.Properties[slotProp] == "true" {
+			// Eject book from this slot.
+			storedID := ""
+			for _, ci := range be.Items {
+				if ci.Slot == slot {
+					storedID = ci.ItemID
+					break
+				}
+			}
+			if _, cleared, ok2 := coreworld.EjectBookshelfBook(targetBlock, slot, storedID); ok2 {
+				applyBlockChange(int(bx), int(by), int(bz), cleared, w, mgr)
+				newItems := make([]coreworld.ContainerItem, 0, 6)
+				for _, ci := range be.Items {
+					if ci.Slot != slot {
+						newItems = append(newItems, ci)
+					}
+				}
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:chiseled_bookshelf", newItems)
+				drop := player.ItemStack{ItemID: storedID, Count: 1}
+				if !p.GiveItem(drop) {
+					spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
+				}
+				if conn != nil {
+					_ = SyncPlayerInventory(conn, p)
+				} else {
+					p.ContainerStateID++
+				}
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		} else if coreworld.IsBookshelfBook(held.ItemID) {
+			// Insert book into empty slot.
+			if updated, ok2 := coreworld.InsertBookshelfBook(targetBlock, slot, held.ItemID); ok2 {
+				applyBlockChange(int(bx), int(by), int(bz), updated, w, mgr)
+				newItems := append(be.Items, coreworld.ContainerItem{Slot: slot, ItemID: held.ItemID, Count: 1})
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:chiseled_bookshelf", newItems)
+				if p.GameMode != player.GameModeCreative {
+					heldInvSlot := player.HotbarStart + p.HeldSlot
+					p.Inventory[heldInvSlot].Count--
+					normalizeStack(&p.Inventory[heldInvSlot])
+					if conn != nil {
+						_ = SyncPlayerInventory(conn, p)
+					} else {
+						p.ContainerStateID++
+					}
+				}
 				sendAcknowledgeBlockChange(mgr, p, seq)
 				return nil
 			}
