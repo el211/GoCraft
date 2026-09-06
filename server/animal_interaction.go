@@ -144,6 +144,18 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 		return true
 	}
 
+	// Dye a sheep: applies the dye colour and consumes one dye.
+	if e.Type == corentity.TypeSheep {
+		if color := sheepDyeColor(item); color != "" {
+			if !s.consumeAnimalItem(p, "") {
+				return false
+			}
+			e.WoolColor = color
+			s.broadcastAnimalState(e)
+			return true
+		}
+	}
+
 	// Milk a cow or mooshroom: replaces one bucket in hand with a milk bucket.
 	if item == "minecraft:bucket" && !e.IsBaby &&
 		(e.Type == corentity.TypeCow || e.Type == corentity.TypeMooshroom) {
@@ -330,6 +342,23 @@ func (s *Server) dismountPlayer(p *player.Player) bool {
 	}
 	handler.BroadcastSetPassengers(vehicleID, nil, s.sessions)
 	return true
+}
+
+// sheepDyeColor returns the canonical colour name if itemID is a dye, else "".
+func sheepDyeColor(itemID string) string {
+	const prefix = "minecraft:"
+	const suffix = "_dye"
+	if len(itemID) <= len(prefix)+len(suffix) {
+		return ""
+	}
+	if itemID[:len(prefix)] != prefix {
+		return ""
+	}
+	tail := itemID[len(prefix):]
+	if len(tail) <= len(suffix) || tail[len(tail)-len(suffix):] != suffix {
+		return ""
+	}
+	return tail[:len(tail)-len(suffix)]
 }
 
 func (s *Server) dismountEntityPassengers(vehicle *corentity.Entity) {
