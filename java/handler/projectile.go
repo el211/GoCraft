@@ -199,6 +199,10 @@ func releaseRangedItem(p *player.Player, w *coreworld.World, mgr *session.Manage
 		}
 		speed = power * 3
 		damage = float32(2 + power*4)
+		// Power enchantment: each level adds 0.5 * (level + 1) extra damage.
+		if lvl := p.Inventory[player.HotbarStart+p.HeldSlot].EnchantmentLevel("minecraft:power"); lvl > 0 {
+			damage += float32(0.5 * float64(lvl+1))
+		}
 	case "minecraft:crossbow":
 		// Vanilla crossbow: releasing after ≥25 ticks loads the crossbow but
 		// does NOT fire. A second right-click fires the loaded arrow.
