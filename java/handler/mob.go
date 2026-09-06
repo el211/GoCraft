@@ -15,6 +15,7 @@ import (
 	corentity "GoCraft/core/entity"
 	"GoCraft/core/player"
 	"GoCraft/core/spatial"
+	coreworld "GoCraft/core/world"
 	"GoCraft/java/network"
 	"GoCraft/java/protocol"
 	"GoCraft/java/session"
@@ -24,7 +25,9 @@ import (
 const (
 	entityMetadataPoseIndex              byte  = 6
 	livingEntityMetadataSleepingPosIndex byte  = 14
+	endermanMetadataCarriedBlockIndex    byte  = 16
 	metadataTypeOptionalBlockPos         int32 = 11
+	metadataTypeOptionalBlockState       int32 = 15
 	metadataTypePose                     int32 = 21
 	entityPoseStanding                   int32 = 0
 	entityPoseSleeping                   int32 = 2
@@ -186,6 +189,12 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 	}
 	if e.Type == corentity.TypePufferfish {
 		b = b.Byte(17).VarInt(1).VarInt(e.PufferState)
+		hasMetadata = true
+	}
+	if e.Type == corentity.TypeEnderman && e.EndermanCarriedBlock != "" {
+		b = b.Byte(endermanMetadataCarriedBlockIndex).
+			VarInt(metadataTypeOptionalBlockState).
+			VarInt(javaworld.StateID(coreworld.BlockFromResourceLocation(e.EndermanCarriedBlock)))
 		hasMetadata = true
 	}
 	if e.Type != corentity.TypeVillager {

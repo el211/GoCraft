@@ -59,6 +59,7 @@ import (
 	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
 	"GoCraft/java/world/anvil"
+
 	bedrockpacket "github.com/sandertv/gophertunnel/minecraft/protocol/packet"
 )
 
@@ -2784,6 +2785,7 @@ func (s *Server) tickEntities() {
 		e.AgeTicks++
 		if !e.Dead {
 			s.tickMobSunlight(e, &hurtEntities)
+			s.tickEndermanBlockCarry(e)
 		}
 		// ── Dead entity cleanup ───────────────────────────────────────────────
 		if e.Dead {
@@ -3125,6 +3127,11 @@ func (s *Server) tickEntities() {
 // drops are intentionally left for the enchantment/loot-table layer.
 func (s *Server) spawnMobDrops(e *corentity.Entity) []*corentity.Entity {
 	stacks := mobDrops(e.Type, s.spawnRNG)
+	// A killed enderman drops the block it was carrying.
+	if e.EndermanCarriedBlock != "" {
+		stacks = append(stacks, player.ItemStack{ItemID: e.EndermanCarriedBlock, Count: 1})
+		e.EndermanCarriedBlock = ""
+	}
 	spawned := make([]*corentity.Entity, 0, len(stacks))
 	for index, stack := range stacks {
 		if dropped := s.newDroppedItemInWorld(s.world, stack, e.Position, index); dropped != nil {
