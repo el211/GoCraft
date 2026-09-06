@@ -28,6 +28,14 @@ func (s *Server) tickAnimalLifecycle(entities []*corentity.Entity) {
 				e.Damage(e.MaxHealth)
 			}
 		}
+		// Sheep wool regrowth: count down and regrow when zero.
+		if e.Type == corentity.TypeSheep && e.Sheared && e.WoolRegrowTicks > 0 {
+			e.WoolRegrowTicks--
+			if e.WoolRegrowTicks == 0 {
+				e.Sheared = false
+				handler.BroadcastMobMetadata(e, s.sessions)
+			}
+		}
 		if !corentity.IsAgeableAnimal(e.Type) {
 			continue
 		}

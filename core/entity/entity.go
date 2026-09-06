@@ -245,8 +245,10 @@ type Entity struct {
 	// Sheep fields — only used when Type == TypeSheep.
 	// Sheared tracks whether the wool has been harvested. WoolColor is the
 	// canonical dye name ("white", "black", etc.); "" defaults to "white".
-	Sheared   bool
-	WoolColor string
+	// WoolRegrowTicks counts down to wool regrowth after shearing.
+	Sheared        bool
+	WoolColor      string
+	WoolRegrowTicks int32
 
 	// Enderman fields - only used when type == TypeEnderman
 	// EndermanCarriedBlock is the canonical resource location of the block

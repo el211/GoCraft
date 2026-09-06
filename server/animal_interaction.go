@@ -138,6 +138,7 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 			s.newDroppedItemForPlayer(p, drop, e.Position, 0)
 		}
 		e.Sheared = true
+		e.WoolRegrowTicks = 300 // ~15 s at 20 tps; regrow on next grass-eat opportunity
 		s.broadcastAnimalState(e)
 		s.damageBedrockHeldItem(p, 1)
 		return true
@@ -147,6 +148,12 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 	if item == "minecraft:bucket" && !e.IsBaby &&
 		(e.Type == corentity.TypeCow || e.Type == corentity.TypeMooshroom) {
 		s.consumeAnimalItem(p, "minecraft:milk_bucket")
+		return true
+	}
+
+	// Bowl on mooshroom → mushroom stew.
+	if item == "minecraft:bowl" && !e.IsBaby && e.Type == corentity.TypeMooshroom {
+		s.consumeAnimalItem(p, "minecraft:mushroom_stew")
 		return true
 	}
 
