@@ -125,6 +125,31 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 	held := p.HeldItem()
 	item := held.ItemID
 
+	// Shear a sheep: drops 1-3 wool and marks the sheep as sheared.
+	if item == "minecraft:shears" && e.Type == corentity.TypeSheep && !e.Sheared && !e.IsBaby {
+		woolColor := e.WoolColor
+		if woolColor == "" {
+			woolColor = "white"
+		}
+		woolItem := "minecraft:" + woolColor + "_wool"
+		woolCount := 1 + s.interactionRNG().Intn(3)
+		drop := player.ItemStack{ItemID: woolItem, Count: woolCount}
+		if !p.GiveItem(drop) {
+			s.newDroppedItemForPlayer(p, drop, e.Position, 0)
+		}
+		e.Sheared = true
+		s.broadcastAnimalState(e)
+		s.damageBedrockHeldItem(p, 1)
+		return true
+	}
+
+	// Milk a cow or mooshroom: replaces one bucket in hand with a milk bucket.
+	if item == "minecraft:bucket" && !e.IsBaby &&
+		(e.Type == corentity.TypeCow || e.Type == corentity.TypeMooshroom) {
+		s.consumeAnimalItem(p, "minecraft:milk_bucket")
+		return true
+	}
+
 	if item == "minecraft:saddle" && saddleApplicable(e.Type) && !e.Saddled && !e.IsBaby {
 		if isHorseFamily(e.Type) && !e.Tamed {
 			return false

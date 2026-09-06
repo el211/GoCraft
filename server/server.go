@@ -1363,6 +1363,22 @@ func (s *Server) applyBedrockStartUseItem(i intent.StartUseItemIntent) {
 		return
 	}
 	p.HeldSlot = previousHeldSlot
+	if stack.ItemID == "minecraft:goat_horn" {
+		const goatHornCooldown = 7 * time.Second
+		if !p.LastGoatHornUse.IsZero() && time.Since(p.LastGoatHornUse) < goatHornCooldown {
+			return
+		}
+		p.LastGoatHornUse = time.Now()
+		sound := handler.GoatHornSound(stack)
+		handler.BroadcastSoundAt(s.sessions, sound, handler.SoundCategoryNeutral,
+			p.Position.X, p.Position.Y+1.62, p.Position.Z, 64, 1)
+		return
+	}
+	if stack.ItemID == "minecraft:spyglass" {
+		p.UsingItemID = "minecraft:spyglass"
+		p.UsingItemSince = time.Now()
+		return
+	}
 	if stack.ItemID == "minecraft:wind_charge" {
 		previousHeldSlot := p.HeldSlot
 		p.HeldSlot = hotbar
@@ -1963,6 +1979,19 @@ func (s *Server) applyEntityInteract(i intent.EntityInteractIntent) {
 			return
 		}
 		if entity, ok := s.worldForPlayer(attacker).Entities.Get(i.TargetID); ok && attacker.Position.Distance(entity.Position) <= 4 {
+			if attacker.Edition == player.ClientEditionBedrock &&
+				attacker.HeldItem().ItemID == "minecraft:name_tag" &&
+				attacker.GameMode != player.GameModeSpectator {
+				name := attacker.HeldItem().DisplayName()
+				if name != "" {
+					entity.DisplayName = name
+					entity.CustomNameVisible = true
+					handler.BroadcastMobMetadata(entity, s.sessions)
+					s.consumeAnimalItem(attacker, "")
+					s.syncPlayerInventory(attacker)
+					return
+				}
+			}
 			if entity.Type == corentity.TypeVillager && !entity.CanTradeAsVillager() {
 				handler.BroadcastVillagerUnhappy(s.sessions, entity)
 				if s.bedrockListener != nil {

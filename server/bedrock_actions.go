@@ -290,6 +290,21 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		s.consumeBedrockHeldItem(p, 1)
 		return true
 	}
+
+	if name == "minecraft:jukebox" && coreworld.IsMusicDisc(item) {
+		be := s.bedrockWorld().GetBlockEntity(x, y, z)
+		stored := coreworld.JukeboxRecordItem(be)
+		if stored == "" {
+			updated, ok := coreworld.InsertJukeboxRecord(target, item)
+			if ok {
+				s.setBedrockActionBlock(x, y, z, updated)
+				s.bedrockWorld().SetContainerItems(x, y, z, "minecraft:jukebox",
+					[]coreworld.ContainerItem{coreworld.ContainerItemFromStack(0, player.ItemStack{ItemID: item, Count: 1})})
+				s.consumeBedrockHeldItem(p, 1)
+				return true
+			}
+		}
+	}
 	return false
 }
 
@@ -298,6 +313,19 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 func (s *Server) applyBedrockBlockActivation(p *player.Player, pos spatial.BlockPos, block coreworld.Block) bool {
 	x, y, z := int(pos.X), int(pos.Y), int(pos.Z)
 	name := block.ResourceLocation()
+	if name == "minecraft:jukebox" {
+		be := s.bedrockWorld().GetBlockEntity(x, y, z)
+		stored := coreworld.JukeboxRecordItem(be)
+		if stored != "" {
+			_, updated, ok := coreworld.EjectJukeboxRecord(block, stored)
+			if ok {
+				s.setBedrockActionBlock(x, y, z, updated)
+				s.bedrockWorld().SetContainerItems(x, y, z, "minecraft:jukebox", nil)
+				s.giveBedrockActionItem(p, player.ItemStack{ItemID: stored, Count: 1})
+			}
+		}
+		return true
+	}
 	if name == "minecraft:sweet_berry_bush" {
 		seed := uint64(s.worldAge) + uint64(coreworld.CropAge(block)+1)*0x9e3779b97f4a7c15
 		if count, changes, harvested := s.bedrockWorld().HarvestSweetBerryBush(x, y, z, seed); harvested {

@@ -242,6 +242,12 @@ type Entity struct {
 	DisplayName       string
 	CustomNameVisible bool
 
+	// Sheep fields — only used when Type == TypeSheep.
+	// Sheared tracks whether the wool has been harvested. WoolColor is the
+	// canonical dye name ("white", "black", etc.); "" defaults to "white".
+	Sheared   bool
+	WoolColor string
+
 	// Enderman fields - only used when type == TypeEnderman
 	// EndermanCarriedBlock is the canonical resource location of the block
 	// an enderman is holding, or "" when empty. Adapters resolve their own IDs.

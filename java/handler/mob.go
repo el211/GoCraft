@@ -203,6 +203,15 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 		b = b.Byte(17).VarInt(1).VarInt(e.PufferState)
 		hasMetadata = true
 	}
+	if e.Type == corentity.TypeSheep {
+		color := sheepColorID(e.WoolColor)
+		flags := byte(color & 0x0F)
+		if e.Sheared {
+			flags |= 0x10
+		}
+		b = b.Byte(17).VarInt(0).Byte(flags)
+		hasMetadata = true
+	}
 	if e.Type == corentity.TypeEnderman && e.EndermanCarriedBlock != "" {
 		b = b.Byte(endermanMetadataCarriedBlockIndex).
 			VarInt(metadataTypeOptionalBlockState).
@@ -240,6 +249,45 @@ func buildMobEquipment(e *corentity.Entity) *protocol.Packet {
 		Byte(0) // Main hand, final equipment entry.
 	encodeSlot(b, player.ItemStack{ItemID: e.MainHandItemID, Count: 1})
 	return b.Build()
+}
+
+// sheepColorID maps a canonical dye color name to the Java DyeColor ordinal
+// (0-15). Unknown or empty values default to white (0).
+func sheepColorID(color string) int {
+	switch color {
+	case "orange":
+		return 1
+	case "magenta":
+		return 2
+	case "light_blue":
+		return 3
+	case "yellow":
+		return 4
+	case "lime":
+		return 5
+	case "pink":
+		return 6
+	case "gray":
+		return 7
+	case "light_gray":
+		return 8
+	case "cyan":
+		return 9
+	case "purple":
+		return 10
+	case "blue":
+		return 11
+	case "brown":
+		return 12
+	case "green":
+		return 13
+	case "red":
+		return 14
+	case "black":
+		return 15
+	default:
+		return 0 // white
+	}
 }
 
 func isJavaTamableAnimal(t corentity.EntityType) bool {

@@ -151,10 +151,10 @@ var goatHornSounds = [8]string{
 	"minecraft:item.goat_horn.sound.7", // dream
 }
 
-// goatHornSound returns the sound event for the held goat horn. The instrument
+// GoatHornSound returns the sound event for a goat horn stack. The instrument
 // index is read from the minecraft:instrument component; unknown values fall
 // back to index 0 (ponder).
-func goatHornSound(stack player.ItemStack) string {
+func GoatHornSound(stack player.ItemStack) string {
 	var instrument struct {
 		Type string `json:"type"`
 	}
@@ -265,7 +265,7 @@ func handleUseItem(pkt *protocol.Packet, p *player.Player, conn *network.ClientC
 			return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 		}
 		p.LastGoatHornUse = time.Now()
-		sound := goatHornSound(p.Inventory[heldSlot])
+		sound := GoatHornSound(p.Inventory[heldSlot])
 		broadcastSoundAt(mgr, sound, soundCategoryNeutral,
 			p.Position.X, p.Position.Y+1.62, p.Position.Z, 64, 1)
 		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
