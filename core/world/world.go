@@ -80,6 +80,7 @@ type World struct {
 	worldTime     atomic.Int64
 	physicsTime   atomic.Int64
 	lavaTickDelay atomic.Int64
+	ultrawarm     atomic.Bool
 
 	// requestTimeSkip is set by the bed-sleep handler and drained by the
 	// server tick goroutine which then advances worldAge to the next morning.
@@ -1172,6 +1173,9 @@ func (w *World) SetBlock(x, y, z int, block Block) {
 	if block.ResourceLocation() == "minecraft:sponge" && oldBlock.ResourceLocation() != "minecraft:sponge" {
 		w.absorbWaterAround(x, y, z)
 	}
+	if block.ResourceLocation() == "minecraft:wet_sponge" && w.ultrawarm.Load() {
+		w.SetBlock(x, y, z, Block{Namespace: "minecraft", Name: "sponge"})
+	}
 }
 
 func (w *World) triggerObservers(x, y, z int) {
@@ -1448,6 +1452,12 @@ func (w *World) SetLavaTickDelay(delay int64) {
 	if delay > 0 {
 		w.lavaTickDelay.Store(delay)
 	}
+}
+
+// SetUltrawarm marks this dimension as ultrawarm (Nether), causing wet sponges
+// placed here to dry instantly.
+func (w *World) SetUltrawarm(ultrawarm bool) {
+	w.ultrawarm.Store(ultrawarm)
 }
 
 func (w *World) fluidTickDelay(name string) int64 {

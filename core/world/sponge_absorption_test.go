@@ -45,6 +45,16 @@ func TestDrySpongeStaysDryWithoutWater(t *testing.T) {
 	}
 }
 
+func TestWetSpongeDriesInUltrawarm(t *testing.T) {
+	w := New(&FlatGenerator{}, nil, false)
+	defer w.Close()
+	w.SetUltrawarm(true)
+	w.SetBlock(0, 64, 0, Block{Namespace: "minecraft", Name: "wet_sponge"})
+	if got := w.GetBlock(0, 64, 0).ResourceLocation(); got != "minecraft:sponge" {
+		t.Fatalf("wet_sponge in Nether = %s, want minecraft:sponge (instant dry)", got)
+	}
+}
+
 func TestSpongeAbsorptionRespectsTaxicabDistance(t *testing.T) {
 	w := New(&FlatGenerator{}, nil, false)
 	defer w.Close()

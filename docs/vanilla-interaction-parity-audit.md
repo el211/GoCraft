@@ -77,6 +77,7 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Bedrock sheep wool color and sheared metadata.** `bedrockEntityMetadata` now encodes `EntityDataKeyColorIndex` from `WoolColor` and sets `EntityDataFlagSheared` from `Sheared`. Change detection added to the entity-view diff.
 - **Bedrock collar color for wolf/cat.** `EntityDataKeyColorIndex` is set from `CollarColor` when the entity is tamed and the color is non-empty. Change detection added.
 - **Dragon egg teleport.** Right-clicking or beginning to punch the dragon egg in non-creative mode now teleports it to a random replaceable position (±7 x/z, ±1 y, up to 1 000 attempts). Creative players can break it normally. Both Java and Bedrock.
+- **Sponge nether instant drying.** Wet sponge placed in the Nether (ultrawarm world) instantly converts to a dry sponge. `World.SetUltrawarm(true)` enables the flag; the nether world sets it on startup.
 
 ## Still left to do (as of batch 6)
 
@@ -263,7 +264,7 @@ operations before adding Java calls — was followed for all nine.
 | Campfire | Partial | Placement, lighting/extinguishing, four stored cooking slots, cooking completion, and damage are present. Item rendering, per-slot progress persistence, smoke height, hay signal, bee pacification, projectile lighting, soul variants, and complete drop/waterlogging rules remain. |
 | Candles / candle cakes / cake | Partial | Core stacking, eating, lighting, and extinguishing exist, but Java candle-cake creation, projectile lighting, cake collision details, particles, sounds, and complete waterlogging/support behaviour remain. |
 | Cauldrons | Partial | Full bucket transfers work. Bottles, incremental water/powder levels, dyed leather washing/dyeing, banner cleaning, shulker dyeing, precipitation, dripstone filling, entity extinguishing, and comparator details are absent. |
-| Sponge | Implemented (new) | Dry-sponge breadth-first water absorption (taxicab distance 6, up to 64 blocks), waterlogged draining, and wet-sponge conversion now run on placement through any adapter. Nether instant-drying and absorption particles remain. |
+| Sponge | Implemented (new) | Dry-sponge breadth-first water absorption (taxicab distance 6, up to 64 blocks), waterlogged draining, and wet-sponge conversion now run on placement through any adapter. Wet sponge placed in the Nether (ultrawarm) now instantly dries to a dry sponge. Absorption particles remain. |
 | Coral and coral blocks | Implemented (new) | Live coral now schedules a death check 60 ticks after losing water contact and converts to its dead variant; waterlogged or water-adjacent coral survives. Bone-meal coral-block spreading remains. |
 | Cactus | Implemented (new) | Random growth to a three-block height with the age counter, refusing to grow beside a solid block. Contact damage and support removal were already present. Item destruction and entity collision detail remain. |
 | Sugar cane | Implemented (new) | Random growth to a three-block height through the age counter. Placement/support removal was already present. Water-adjacency survival is still enforced only by block physics. |
