@@ -311,6 +311,44 @@ func (s *Supervisor) Dispatch(ctx context.Context, pluginID string, event *abi.E
 	return ipc.DecodeVerdict(verdict)
 }
 
+// Warm asks the runtime to run one event's dispatch path without its handlers.
+//
+// The host sends these between Load and Ready, where it is already waiting
+// without a budget, so the first real event of a type does not pay for a cold
+// runtime out of the §06 budget it shares with every other subscriber.
+//
+// Down the real socket, and deliberately: a runtime that warmed itself would be
+// warming a copy of the dispatch path, and every piece the copy forgot — the
+// writer thread, the framing, the host's own first marshal of an Event — would
+// still be cold when the tick was waiting on it. This is the path, so there is
+// nothing to forget.
+//
+// The event carries no payload. The runtime has to know the layout to decode a
+// real one, so it supplies its own blank rather than being sent a shape it
+// already has.
+//
+// A failure is returned and not fatal to the caller: a runtime that cannot warm
+// itself is slow on its first event, which is what it was before this existed.
+func (s *Supervisor) Warm(ctx context.Context, pluginID, event string) error {
+	conn, err := s.conn()
+	if err != nil {
+		return err
+	}
+	reply, err := conn.Request(ctx, &wire.Envelope{Body: &wire.Envelope_Dispatch{Dispatch: &wire.Dispatch{
+		PluginId: pluginID,
+		Event:    &wire.Event{Type: event},
+		Warm:     true,
+	}}})
+	if err != nil {
+		return fmt.Errorf("ipc: %s: warm %s for %s: %w", s.config.Runtime, event, pluginID, err)
+	}
+	if reply.GetVerdict() == nil {
+		return fmt.Errorf("ipc: %s: %w: answered a warm DISPATCH with %T",
+			s.config.Runtime, ErrProtocol, reply.GetBody())
+	}
+	return nil
+}
+
 // Invoke runs one command executor in the runtime that loaded it.
 //
 // Unlike Dispatch this is not on the tick's critical path — it answers someone
