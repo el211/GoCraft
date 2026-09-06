@@ -1799,7 +1799,9 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 		}
 		drops := blockloot.Drops(lootContext)
 		containerItems := []coreworld.ContainerItem(nil)
-		if bedrockSpillingContainer(block.ResourceLocation()) {
+		if bedrockSpillingContainer(block.ResourceLocation()) ||
+			block.ResourceLocation() == "minecraft:jukebox" ||
+			block.ResourceLocation() == "minecraft:lectern" {
 			containerItems = actionWorld.ContainerItems(x, y, z)
 		}
 		partnerY, partnerHalf, hasPartner := coreworld.DoublePlantPartnerY(block, y)
@@ -1849,7 +1851,9 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 				s.damageBedrockHeldItem(p, wear)
 			}
 		}
-		if bedrockSpillingContainer(block.ResourceLocation()) {
+		if bedrockSpillingContainer(block.ResourceLocation()) ||
+			block.ResourceLocation() == "minecraft:jukebox" ||
+			block.ResourceLocation() == "minecraft:lectern" {
 			actionWorld.SetContainerItems(x, y, z, block.ResourceLocation(), nil)
 		}
 

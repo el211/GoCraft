@@ -212,7 +212,7 @@ func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *co
 						drops[i2] = coreworld.ShulkerBoxDropItem(drop.ItemID, containerItems)
 					}
 				}
-			} else if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) {
+			} else if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:jukebox" || broken.ResourceLocation() == "minecraft:lectern" {
 				for _, item := range containerItems {
 					if item.ItemID != "" && item.Count > 0 {
 						spawnBlockDrop(w, nextEntityID, dropPosition, item.Stack(), ordinal, mgr, p.Dimension)
@@ -236,7 +236,7 @@ func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *co
 			}
 		}
 		// Clear orphaned container data regardless of game mode.
-		if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) {
+		if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:jukebox" || broken.ResourceLocation() == "minecraft:lectern" {
 			w.SetContainerItems(int(bx), int(by), int(bz), broken.ResourceLocation(), nil)
 		}
 		// Sync inventory once if the held tool was damaged.
@@ -897,6 +897,50 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 				}
 				broadcastSoundAt(mgr, coreworld.MusicDiscSound(held.ItemID), soundCategoryRecords,
 					float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 4, 1)
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		}
+	}
+
+	// Lectern: place a book or eject the current one.
+	if hand == 0 && p.GameMode != player.GameModeSpectator &&
+		targetBlock.ResourceLocation() == "minecraft:lectern" {
+		be := w.GetBlockEntity(int(bx), int(by), int(bz))
+		stored := coreworld.LecternBook(be)
+		if stored != "" && !coreworld.IsLecternBook(held.ItemID) {
+			// Eject book (not holding a book).
+			if _, cleared, ok := coreworld.EjectLecternBook(targetBlock, stored); ok {
+				applyBlockChange(int(bx), int(by), int(bz), cleared, w, mgr)
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:lectern", nil)
+				drop := player.ItemStack{ItemID: stored, Count: 1}
+				if !p.GiveItem(drop) {
+					spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
+				}
+				if conn != nil {
+					_ = SyncPlayerInventory(conn, p)
+				} else {
+					p.ContainerStateID++
+				}
+				sendAcknowledgeBlockChange(mgr, p, seq)
+				return nil
+			}
+		} else if stored == "" && coreworld.IsLecternBook(held.ItemID) {
+			// Place book.
+			if updated, ok := coreworld.InsertLecternBook(targetBlock, held.ItemID); ok {
+				applyBlockChange(int(bx), int(by), int(bz), updated, w, mgr)
+				items := []coreworld.ContainerItem{{Slot: 0, ItemID: held.ItemID, Count: 1}}
+				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:lectern", items)
+				if p.GameMode != player.GameModeCreative {
+					slot := player.HotbarStart + p.HeldSlot
+					p.Inventory[slot].Count--
+					normalizeStack(&p.Inventory[slot])
+					if conn != nil {
+						_ = SyncPlayerInventory(conn, p)
+					} else {
+						p.ContainerStateID++
+					}
+				}
 				sendAcknowledgeBlockChange(mgr, p, seq)
 				return nil
 			}
