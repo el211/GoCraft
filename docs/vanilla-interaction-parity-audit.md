@@ -86,7 +86,14 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Grindstone enchantment removal and XP refund.** Non-curse enchantments are stripped from all grindstone output items. Curse enchantments (binding, vanishing) are preserved. XP is awarded to the Java player when they take the output (≈ 8 XP per enchantment level). Bedrock inventory action path also strips enchantments via shared `grindstoneOperation`.
 - **Jukebox comparator signal.** `analogOutputAt` now returns the disc-specific signal strength (1–15) from `JukeboxComparatorSignal` when a disc is playing; 0 when empty.
 
-## Still left to do (as of batch 7)
+## Completed in batch 8 (2026-09-06)
+
+- **Cocoa jungle-log attachment survival.** `BreakUnsupportedCocoaAdjacentTo` now runs after every block change on both Java and Bedrock. A cocoa pod whose supporting jungle log is removed breaks immediately. Both editions tested.
+- **Chiseled bookshelf comparator signal.** Every book insert or eject records the 1-based slot index in `BlockEntity.LastBookshelfSlot`. `analogOutputAt` returns this value (1–6) directly; 0 when no interaction has occurred. Both Java and Bedrock handlers call `SetBookshelfLastSlot` after each operation.
+- **Bone meal on grass block.** `ApplyBoneMeal` now handles `minecraft:grass_block`: 128 scatter attempts over a ±4 x/z area place random single-block vegetation (short_grass, fern, dandelion, poppy, azure_bluet, blue_orchid, oxeye_daisy, cornflower, lily_of_the_valley) on top of any grass block with air above it. The old Bedrock-only `short_grass` hardcode is replaced by this shared path. Always returns `used=true` on a grass block.
+- **Respawn anchor Nether spawn assignment.** Right-clicking a charged respawn anchor while in the Nether dimension sets the player's personal spawn to that position (`SpawnIsAnchor=true`). On death, `ResolveAnchorRespawn` validates the anchor still has charges, finds a safe adjacent position, decrements the charge, and respawns the player in the Nether. A depleted or missing anchor clears the spawn point and falls back to world spawn. `SpawnIsAnchor` persists through save/load. Both Java and Bedrock handle anchor right-click.
+
+## Still left to do (as of batch 8)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -98,9 +105,7 @@ implementation order; the largest remaining structural gaps first.
 2. **Remaining stateful block entities.** Banner patterns, item/glow item frames.
 3. **Entity interactions.** Leads & leash knots, horse/llama equipment UI, chest
    boats & storage minecarts, armour stands.
-4. **Remaining random-tick / neighbour behaviour.** Cocoa jungle-log survival,
-   full fluid flow vectors / finite levels, fire flammability nuances. Bone meal
-   on grass area features (flowers, moss, mangrove, fungi/nylium).
+4. **Remaining random-tick / neighbour behaviour.** Full fluid flow vectors / finite levels, fire flammability nuances. Bone meal on moss, mangrove, fungi/nylium.
 5. **Workstation operations.** Beacon effects, enchanting offers,
    smithing trims, loom patterns, cartography scaling — screens open but the defining
    operation is absent. (Grindstone disenchant and XP refund now done — batch 7.)
@@ -220,7 +225,7 @@ inventory move, save, cross-edition sync, or restart.
 | Shovels | Partial | Partial | Dirt paths and campfire extinguishing work. Full flattenable set, sound parity, and durability/enchantment rules need verification. |
 | Flint and steel / fire charge | Partial | Partial | Both adapters create fire, light candles/campfires, and ignite portals. Bedrock directly primes TNT; Java has no TNT target branch. Projectile/dispenser and feedback rules remain incomplete. |
 | Honeycomb | Implemented (new) | Implemented (new) | Copper waxing now runs through a shared canonical operation on both editions. |
-| Bone meal | Partial | Partial | Supported crops and saplings work. Grass-area features, flowers, moss, azalea, mangrove, underwater plants/coral, fungi/nylium, sea pickles, and particles are incomplete. |
+| Bone meal | Partial | Partial | Supported crops, saplings, bamboo/kelp/vine tips, sea pickles (batch 7), and grass-area scatter (batch 8) work. Moss, azalea, mangrove, underwater plants/coral, fungi/nylium, and particles are still incomplete. |
 | Ender eye | Implemented | Implemented | Stronghold launch and portal-frame insertion are present. Structure search and feedback still deserve runtime tests. |
 
 ## Block interaction audit
@@ -252,7 +257,7 @@ operations before adding Java calls — was followed for all nine.
 | --- | --- | --- |
 | Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on both Java and Bedrock. All 19 vanilla disc sound events mapped. Comparator now outputs the disc-specific signal strength (1–15) via `JukeboxComparatorSignal`. |
 | Lectern | Implemented (new) | Book insert/remove, `has_book` block state, slot 0 persistence, and book drop on break all work on both Java and Bedrock (batch 5). Pages, current page, UI, page-turn events, comparator output, and redstone pulse remain absent. |
-| Chiseled bookshelf | Implemented (new) | Six-slot book storage with cursor-targeted slot selection (3×2 grid), insert/eject, `slot_X_occupied` block state, and book drop on break all work on both Java and Bedrock (batch 5). Comparator signal and vibration remain absent. |
+| Chiseled bookshelf | Implemented (new) | Six-slot book storage with cursor-targeted slot selection (3×2 grid), insert/eject, `slot_X_occupied` block state, and book drop on break all work on both Java and Bedrock (batch 5). Comparator now outputs the last-interacted slot (1–6) via `LastBookshelfSlot` in block entity; vibration remains absent. |
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
 | Dragon egg | Implemented (new) | Right-click or dig-start teleports egg to random replaceable position (±7 x/z, ±1 y). Creative exception applied. Both Java and Bedrock. |
 | Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument is derived from the block-below on every tune/placement and stored in block state. A canonical note sound (`block.note_block.{instrument}`) is broadcast on every redstone rising edge via `playNoteBlock`. Particles remain absent. |
@@ -267,7 +272,7 @@ operations before adding Java calls — was followed for all nine.
 | Loom | Partial | It consumes a banner and dye but returns an unchanged banner because pattern data has no canonical representation. Selection, six-layer limit, and full pattern rules are absent. |
 | Stonecutter | Partial | Recipe selection/output exists. Adapter selection parity and complete feedback/validation require tests. |
 | Cartography table | Partial | It returns a generic filled map for paper, map, or glass pane. Scale, clone count, lock state, map identity, and data preservation are absent. |
-| Respawn anchor | Partial | Charging now works on both editions through a shared canonical operation (Java added). Nether spawn assignment, charge use on respawn, comparator output, and explosion outside the Nether are still absent. |
+| Respawn anchor | Partial | Charging works on both editions. Right-clicking a charged anchor in the Nether now sets the player's personal spawn (batch 8); charges decrement on respawn use. Comparator output was already wired (charges × 4 − 1). Explosion outside the Nether is still absent. |
 | Bee nest / beehive | Partial | Bedrock can harvest honey. Bees, occupants, entry/exit, honey production, anger, smoke pacification, Silk Touch data, dripping, and Java harvest are absent. |
 | Campfire | Partial | Placement, lighting/extinguishing, four stored cooking slots, cooking completion, and damage are present. Item rendering, per-slot progress persistence, smoke height, hay signal, bee pacification, projectile lighting, soul variants, and complete drop/waterlogging rules remain. |
 | Candles / candle cakes / cake | Partial | Core stacking, eating, lighting, and extinguishing exist, but Java candle-cake creation, projectile lighting, cake collision details, particles, sounds, and complete waterlogging/support behaviour remain. |
@@ -279,7 +284,7 @@ operations before adding Java calls — was followed for all nine.
 | Bamboo / bamboo sapling | Implemented (new) | Sapling conversion (~1-in-3 ticks), random upward growth, position-seeded height cap (12–16 blocks), and correct small/large/none leaf transitions are implemented. Bone meal now converts sapling to segment and advances the tip by one block. Break-from-below rules remain. |
 | Kelp | Implemented (new) | Random column growth through water: the age-0..25 tip advances into source water above, leaving kelp_plant bodies behind. Bone meal now advances the tip one block (no random gate). Break-from-below rules remain. |
 | Vines / cave vines / twisting and weeping vines | Partial | Twisting/weeping vines grow via the age-0..25 tip mechanic. Cave vines grow downward and grow berries; harvest wired. Ordinary vine now spreads downward and horizontally via random tick (batch 4). Bone meal now advances twisting/weeping/cave vine tips one block (batch 7). Climbing state and shears rules are still absent. |
-| Cocoa | Partial | A bounded legacy growth tick exists. Correct jungle-log attachment/facing survival, placement interaction, and bone meal are absent. |
+| Cocoa | Partial | A bounded legacy growth tick exists. Jungle-log attachment survival now works: removing the supporting log breaks the pod on both editions (batch 8). Placement interaction (need a jungle log face) and bone meal remain absent. |
 | Fire | Partial | Placement, scheduled spread/burnout, and contact damage exist. Fire immunity/effects, rain extinguishing, portal interaction details, gamerules, block-specific flammability, and complete soul-fire rules remain. |
 | Fluids and waterlogging | Partial | Source placement, simple spread, collision checks, and lava/water hardening exist. Flow vectors, finite levels/source formation, waterlogged fluid ticking, ultrawarm evaporation, entity pushing, dripstone, and many replaceability rules are incomplete. |
 | Boats and minecarts | Partial | Placement, mounting, basic movement, rails, powered/detector/activator effects, and TNT minecart fuse exist. Placement is too permissive, and collision, fluid physics, fall damage, passenger rules, chest/hopper/furnace inventories, furnace fuel, and complete cross-edition control are missing. |
