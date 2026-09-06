@@ -1024,24 +1024,35 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 		}
 	}
 
-	// Lectern: place a book or eject the current one.
+	// Lectern: place a book, open reading UI, or eject (sneak).
 	if hand == 0 && p.GameMode != player.GameModeSpectator &&
 		targetBlock.ResourceLocation() == "minecraft:lectern" {
 		be := w.GetBlockEntity(int(bx), int(by), int(bz))
 		stored := coreworld.LecternBook(be)
 		if stored != "" && !coreworld.IsLecternBook(held.ItemID) {
-			// Eject book (not holding a book).
-			if _, cleared, ok := coreworld.EjectLecternBook(targetBlock, stored); ok {
-				applyBlockChange(int(bx), int(by), int(bz), cleared, w, mgr)
-				w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:lectern", nil)
-				drop := player.ItemStack{ItemID: stored, Count: 1}
-				if !p.GiveItem(drop) {
-					spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
+			if p.Sneaking {
+				// Sneak + right-click: eject book.
+				if _, cleared, ok := coreworld.EjectLecternBook(targetBlock, stored); ok {
+					applyBlockChange(int(bx), int(by), int(bz), cleared, w, mgr)
+					w.SetContainerItems(int(bx), int(by), int(bz), "minecraft:lectern", nil)
+					drop := player.ItemStack{ItemID: stored, Count: 1}
+					if !p.GiveItem(drop) {
+						spawnBlockDrop(w, nextEntityID, p.Position, drop, 0, mgr, p.Dimension)
+					}
+					if conn != nil {
+						_ = SyncPlayerInventory(conn, p)
+					} else {
+						p.ContainerStateID++
+					}
+					sendAcknowledgeBlockChange(mgr, p, seq)
+					return nil
 				}
+			} else {
+				// Right-click without sneaking: open the book reading UI.
+				// The client already has the book data from the block entity; we
+				// just need to open the lectern screen (menu type 17).
 				if conn != nil {
-					_ = SyncPlayerInventory(conn, p)
-				} else {
-					p.ContainerStateID++
+					_ = sendOpenScreen(conn, chestContainerID, 17, "Lectern")
 				}
 				sendAcknowledgeBlockChange(mgr, p, seq)
 				return nil
