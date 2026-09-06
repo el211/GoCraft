@@ -105,11 +105,17 @@ func takeWorkstationOutputToCursor(p *player.Player) {
 			p.CarriedItem.Count+preview.Count > player.MaxStackSize(preview.ItemID))) {
 		return
 	}
+	levelCost := AnvilLevelCost(p.OpenContainerKind, p.ContainerSlots)
 	result, xp, ok := TakeWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
 	if !ok {
 		return
 	}
 	p.PendingWorkstationXP += xp
+	if levelCost > 0 {
+		// Encode anvil level cost as a negative XP signal so that the
+		// crafting handler can deduct levels on the next container-click flush.
+		p.PendingWorkstationXP -= levelCost
+	}
 	if p.CarriedItem.IsEmpty() {
 		p.CarriedItem = result
 	} else {
@@ -363,6 +369,7 @@ func handleAnvilRename(pkt *protocol.Packet, p *player.Player, conn *network.Cli
 	UpdateWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
 	p.ContainerStateID++
 	if conn != nil {
+		_ = sendAnvilCost(conn, AnvilLevelCost(p.OpenContainerKind, p.ContainerSlots))
 		return sendChestContainerContent(conn, p)
 	}
 	return nil
@@ -452,9 +459,10 @@ func SyncBrewingContainer(conn *network.ClientConn, p *player.Player, brewTime, 
 }
 
 type workstationOperation struct {
-	result  player.ItemStack
-	consume []int
-	xp      int32 // XP to award the player on output take (grindstone disenchant)
+	result     player.ItemStack
+	consume    []int
+	xp         int32 // XP to award the player on output take (grindstone disenchant)
+	levelCost  int32 // levels to deduct from the player on output take (anvil)
 }
 
 // UpdateWorkstationResult recomputes the server-authoritative preview. Client
@@ -465,6 +473,30 @@ func UpdateWorkstationResult(kind string, slots []player.ItemStack, selection in
 		return
 	}
 	slots[output] = workstationOperationFor(kind, slots, selection).result
+}
+
+// AnvilLevelCost returns the level cost shown by the anvil for the current
+// inputs, without consuming anything. Returns 0 for non-anvil kinds or when
+// there is no valid output.
+func AnvilLevelCost(kind string, slots []player.ItemStack) int32 {
+	switch kind {
+	case "minecraft:anvil", "minecraft:chipped_anvil", "minecraft:damaged_anvil":
+	default:
+		return 0
+	}
+	if len(slots) < WorkstationSlotCount(kind) {
+		return 0
+	}
+	return anvilOperation(slots).levelCost
+}
+
+// sendAnvilCost writes a SetContainerData packet with the current anvil level cost.
+func sendAnvilCost(conn *network.ClientConn, levelCost int32) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.WritePacket(protocol.NewBuilder(packetIDSetContainerData).
+		VarInt(workstationContainerID).Short(0).Short(int16(levelCost)).Build())
 }
 
 // TakeWorkstationResult consumes the exact inputs for the current preview and
@@ -522,7 +554,7 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 		}
 		result := left
 		result.Count = 1
-		return workstationOperation{result: result, consume: []int{1, 0}}
+		return workstationOperation{result: result, consume: []int{1, 0}, levelCost: 1}
 	}
 	name := left.DisplayName()
 
@@ -533,8 +565,14 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 		if name != "" {
 			_ = result.SetComponent("minecraft:custom_name", name)
 		}
+		before := result.EnchantmentLevels()
 		if mergeEnchantments(&result, right) {
-			return workstationOperation{result: result, consume: []int{1, 1}}
+			after := result.EnchantmentLevels()
+			added := int32(len(after) - len(before))
+			if added < 0 {
+				added = 0
+			}
+			return workstationOperation{result: result, consume: []int{1, 1}, levelCost: 1 + added}
 		}
 		return workstationOperation{}
 	}
@@ -547,11 +585,17 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 		// Carry left's enchantments and name into the repaired result, then merge right's.
 		result.Enchantments = left.Enchantments
 		result.Components = left.Components
+		before := result.EnchantmentLevels()
 		mergeEnchantments(&result, right)
+		after := result.EnchantmentLevels()
+		merged := int32(len(after) - len(before))
+		if merged < 0 {
+			merged = 0
+		}
 		if name != "" {
 			_ = result.SetComponent("minecraft:custom_name", name)
 		}
-		return workstationOperation{result: result, consume: []int{1, 1}}
+		return workstationOperation{result: result, consume: []int{1, 1}, levelCost: 1 + merged}
 	}
 	if !itemregistry.RepairsWith(left.ItemID, right.ItemID) {
 		return workstationOperation{}
@@ -565,7 +609,7 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 	if name != "" {
 		_ = result.SetComponent("minecraft:custom_name", name)
 	}
-	return workstationOperation{result: result, consume: []int{1, 1}}
+	return workstationOperation{result: result, consume: []int{1, 1}, levelCost: 1}
 }
 
 // mergeEnchantments applies compatible enchantments from src to dst. It uses

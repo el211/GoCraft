@@ -152,3 +152,45 @@ func TestAnvilMergesSameLevelEnchantmentsToNextLevel(t *testing.T) {
 			got.EnchantmentLevel("minecraft:sharpness"), got)
 	}
 }
+
+func TestAnvilLevelCostDeductedOnOutputTake(t *testing.T) {
+	p := player.New([16]byte{82}, "smith2", player.ClientEditionJava)
+	if err := openWorkstation(p, nil, nil, spatial.BlockPos{X: 0, Y: 64, Z: 0}, "minecraft:anvil"); err != nil {
+		t.Fatal(err)
+	}
+	// Give the player 10 levels of experience.
+	p.SetTotalExperience(player.ExperienceForLevel(10))
+	level0, _, _ := p.ExperienceSnapshot()
+	if level0 != 10 {
+		t.Fatalf("starting level = %d, want 10", level0)
+	}
+
+	// Rename-only anvil operation: costs 1 level.
+	p.ContainerSlots[0] = player.ItemStack{ItemID: "minecraft:diamond_sword", Count: 1}
+	_ = p.ContainerSlots[0].SetComponent("minecraft:custom_name", "Excalibur")
+	UpdateWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
+
+	cost := AnvilLevelCost(p.OpenContainerKind, p.ContainerSlots)
+	if cost != 1 {
+		t.Fatalf("rename-only cost = %d, want 1", cost)
+	}
+
+	handleWorkstationClick(p, 2, 0, 0) // click output slot
+	// PendingWorkstationXP should encode the cost as a negative value.
+	if p.PendingWorkstationXP >= 0 {
+		t.Fatalf("PendingWorkstationXP = %d; want negative (level cost)", p.PendingWorkstationXP)
+	}
+	// Simulate the crafting handler applying the cost.
+	if xp := p.PendingWorkstationXP; xp < 0 {
+		p.PendingWorkstationXP = 0
+		lvl, _, _ := p.ExperienceSnapshot()
+		deduct := int32(-xp)
+		if lvl >= deduct {
+			p.SetTotalExperience(player.ExperienceForLevel(lvl - deduct))
+		}
+	}
+	levelAfter, _, _ := p.ExperienceSnapshot()
+	if levelAfter != level0-1 {
+		t.Fatalf("level after rename = %d, want %d", levelAfter, level0-1)
+	}
+}

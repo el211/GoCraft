@@ -288,11 +288,22 @@ func handleContainerClick(pkt *protocol.Packet, p *player.Player, conn *network.
 	}
 	if windowID == workstationContainerID && p.OpenContainerID == windowID && IsWorkstation(p.OpenContainerKind) {
 		handleWorkstationClick(p, int(slot), button, mode)
-		if xp := p.PendingWorkstationXP; xp > 0 {
+		if xp := p.PendingWorkstationXP; xp != 0 {
 			p.PendingWorkstationXP = 0
-			p.AddExperience(xp)
+			if xp > 0 {
+				// Grindstone disenchant: award XP points.
+				p.AddExperience(xp)
+			} else {
+				// Anvil: deduct levels. xp is encoded as -(levelCost).
+				cost := int32(-xp)
+				level, _, _ := p.ExperienceSnapshot()
+				if level >= cost {
+					p.SetTotalExperience(player.ExperienceForLevel(level - cost))
+				}
+			}
 			_ = sendExperience(conn, p)
 		}
+		_ = sendAnvilCost(conn, AnvilLevelCost(p.OpenContainerKind, p.ContainerSlots))
 		return sendChestContainerContent(conn, p)
 	}
 	if windowID != craftingTableContainerID || p.OpenContainerID != windowID || p.OpenContainerKind != "minecraft:crafting_table" {
