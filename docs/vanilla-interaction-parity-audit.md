@@ -76,6 +76,7 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Snow golem pumpkin removal.** Right-clicking a snow golem with shears when `HasPumpkin=true` removes the pumpkin face, drops a carved_pumpkin, damages shears, and broadcasts metadata (Java index 17 flags bit 0x10; Bedrock `EntityDataFlagSheared`). Snow golems now initialise with `HasPumpkin=true`.
 - **Bedrock sheep wool color and sheared metadata.** `bedrockEntityMetadata` now encodes `EntityDataKeyColorIndex` from `WoolColor` and sets `EntityDataFlagSheared` from `Sheared`. Change detection added to the entity-view diff.
 - **Bedrock collar color for wolf/cat.** `EntityDataKeyColorIndex` is set from `CollarColor` when the entity is tamed and the color is non-empty. Change detection added.
+- **Dragon egg teleport.** Right-clicking or beginning to punch the dragon egg in non-creative mode now teleports it to a random replaceable position (±7 x/z, ±1 y, up to 1 000 attempts). Creative players can break it normally. Both Java and Bedrock.
 
 ## Still left to do (as of batch 6)
 
@@ -244,7 +245,7 @@ operations before adding Java calls — was followed for all nine.
 | Lectern | Missing | Book insert/remove, pages, current page, UI, page-turn events, comparator output, redstone pulse, and persistence. It currently exists only as a generated village workstation/redstone name. |
 | Chiseled bookshelf | Missing | Six-slot inventory, targeted slot selection, book insertion/removal, block state, comparator signal, vibration, and persistence. |
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
-| Dragon egg | Partial | Gravity is registered, but activate/punch teleport, particles, and creative exception are absent. |
+| Dragon egg | Implemented (new) | Right-click or dig-start teleports egg to random replaceable position (±7 x/z, ±1 y). Creative exception applied. Both Java and Bedrock. |
 | Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument-from-block-below and canonical note sound/particle on rising edge still need coverage. |
 | Signs and hanging signs | Partial | Partial | Placement, text editing, dye colour, and glow ink sac / ink sac now work on both editions (batch 6). SignState (lines + glowing + color) preserved across edits. Wax, click events, and Bedrock text editing remain. |
 | Banners | Partial | Placement works. Pattern layers, loom output, shields carrying patterns, map markers, block-entity persistence, and wash-off in cauldrons are absent. |

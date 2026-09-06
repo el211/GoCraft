@@ -1776,6 +1776,10 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 		if block.IsAir() || block.ResourceLocation() == "minecraft:bedrock" {
 			return
 		}
+		if block.ResourceLocation() == "minecraft:dragon_egg" && p.GameMode != player.GameModeCreative {
+			s.bedrockDragonEggTeleport(actionWorld, x, y, z)
+			return
+		}
 		held := p.HeldItem()
 		if s.plugins != nil && !s.plugins.EmitBlockBreak(p, i.Position, block, held.ItemID) {
 			if s.bedrockListener != nil {
@@ -1876,6 +1880,10 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 			return
 		}
 		bypassActivation := p.Sneaking && !held.IsEmpty()
+		if !bypassActivation && clicked.ResourceLocation() == "minecraft:dragon_egg" && p.GameMode != player.GameModeCreative {
+			s.bedrockDragonEggTeleport(actionWorld, x, y, z)
+			return
+		}
 		if !bypassActivation && clicked.ResourceLocation() == "minecraft:bell" {
 			if direction, valid := coreworld.BellRingDirection(clicked, i.Face, i.ClickY); valid {
 				s.ringBell(actionWorld, p.Dimension, i.Position, direction)

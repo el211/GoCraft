@@ -152,6 +152,13 @@ func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *co
 	}
 
 	broken := w.GetBlock(int(bx), int(by), int(bz))
+	// Dragon egg teleports on any hit in non-creative.
+	if broken.ResourceLocation() == "minecraft:dragon_egg" && p.GameMode != player.GameModeCreative &&
+		status == actionStatusStartDigging {
+		dragonEggTeleport(int(bx), int(by), int(bz), w, mgr)
+		sendAcknowledgeBlockChange(mgr, p, seq)
+		return nil
+	}
 	if !broken.IsAir() && digBreaksBlock(status, p.GameMode, broken.ResourceLocation()) {
 		heldSlot := player.HotbarStart + p.HeldSlot
 		held := p.Inventory[heldSlot]
@@ -1154,6 +1161,15 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 		}
 	}
 
+	// Dragon egg right-click: teleport to random position (like PumpkinMC dragon_egg.rs).
+	if !bypassActivation && targetBlock.ResourceLocation() == "minecraft:dragon_egg" && p.GameMode != player.GameModeCreative {
+		if dragonEggTeleport(int(bx), int(by), int(bz), w, mgr) {
+			sendAcknowledgeBlockChange(mgr, p, seq)
+			return nil
+		}
+		return nil
+	}
+
 	// Cake right-click: consume a slice (based on PumpkinMC cake.rs).
 	if !bypassActivation && targetBlock.ResourceLocation() == "minecraft:cake" {
 		if p.GameMode != player.GameModeSpectator {
@@ -1574,6 +1590,10 @@ func shulkerBoxFacing(face int32) string {
 		return "up"
 	}
 }
+
+// PlacementReplaceable reports whether the named block can be overwritten by a
+// placed block (air, flowers, grass, etc.).
+func PlacementReplaceable(blockName string) bool { return placementReplaceable(blockName) }
 
 func placementReplaceable(blockName string) bool {
 	switch blockName {
@@ -3094,6 +3114,30 @@ func redstoneWireConnections(x, y, z int, w *coreworld.World) map[string]string 
 		}
 	}
 	return props
+}
+
+// dragonEggTeleport moves the dragon egg to a random replaceable position
+// within 15 blocks (x,z ±7, y ±1), removes it from (x,y,z), and places it at
+// the new location. Returns true when a valid destination was found.
+func dragonEggTeleport(x, y, z int, w *coreworld.World, mgr *session.Manager) bool {
+	const tries = 1000
+	for range tries {
+		nx := x + (rand.Intn(15) - 7) //nolint:gosec
+		ny := y + (rand.Intn(3) - 1)  //nolint:gosec
+		nz := z + (rand.Intn(15) - 7) //nolint:gosec
+		if ny < coreworld.WorldMinY || ny > coreworld.WorldMaxY {
+			continue
+		}
+		if !placementReplaceable(w.GetBlock(nx, ny, nz).ResourceLocation()) {
+			continue
+		}
+		if !w.GetBlock(nx, ny-1, nz).IsAir() { // needs solid or replaceable base
+			applyBlockChange(x, y, z, coreworld.Air, w, mgr)
+			applyBlockChange(nx, ny, nz, coreworld.Block{Namespace: "minecraft", Name: "dragon_egg"}, w, mgr)
+			return true
+		}
+	}
+	return false
 }
 
 func javaRedstoneConnectsFrom(direction string, block coreworld.Block) bool {

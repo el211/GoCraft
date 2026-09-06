@@ -1,6 +1,7 @@
 package server
 
 import (
+	"math/rand"
 	"strconv"
 	"strings"
 
@@ -1564,5 +1565,25 @@ func bedrockFishBucketEntity(itemID string) corentity.EntityType {
 		return corentity.TypeTadpole
 	default:
 		return ""
+	}
+}
+
+func (s *Server) bedrockDragonEggTeleport(w *coreworld.World, x, y, z int) {
+	const tries = 1000
+	for range tries {
+		nx := x + (rand.Intn(15) - 7) //nolint:gosec
+		ny := y + (rand.Intn(3) - 1)
+		nz := z + (rand.Intn(15) - 7)
+		if nx == x && ny == y && nz == z {
+			continue
+		}
+		if !handler.PlacementReplaceable(w.GetBlock(nx, ny, nz).ResourceLocation()) {
+			continue
+		}
+		if !w.GetBlock(nx, ny-1, nz).IsAir() {
+			s.setBedrockActionBlock(x, y, z, coreworld.Air)
+			s.setBedrockActionBlock(nx, ny, nz, coreworld.Block{Namespace: "minecraft", Name: "dragon_egg"})
+			return
+		}
 	}
 }
