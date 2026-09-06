@@ -2137,6 +2137,11 @@ func (s *Server) applyEntityInteract(i intent.EntityInteractIntent) {
 			}
 			attacker.LastAttack = time.Now()
 			s.damageBedrockHeldItem(attacker, 1)
+			if player.IsSword(heldID) && attacker.OnGround && attacker.AttackCooldown && !isCrit {
+				if attackerWorld := s.worldForPlayer(attacker); attackerWorld != nil {
+					s.applySweepAttack(attacker, targetPlayer.EntityID, targetPlayer.Position.X, targetPlayer.Position.Z, attackerWorld)
+				}
+			}
 		}
 		return
 	}
@@ -2147,8 +2152,47 @@ func (s *Server) applyEntityInteract(i intent.EntityInteractIntent) {
 			attacker.LastAttack = time.Now()
 			attacker.LastAttackedEntityID = entity.EntityID
 			s.damageBedrockHeldItem(attacker, 1)
+			// Sweep attack: sword + on ground + full cooldown + not crit.
+			if player.IsSword(heldID) && attacker.OnGround && attacker.AttackCooldown && !isCrit {
+				s.applySweepAttack(attacker, entity.EntityID, entity.Position.X, entity.Position.Z, attackerWorld)
+			}
 		}
 	}
+}
+
+// applySweepAttack deals 1 sweep damage to all entities within 3.3 blocks of
+// the primary target, excluding the primary target itself and the attacker.
+func (s *Server) applySweepAttack(attacker *player.Player, primaryID int32, primaryX, primaryZ float64, w *coreworld.World) {
+	const sweepRadius = 3.3
+	const sweepDamage = float32(1)
+	entities := w.Entities.Snapshot()
+	for _, e := range entities {
+		if e == nil || e.Dead || e.EntityID == primaryID {
+			continue
+		}
+		dx := e.Position.X - attacker.Position.X
+		dy := e.Position.Y - attacker.Position.Y
+		dz := e.Position.Z - attacker.Position.Z
+		dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+		if dist <= sweepRadius {
+			w.QueueEntityDamageFromPlayer(e.EntityID, sweepDamage, primaryX, primaryZ, attacker.UUID)
+		}
+	}
+	// Also sweep nearby players.
+	s.game.OnlinePlayers(func(p2 *player.Player) {
+		if p2.UUID == attacker.UUID || p2.EntityID == primaryID || p2.Dimension != attacker.Dimension {
+			return
+		}
+		dx := p2.Position.X - attacker.Position.X
+		dy := p2.Position.Y - attacker.Position.Y
+		dz := p2.Position.Z - attacker.Position.Z
+		dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
+		if dist <= sweepRadius {
+			if sess, ok := s.sessions.Get(p2.UUID); ok {
+				handler.DamagePlayerFromSource(sess, sweepDamage, "was swept by "+attacker.Username, s.sessions, primaryX, primaryZ)
+			}
+		}
+	})
 }
 
 // Kept for existing tests and callers while all editions now share the same

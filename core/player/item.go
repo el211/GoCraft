@@ -275,6 +275,17 @@ func LegacyAttackDamage(itemID string) float32 {
 	}
 }
 
+// IsSword reports whether the item is a sword (eligible for sweep attack).
+func IsSword(itemID string) bool {
+	switch itemID {
+	case "minecraft:wooden_sword", "minecraft:golden_sword",
+		"minecraft:stone_sword", "minecraft:iron_sword",
+		"minecraft:diamond_sword", "minecraft:netherite_sword":
+		return true
+	}
+	return false
+}
+
 // AttackAttributes returns the 1.21.4 attack damage and speed shown by vanilla
 // for a tool or weapon. The bool is false for items without attack modifiers.
 func AttackAttributes(itemID string) (damage, speed float32, ok bool) {
