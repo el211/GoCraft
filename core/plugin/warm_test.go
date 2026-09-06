@@ -3,6 +3,7 @@ package plugin
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,6 +15,7 @@ import (
 type warmingInstance struct {
 	manifest gcpkg.Manifest
 	order    *[]string
+	seen     *map[string][]abi.Value
 	err      error
 }
 
@@ -22,19 +24,24 @@ func (i *warmingInstance) Dispatch(context.Context, *abi.Event) (abi.Verdict, er
 	return abi.Verdict{}, nil
 }
 func (i *warmingInstance) Unload(context.Context) error { return nil }
-func (i *warmingInstance) Warm(_ context.Context, event string) error {
-	*i.order = append(*i.order, "warm:"+i.manifest.ID+":"+event)
+func (i *warmingInstance) Warm(_ context.Context, event *abi.Event) error {
+	*i.order = append(*i.order, "warm:"+i.manifest.ID+":"+event.Type)
+	if i.seen != nil {
+		(*i.seen)[event.Type] = event.Fields
+	}
 	return i.err
 }
 
 type warmingRuntime struct {
 	readyRuntime
 	warmErr error
+	seen    *map[string][]abi.Value
 }
 
 func (r *warmingRuntime) Load(_ context.Context, bundle Bundle) (Instance, error) {
 	*r.order = append(*r.order, "load:"+bundle.Manifest.ID)
-	return &warmingInstance{manifest: bundle.Manifest, order: r.order, err: r.warmErr}, nil
+	return &warmingInstance{manifest: bundle.Manifest, order: r.order,
+		seen: r.seen, err: r.warmErr}, nil
 }
 
 func subscribingBundle(id string, events ...string) Bundle {
@@ -46,13 +53,44 @@ func subscribingBundle(id string, events ...string) Bundle {
 	return bundle
 }
 
-func warmingRegistry(order *[]string, warmErr error) *Registry {
+func warmingRegistry(t *testing.T, order *[]string, seen *map[string][]abi.Value,
+	warmErr error, bundles []Bundle) *Registry {
+	t.Helper()
 	registry := NewRegistry(context.Background(), 0, nil, nil)
-	registry.RegisterRuntime(&warmingRuntime{
+	if err := registry.RegisterRuntime(&warmingRuntime{
 		readyRuntime: readyRuntime{recordingRuntime: recordingRuntime{order: order}},
 		warmErr:      warmErr,
-	})
+		seen:         seen,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Preflight is what assigns the event ids and collects every provider's
+	// layout, and the warm-up reads that table for the shape it sends.
+	if err := registry.Preflight(context.Background(), bundles); err != nil {
+		t.Fatal(err)
+	}
 	return registry
+}
+
+// provides declares the §10 purchase event on a bundle, with the record it
+// carries, so the host has a layout to build a blank payload from.
+func provides(bundle Bundle) Bundle {
+	bundle.Manifest.Records = []gcpkg.EventRecord{{
+		Name: "fr.oreo.Tier",
+		Fields: []gcpkg.EventField{
+			{Name: "label", Type: "string"},
+			{Name: "price", Type: "double", Mutable: true},
+		},
+	}}
+	bundle.Manifest.Provides = []gcpkg.EventDefinition{{
+		Type: "fr.oreo.shop/purchase", Cancellable: true,
+		Fields: []gcpkg.EventField{
+			{Name: "buyer", Type: "PlayerRef"},
+			{Name: "tiers", Type: "[]fr.oreo.Tier"},
+			{Name: "price", Type: "double", Mutable: true},
+		},
+	}}
+	return bundle
 }
 
 // Every subscription is warmed after the last plugin is loaded and before any
@@ -64,11 +102,12 @@ func warmingRegistry(order *[]string, warmErr error) *Registry {
 // would be racing the first player through the door.
 func TestLoadAllWarmsEverySubscriptionBeforeReady(t *testing.T) {
 	var order []string
-	registry := warmingRegistry(&order, nil)
+	seen := map[string][]abi.Value{}
 	bundles := []Bundle{
 		subscribingBundle("shop", "block.break"),
-		subscribingBundle("bank", "player.join", "fr.oreo.shop/purchase"),
+		provides(subscribingBundle("bank", "player.join", "fr.oreo.shop/purchase")),
 	}
+	registry := warmingRegistry(t, &order, &seen, nil, bundles)
 
 	if err := registry.LoadAll(context.Background(), bundles); err != nil {
 		t.Fatalf("LoadAll() = %v", err)
@@ -83,6 +122,16 @@ func TestLoadAllWarmsEverySubscriptionBeforeReady(t *testing.T) {
 	if strings.Join(order, ",") != strings.Join(want, ",") {
 		t.Fatalf("order = %v, want %v", order, want)
 	}
+
+	// The shape is the point, not the visit: a payload the far side refuses
+	// warms its refusal and leaves the branch a real event takes cold.
+	if got := seen["block.break"]; !reflect.DeepEqual(got, BlankEvent("block.break")) {
+		t.Fatalf("block.break was warmed with %#v", got)
+	}
+	purchase := seen["fr.oreo.shop/purchase"]
+	if len(purchase) != 3 || purchase[2].Kind != abi.ValueDouble {
+		t.Fatalf("the purchase layout was not carried: %#v", purchase)
+	}
 }
 
 // A runtime that will not warm is a runtime whose first event is slow, which is
@@ -90,11 +139,10 @@ func TestLoadAllWarmsEverySubscriptionBeforeReady(t *testing.T) {
 // it would trade a warning for an outage.
 func TestAWarmUpThatFailsDoesNotFailTheBoot(t *testing.T) {
 	var order []string
-	registry := warmingRegistry(&order, errors.New("runtime said no"))
+	bundles := []Bundle{subscribingBundle("shop", "block.break")}
+	registry := warmingRegistry(t, &order, nil, errors.New("runtime said no"), bundles)
 
-	if err := registry.LoadAll(context.Background(), []Bundle{
-		subscribingBundle("shop", "block.break"),
-	}); err != nil {
+	if err := registry.LoadAll(context.Background(), bundles); err != nil {
 		t.Fatalf("LoadAll() = %v, want a boot that carried on", err)
 	}
 	if got := strings.Join(order, ","); !strings.HasSuffix(got, "ready") {
