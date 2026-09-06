@@ -983,6 +983,12 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 			}
 		}
 
+		if pkt.ID == packetIDRenameItem {
+			if err := handleAnvilRename(pkt, p, conn); err != nil {
+				slog.Warn("rename item error", "player", p.Username, "err", err)
+			}
+		}
+
 		// ── Chunk streaming on boundary crossing ─────────────────────────────
 		newChunkX := posToChunk(p.Position.X)
 		newChunkZ := posToChunk(p.Position.Z)

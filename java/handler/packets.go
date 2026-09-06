@@ -141,6 +141,7 @@ var (
 	packetIDInteract                     = protocoldata.MustSB("play", "minecraft:interact")
 	packetIDSignUpdate                   = protocoldata.MustSB("play", "minecraft:sign_update")
 	packetIDOpenSignEditor               = protocoldata.MustCB("play", "minecraft:open_sign_editor")
+	packetIDRenameItem                   = protocoldata.MustSB("play", "minecraft:rename_item")
 	packetIDContainerButtonClick         = protocoldata.MustSB("play", "minecraft:container_button_click")
 	packetIDContainerClick               = protocoldata.MustSB("play", "minecraft:container_click")
 	packetIDContainerClose               = protocoldata.MustSB("play", "minecraft:container_close")

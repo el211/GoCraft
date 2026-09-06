@@ -329,6 +329,42 @@ func closeWorkstation(p *player.Player, w *coreworld.World) {
 	p.ContainerStateID++
 }
 
+// handleAnvilRename processes the rename_item (C→S) packet sent by the client
+// while typing a name in the anvil UI. It sets or clears the minecraft:custom_name
+// component on slot 0, recomputes the output slot, and syncs the container.
+func handleAnvilRename(pkt *protocol.Packet, p *player.Player, conn *network.ClientConn) error {
+	if p == nil {
+		return nil
+	}
+	if p.OpenContainerKind != "minecraft:anvil" &&
+		p.OpenContainerKind != "minecraft:chipped_anvil" &&
+		p.OpenContainerKind != "minecraft:damaged_anvil" {
+		return nil
+	}
+	r := pkt.Reader()
+	name, err := protocol.ReadString(r)
+	if err != nil {
+		return err
+	}
+	if len(p.ContainerSlots) == 0 || p.ContainerSlots[0].IsEmpty() {
+		return nil
+	}
+	slot0 := p.ContainerSlots[0]
+	if name == "" {
+		// Clear custom name.
+		_ = slot0.SetComponent("minecraft:custom_name", nil)
+	} else {
+		_ = slot0.SetComponent("minecraft:custom_name", name)
+	}
+	p.ContainerSlots[0] = slot0
+	UpdateWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
+	p.ContainerStateID++
+	if conn != nil {
+		return sendChestContainerContent(conn, p)
+	}
+	return nil
+}
+
 // IsWorkstation reports whether kind uses GoCraft's transient workstation
 // inventory. These inventories are owned by the player while the screen is
 // open; unlike storage containers they are never written to a block entity.
@@ -443,14 +479,29 @@ func workstationOperationFor(kind string, slots []player.ItemStack, selection in
 
 func anvilOperation(slots []player.ItemStack) workstationOperation {
 	left, right := slots[0], slots[1]
-	if left.IsEmpty() || right.IsEmpty() || player.MaxDurability(left.ItemID) == 0 {
+	if left.IsEmpty() {
 		return workstationOperation{}
 	}
-	if left.ItemID == right.ItemID {
-		return workstationOperation{
-			result:  repairedStack(left, right, 12),
-			consume: []int{1, 1},
+	// Rename-only: right slot empty, item has a custom name pending.
+	if right.IsEmpty() {
+		name := left.DisplayName()
+		if name == "" {
+			return workstationOperation{}
 		}
+		result := left
+		result.Count = 1
+		return workstationOperation{result: result, consume: []int{1, 0}}
+	}
+	if player.MaxDurability(left.ItemID) == 0 {
+		return workstationOperation{}
+	}
+	name := left.DisplayName()
+	if left.ItemID == right.ItemID {
+		result := repairedStack(left, right, 12)
+		if name != "" {
+			_ = result.SetComponent("minecraft:custom_name", name)
+		}
+		return workstationOperation{result: result, consume: []int{1, 1}}
 	}
 	if !itemregistry.RepairsWith(left.ItemID, right.ItemID) {
 		return workstationOperation{}
@@ -460,6 +511,9 @@ func anvilOperation(slots []player.ItemStack) workstationOperation {
 	result.Damage -= max(1, player.MaxDurability(left.ItemID)/4)
 	if result.Damage < 0 {
 		result.Damage = 0
+	}
+	if name != "" {
+		_ = result.SetComponent("minecraft:custom_name", name)
 	}
 	return workstationOperation{result: result, consume: []int{1, 1}}
 }
