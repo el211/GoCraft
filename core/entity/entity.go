@@ -250,6 +250,10 @@ type Entity struct {
 	WoolColor      string
 	WoolRegrowTicks int32
 
+	// CollarColor is the dye colour of a wolf or cat collar. "" defaults to
+	// "red" (vanilla default). Only meaningful when Tamed == true.
+	CollarColor string
+
 	// Enderman fields - only used when type == TypeEnderman
 	// EndermanCarriedBlock is the canonical resource location of the block
 	// an enderman is holding, or "" when empty. Adapters resolve their own IDs.

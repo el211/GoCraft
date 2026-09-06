@@ -168,6 +168,15 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 		if e.HasTameOwner {
 			b = b.UUID(protocol.UUID(e.TameOwnerUUID))
 		}
+		// Collar color: send when explicitly set (non-empty).
+		// DyeColor index: Wolf=19, Cat=21.
+		if e.Tamed && e.CollarColor != "" && (e.Type == corentity.TypeWolf || e.Type == corentity.TypeCat) {
+			collarIndex := byte(19)
+			if e.Type == corentity.TypeCat {
+				collarIndex = 21
+			}
+			b = b.Byte(collarIndex).VarInt(1).VarInt(int32(dyeColorID(e.CollarColor)))
+		}
 	}
 	if isJavaAbstractHorse(e.Type) {
 		hasMetadata = true
@@ -249,6 +258,16 @@ func buildMobEquipment(e *corentity.Entity) *protocol.Packet {
 		Byte(0) // Main hand, final equipment entry.
 	encodeSlot(b, player.ItemStack{ItemID: e.MainHandItemID, Count: 1})
 	return b.Build()
+}
+
+// dyeColorID maps a dye colour name to the Java DyeColor ordinal (0-15).
+// Unknown or empty values default to red (14), the vanilla collar default.
+func dyeColorID(color string) int {
+	id := sheepColorID(color)
+	if color == "" {
+		return 14 // red
+	}
+	return id
 }
 
 // sheepColorID maps a canonical dye color name to the Java DyeColor ordinal

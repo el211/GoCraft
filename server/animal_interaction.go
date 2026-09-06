@@ -186,6 +186,18 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 		return true
 	}
 
+	// Dye a tamed wolf or cat collar.
+	if (e.Type == corentity.TypeWolf || e.Type == corentity.TypeCat) && e.Tamed && animalOwnedBy(e, p) {
+		if color := sheepDyeColor(item); color != "" {
+			if !s.consumeAnimalItem(p, "") {
+				return false
+			}
+			e.CollarColor = color
+			s.broadcastAnimalState(e)
+			return true
+		}
+	}
+
 	// Dye a sheep: applies the dye colour and consumes one dye.
 	if e.Type == corentity.TypeSheep {
 		if color := sheepDyeColor(item); color != "" {
