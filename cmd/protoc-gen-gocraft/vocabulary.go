@@ -32,6 +32,20 @@ type binding struct {
 	// JavaDecode reads it out of the positional payload. %d is the index.
 	JavaDecode string
 
+	// JavaBlank is one value of this shape carrying nothing, as a Java
+	// expression. It is what the generated warm() walks at load, so the first
+	// real event of a type does not decode it cold while the tick waits.
+	//
+	// Shape and never content. It has to match what JavaDecode expects — a
+	// PlayerRef is sixteen bytes and two strings — because a decoder handed the
+	// wrong kind takes its fallback branch and leaves the real one interpreted,
+	// which warms nothing.
+	//
+	// Fully qualified: the generated class imports only the vocabulary types its
+	// accessors return, and adding Value to that list for the warm-up alone
+	// would put an import in every event whether it needs one or not.
+	JavaBlank string
+
 	// SDKType is what the plugin-side Go struct holds, e.g. BlockPos.
 	SDKType string
 
@@ -53,6 +67,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "playerReference(%s)",
 		JavaType:   "PlayerRef",
 		JavaDecode: "PlayerRef.of(field(%d), sink())",
+		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Bytes(new byte[16]), new fr.gocraft.api.Value.Text(\"\"), new fr.gocraft.api.Value.Text(\"\")))",
 	},
 	"BlockPos": {
 		SDKType:    "BlockPos",
@@ -62,6 +77,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "positionValue(%s)",
 		JavaType:   "BlockPos",
 		JavaDecode: "BlockPos.of(field(%d))",
+		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Int(0), new fr.gocraft.api.Value.Int(0), new fr.gocraft.api.Value.Int(0)))",
 	},
 	"Block": {
 		SDKType:    "Block",
@@ -71,6 +87,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "blockValue(%s)",
 		JavaType:   "Block",
 		JavaDecode: "Block.of(field(%d))",
+		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Text(\"\"), new fr.gocraft.api.Value.List(java.util.List.of())))",
 	},
 	"string": {
 		SDKType:    "string",
@@ -79,30 +96,35 @@ var vocabulary = map[string]binding{
 		GoEncode:   "abi.String(%s)",
 		JavaType:   "String",
 		JavaDecode: "text(%d)",
+		JavaBlank:  "new fr.gocraft.api.Value.Text(\"\")",
 	},
 	"bool": {
 		GoType:     "bool",
 		GoEncode:   "abi.Bool(%s)",
 		JavaType:   "boolean",
 		JavaDecode: "flag(%d)",
+		JavaBlank:  "new fr.gocraft.api.Value.Bool(false)",
 	},
 	"int64": {
 		GoType:     "int64",
 		GoEncode:   "abi.Int64(%s)",
 		JavaType:   "long",
 		JavaDecode: "number(%d)",
+		JavaBlank:  "new fr.gocraft.api.Value.Int(0)",
 	},
 	"double": {
 		GoType:     "float64",
 		GoEncode:   "abi.Double(%s)",
 		JavaType:   "double",
 		JavaDecode: "decimal(%d)",
+		JavaBlank:  "new fr.gocraft.api.Value.Decimal(0)",
 	},
 	"bytes": {
 		GoType:     "[]byte",
 		GoEncode:   "abi.Bytes(%s)",
 		JavaType:   "byte[]",
 		JavaDecode: "bytes(%d)",
+		JavaBlank:  "new fr.gocraft.api.Value.Bytes(new byte[0])",
 	},
 }
 
@@ -111,6 +133,16 @@ var vocabulary = map[string]binding{
 // through can(), which is a map lookup rather than the round trip it would be
 // if the answer had to be fetched while the tick waits.
 const permissionKind = "map<string,bool>"
+
+// permissionsBlank is that map's placeholder for the generated warm-up. One
+// pair rather than none, so the loop that reads them runs a round instead of
+// being skipped.
+//
+// It has no vocabulary row because the map has no row: it is never a parameter
+// and never an accessor, so there is nothing else about it for a row to say.
+const permissionsBlank = `new fr.gocraft.api.Value.List(java.util.List.of(` +
+	`new fr.gocraft.api.Value.List(java.util.List.of(` +
+	`new fr.gocraft.api.Value.Text(""), new fr.gocraft.api.Value.Bool(false)))))`
 
 func bindingFor(kind string) (binding, error) {
 	if kind == permissionKind {
