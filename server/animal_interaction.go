@@ -3,6 +3,7 @@ package server
 import (
 	"math"
 	"math/rand"
+	"strings"
 
 	corentity "GoCraft/core/entity"
 	"GoCraft/core/intent"
@@ -124,6 +125,26 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 	}
 	held := p.HeldItem()
 	item := held.ItemID
+
+	// Spawn egg on matching adult mob → spawn baby.
+	if strings.HasSuffix(item, "_spawn_egg") && s.game != nil {
+		eggType := corentity.EntityType("minecraft:" + strings.TrimSuffix(strings.TrimPrefix(item, "minecraft:"), "_spawn_egg"))
+		if eggType == e.Type && !e.IsBaby {
+			if !s.consumeAnimalItem(p, "") {
+				return false
+			}
+			world := s.worldForPlayer(p)
+			baby := corentity.New(s.game.NextEntityID(), newRandomUUID(), eggType,
+				e.Position.X, e.Position.Y, e.Position.Z)
+			baby.IsBaby = true
+			baby.MaxHealth = e.MaxHealth
+			baby.Health = baby.MaxHealth
+			baby.OnGround = e.OnGround
+			world.Entities.Add(baby)
+			handler.BroadcastSpawnMob(baby, s.sessions)
+			return true
+		}
+	}
 
 	// Apply a name tag: sets the entity's custom name and consumes the tag.
 	if item == "minecraft:name_tag" {
