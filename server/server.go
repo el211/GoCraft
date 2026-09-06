@@ -2083,6 +2083,14 @@ func (s *Server) applyEntityInteract(i intent.EntityInteractIntent) {
 			return
 		}
 	}
+	// Sharpness adds 0.5 + 0.5*level bonus damage (vanilla 1.9+ formula).
+	held := attacker.HeldItem()
+	if lvl := held.EnchantmentLevel("minecraft:sharpness"); lvl > 0 {
+		damage += 0.5 + float32(lvl)*0.5
+	}
+	// Knockback enchantment increases horizontal knockback (stored for later use).
+	attacker.KnockbackHorizontal = 0.4 + float64(held.EnchantmentLevel("minecraft:knockback"))*0.5
+
 	// Mace smash attack: while falling, each block of fall distance adds bonus damage.
 	// Vanilla formula: bonus = 3 * floor(fallDistance) when fallDistance ≥ 1.5.
 	// Source: vanilla Mace item and PumpkinMC mace item logic.
