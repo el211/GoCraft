@@ -550,12 +550,58 @@ func (w *World) TickCrops(tick int64, maxChanges int) []BlockChange {
 	return changes
 }
 
+// grassBoneMealVegetation is the pool of single-block plants placed by bone
+// meal on a grass block (tall_grass/fern excluded — they require 2 air blocks).
+var grassBoneMealVegetation = []string{
+	"minecraft:short_grass", "minecraft:short_grass", "minecraft:short_grass",
+	"minecraft:fern",
+	"minecraft:dandelion", "minecraft:poppy", "minecraft:azure_bluet",
+	"minecraft:blue_orchid", "minecraft:oxeye_daisy", "minecraft:cornflower",
+	"minecraft:lily_of_the_valley",
+}
+
+// grassBoneMeal performs the 128-attempt scatter of vegetation when bone meal
+// is applied to a grass block. Each attempt picks a random offset (±4 x/z)
+// and places a plant above the grass if that column has a grass block below
+// and air above.
+func (w *World) grassBoneMeal(x, y, z int, seed uint64) []BlockChange {
+	changes := make([]BlockChange, 0, 8)
+	rng := seed ^ uint64(x)*cropGateSalt ^ uint64(y)*cropGrowthSalt ^ uint64(z)*cropDirectionSalt
+	for range 128 {
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dx := int(rng>>1%9) - 4
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dz := int(rng>>1%9) - 4
+		tx, tz := x+dx, z+dz
+		below := w.GetBlock(tx, y, tz)
+		if below.ResourceLocation() != "minecraft:grass_block" {
+			continue
+		}
+		above, loaded := w.blockIfLoaded(tx, y+1, tz)
+		if !loaded || !above.IsAir() {
+			continue
+		}
+		rng = rng*6364136223846793005 + 1442695040888963407
+		plant := grassBoneMealVegetation[int(rng>>1%uint64(len(grassBoneMealVegetation)))]
+		block := Block{Namespace: "minecraft", Name: plant[len("minecraft:"):]}
+		w.SetBlock(tx, y+1, tz, block)
+		changes = append(changes, BlockChange{X: tx, Y: y + 1, Z: tz, Block: block})
+	}
+	return changes
+}
+
 // ApplyBoneMeal applies one crop bonemeal interaction. used reports whether
 // the target accepted bonemeal, even when beetroot's integer-divided roll adds
 // zero stages. Nether wart deliberately never accepts bonemeal.
 func (w *World) ApplyBoneMeal(x, y, z int, seed uint64) (changes []BlockChange, used bool) {
 	crop := w.GetBlock(x, y, z)
 	name := crop.ResourceLocation()
+
+	// Grass block: scatter vegetation over a 9×9 area above.
+	if name == "minecraft:grass_block" {
+		changes = w.grassBoneMeal(x, y, z, seed)
+		return changes, true
+	}
 
 	// Bamboo sapling: convert to first bamboo segment unconditionally.
 	if name == "minecraft:bamboo_sapling" {

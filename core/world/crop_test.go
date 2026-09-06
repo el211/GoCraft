@@ -368,6 +368,30 @@ func TestCocoaBreaksWhenJungleLogRemoved(t *testing.T) {
 	}
 }
 
+func TestGrassBoneMealScattersVegetation(t *testing.T) {
+	w := New(&FlatGenerator{}, nil, false)
+	defer w.Close()
+	// Place a large grass platform so 128 scatter attempts have many valid spots.
+	for dx := -4; dx <= 4; dx++ {
+		for dz := -4; dz <= 4; dz++ {
+			w.SetBlock(dx, 64, dz, Block{Namespace: "minecraft", Name: "grass_block"})
+		}
+	}
+	changes, used := w.ApplyBoneMeal(0, 64, 0, 12345)
+	if !used {
+		t.Fatal("ApplyBoneMeal on grass_block returned used=false")
+	}
+	if len(changes) == 0 {
+		t.Fatal("ApplyBoneMeal on grass_block produced no plant changes")
+	}
+	for _, c := range changes {
+		b := w.GetBlock(c.X, c.Y, c.Z)
+		if b.IsAir() {
+			t.Fatalf("plant block at (%d,%d,%d) is air after bone meal scatter", c.X, c.Y, c.Z)
+		}
+	}
+}
+
 func TestCoveredCropUsesCurrentPumpkinLightTODOBehaviour(t *testing.T) {
 	world := New(&FlatGenerator{}, nil, false)
 	defer world.Close()
