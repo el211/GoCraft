@@ -86,7 +86,8 @@ func isCanonicalCrop(name string) bool {
 func isTickableGrowth(name string) bool {
 	return isCanonicalCrop(name) || isTallPlantGrowth(name) ||
 		name == "minecraft:kelp" || isNetherVineHead(name) ||
-		isBambooGrowthBlock(name) || isCaveVineTip(name)
+		isBambooGrowthBlock(name) || isCaveVineTip(name) ||
+		IsVine(name)
 }
 
 func standardMoistureCrop(name string) bool {
@@ -356,6 +357,9 @@ func (w *World) tickCropAt(x, y, z int, crop Block, tick int64, changeBudget int
 	}
 	if isCaveVineTip(name) {
 		return w.TickCaveVineAt(x, y, z, crop, tick)
+	}
+	if IsVine(name) {
+		return w.tickVineAt(x, y, z, crop, tick)
 	}
 	if !w.cropCanSurviveAt(x, y, z, crop) {
 		w.SetBlock(x, y, z, Air)
