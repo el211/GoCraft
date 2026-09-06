@@ -102,6 +102,42 @@ func TestEventDeadlineStopsRemainingSubscribers(t *testing.T) {
 	}
 }
 
+// A verdict that arrives as the deadline fires is still a verdict.
+//
+// §06 charges "only a subscriber during whose own call the deadline fires", and
+// this one answered: the race between its reply landing and the timer running
+// is not something it did. Deciding the event on the context instead would drop
+// a cancellation that was made, which on the first dispatch into a cold runtime
+// is every restart.
+func TestAVerdictThatLandsOnTheDeadlineIsHonoured(t *testing.T) {
+	queue := NewMutationQueue()
+	bus := newBus(context.Background(), 5*time.Millisecond, queue)
+	instance := &fakeInstance{
+		manifest: gcpkg.Manifest{ID: "protect", Subscriptions: []gcpkg.Subscription{{Event: "block.break"}}},
+		dispatch: func(ctx context.Context, _ *abi.Event) (abi.Verdict, error) {
+			// The answer was already on its way when the budget ran out.
+			<-ctx.Done()
+			return abi.Verdict{Cancelled: true, Effects: []abi.HostCall{
+				{Type: "message", Fields: []abi.Value{abi.String("Protected area.")}},
+			}}, nil
+		},
+	}
+	if err := bus.Attach(instance); err != nil {
+		t.Fatal(err)
+	}
+	if bus.EmitCancellable(&abi.Event{Type: "block.break", OnFailure: abi.FailureAllow}) {
+		t.Fatal("EmitCancellable() allowed an event its subscriber cancelled")
+	}
+	health, _ := bus.Health("protect")
+	if health.Failures != 0 || health.Starved["block.break"] != 0 {
+		t.Fatalf("EmitCancellable() charged a subscriber that answered: %+v", health)
+	}
+	count, err := queue.Drain(func(abi.HostCall) error { return nil })
+	if err != nil || count != 1 {
+		t.Fatalf("Drain() = %d, %v, want the one effect of a verdict that arrived", count, err)
+	}
+}
+
 func TestEventVerdictQueuesBatchedEffects(t *testing.T) {
 	queue := NewMutationQueue()
 	bus := newBus(context.Background(), time.Second, queue)

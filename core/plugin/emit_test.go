@@ -65,6 +65,40 @@ func allow(*abi.Event) (abi.Verdict, error) { return abi.Verdict{}, nil }
 // starvation path has its own tests that ask for a short budget on purpose.
 func emitBus() *Bus { return NewBus(context.Background(), time.Second) }
 
+// The same race as dispatch_test.go's, on the path where losing it costs most.
+//
+// A fail_closed event is cancelled when its budget runs out, so a verdict
+// discarded for arriving on the deadline refuses a purchase nobody refused —
+// once per restart, and invisibly, because the log would call it starvation.
+func TestALateVerdictStillDecidesAFailClosedEvent(t *testing.T) {
+	definition := shopPurchase
+	definition.FailClosed = true
+	bus := NewBus(context.Background(), 5*time.Millisecond)
+	instance := &fakeInstance{
+		manifest: gcpkg.Manifest{ID: "fr.oreo.discount", Subscriptions: []gcpkg.Subscription{
+			{Event: definition.Type},
+		}},
+		dispatch: func(ctx context.Context, _ *abi.Event) (abi.Verdict, error) {
+			<-ctx.Done()
+			return abi.Verdict{Mutations: []abi.Mutation{
+				{Path: []uint32{2}, Value: abi.Double(1200)},
+			}}, nil
+		},
+	}
+	if err := bus.Attach(instance); err != nil {
+		t.Fatal(err)
+	}
+
+	result := bus.EmitCustom(definition, purchaseEmission())
+
+	if result.Cancelled {
+		t.Fatal("EmitCustom() cancelled a fail_closed event whose subscriber answered")
+	}
+	if len(result.Mutations) != 1 || result.Mutations[0].Value.Double != 1200 {
+		t.Fatalf("EmitCustom() = %+v, want the discount the subscriber applied", result)
+	}
+}
+
 func TestEmitCustomWithNoSubscribersChangesNothing(t *testing.T) {
 	bus := emitBus()
 	result := bus.EmitCustom(shopPurchase, purchaseEmission())
