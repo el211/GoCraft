@@ -353,6 +353,21 @@ func TestEveryCropSupportRule(t *testing.T) {
 	}
 }
 
+func TestCocoaBreaksWhenJungleLogRemoved(t *testing.T) {
+	w := New(&FlatGenerator{}, nil, false)
+	defer w.Close()
+	// Place a jungle log and a cocoa pod facing the log (east, so log is at x+1).
+	w.SetBlock(1, 64, 0, Block{Namespace: "minecraft", Name: "jungle_log"})
+	w.SetBlock(0, 64, 0, Block{Namespace: "minecraft", Name: "cocoa",
+		Properties: map[string]string{"facing": "east", "age": "0"}})
+	// Remove the log; cocoa at (0,64,0) should break.
+	w.SetBlock(1, 64, 0, Air)
+	changes := w.BreakUnsupportedCocoaAdjacentTo(1, 64, 0)
+	if len(changes) != 1 || !w.GetBlock(0, 64, 0).IsAir() {
+		t.Fatalf("cocoa did not break: changes=%v block=%s", changes, w.GetBlock(0, 64, 0).Key())
+	}
+}
+
 func TestCoveredCropUsesCurrentPumpkinLightTODOBehaviour(t *testing.T) {
 	world := New(&FlatGenerator{}, nil, false)
 	defer world.Close()

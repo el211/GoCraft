@@ -1150,6 +1150,7 @@ func (s *Server) breakBedrockUnsupportedAbove(p *player.Player, x, y, z int) {
 		}
 	}
 	s.broadcastCanonicalCropChanges(world.BreakUnsupportedCropsAbove(x, y, z))
+	s.broadcastCanonicalCropChanges(world.BreakUnsupportedCocoaAdjacentTo(x, y, z))
 	for plantY := y + 1; plantY <= coreworld.WorldMaxY; plantY++ {
 		plant := world.GetBlock(x, plantY, z)
 		if !coreworld.RequiresGroundSupport(plant) || !world.GetBlock(x, plantY-1, z).IsAir() {

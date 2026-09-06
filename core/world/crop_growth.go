@@ -217,8 +217,8 @@ func CanCropSurvive(block, support Block) bool {
 	case "minecraft:sweet_berry_bush", "minecraft:torchflower":
 		return validSweetBerrySupport(support.ResourceLocation())
 	case "minecraft:cocoa":
-		// Cocoa attaches horizontally. GoCraft does not yet retain the attachment
-		// support position here, so leave its legacy survival behaviour unchanged.
+		// Cocoa survival is checked horizontally by cocoaCanSurvive; this
+		// vertical-support path is not used for cocoa.
 		return true
 	default:
 		return true
@@ -241,6 +241,54 @@ func (w *World) BreakUnsupportedCropsAbove(x, y, z int) []BlockChange {
 		}
 		w.SetBlock(x, plantY, z, Air)
 		changes = append(changes, BlockChange{X: x, Y: plantY, Z: z, Block: Air})
+	}
+	return changes
+}
+
+// cocoaSupportOffset returns the (dx, dz) offset from a cocoa block to the
+// jungle log it must be attached to, based on the cocoa's facing property.
+func cocoaSupportOffset(facing string) (int, int) {
+	switch facing {
+	case "north":
+		return 0, -1
+	case "south":
+		return 0, 1
+	case "east":
+		return 1, 0
+	default: // west
+		return -1, 0
+	}
+}
+
+// isJungleLog reports whether name is any jungle-log or jungle-wood variant.
+func isJungleLog(name string) bool {
+	return name == "minecraft:jungle_log" || name == "minecraft:jungle_wood" ||
+		name == "minecraft:stripped_jungle_log" || name == "minecraft:stripped_jungle_wood"
+}
+
+func (w *World) cocoaCanSurvive(x, y, z int, block Block) bool {
+	dx, dz := cocoaSupportOffset(block.Properties["facing"])
+	support, loaded := w.blockIfLoaded(x+dx, y, z+dz)
+	return loaded && isJungleLog(support.ResourceLocation())
+}
+
+// BreakUnsupportedCocoaAdjacentTo checks the four horizontal neighbours of
+// (x,y,z) for cocoa pods whose jungle-log support block was just removed.
+// It breaks any unsupported pod and returns the resulting block changes.
+func (w *World) BreakUnsupportedCocoaAdjacentTo(x, y, z int) []BlockChange {
+	offsets := [4][2]int{{0, -1}, {0, 1}, {1, 0}, {-1, 0}}
+	changes := make([]BlockChange, 0, 4)
+	for _, off := range offsets {
+		cx, cz := x+off[0], z+off[1]
+		cocoa, loaded := w.blockIfLoaded(cx, y, cz)
+		if !loaded || cocoa.ResourceLocation() != "minecraft:cocoa" {
+			continue
+		}
+		if w.cocoaCanSurvive(cx, y, cz, cocoa) {
+			continue
+		}
+		w.SetBlock(cx, y, cz, Air)
+		changes = append(changes, BlockChange{X: cx, Y: y, Z: cz, Block: Air})
 	}
 	return changes
 }

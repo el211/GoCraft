@@ -5319,6 +5319,7 @@ func (s *Server) tickBlockPhysicsWorld() {
 	neighborChanges := append([]coreworld.BlockChange(nil), blockChanges...)
 	for _, change := range neighborChanges {
 		blockChanges = append(blockChanges, s.world.BreakUnsupportedCropsAbove(change.X, change.Y, change.Z)...)
+		blockChanges = append(blockChanges, s.world.BreakUnsupportedCocoaAdjacentTo(change.X, change.Y, change.Z)...)
 		blockChanges = append(blockChanges, s.world.UpdateAttachedStemsAround(change.X, change.Y, change.Z)...)
 		blockChanges = append(blockChanges, s.world.UpdateBubbleColumnsAround(change.X, change.Y, change.Z)...)
 	}

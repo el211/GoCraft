@@ -391,6 +391,11 @@ func breakUnsupportedBlocksAboveWithDrops(x, y, z int, w *coreworld.World, mgr *
 			BroadcastBlockChange(change, mgr)
 		}
 	}
+	for _, change := range w.BreakUnsupportedCocoaAdjacentTo(x, y, z) {
+		if mgr != nil {
+			BroadcastBlockChange(change, mgr)
+		}
+	}
 	for plantY := y + 1; plantY <= coreworld.WorldMaxY; plantY++ {
 		plant := w.GetBlock(x, plantY, z)
 		if !coreworld.RequiresGroundSupport(plant) || javaGroundSupportedBlockCanSurvive(plant, w.GetBlock(x, plantY-1, z)) {
