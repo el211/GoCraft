@@ -204,6 +204,15 @@ func (s *ItemStack) ApplyDamage(amount int) bool {
 	if max == 0 || amount <= 0 || s.IsEmpty() {
 		return false
 	}
+	// Unbreaking: each point reduces damage by ~1/(level+1) on average.
+	// We reduce the amount directly for simplicity (no per-hit RNG).
+	if lvl := s.EnchantmentLevel("minecraft:unbreaking"); lvl > 0 {
+		if reduced := amount / (lvl + 1); reduced > 0 {
+			amount = reduced
+		} else {
+			amount = 1
+		}
+	}
 	s.Damage += amount
 	if s.Damage < max {
 		return false
