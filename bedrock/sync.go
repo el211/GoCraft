@@ -64,6 +64,10 @@ type bedrockEntityView struct {
 	usingItem          bool
 	pufferState        int32
 	cloudRadius        float64
+	woolColor          string
+	sheared            bool
+	collarColor        string
+	hasPumpkin         bool
 }
 
 func newBedrockEntityView(entity *corentity.Entity) bedrockEntityView {
@@ -80,6 +84,10 @@ func newBedrockEntityView(entity *corentity.Entity) bedrockEntityView {
 		usingItem:   entity.UsingItem,
 		pufferState: entity.PufferState,
 		cloudRadius: entity.CloudRadius,
+		woolColor:   entity.WoolColor,
+		sheared:     entity.Sheared,
+		collarColor: entity.CollarColor,
+		hasPumpkin:  entity.HasPumpkin,
 	}
 }
 
@@ -675,6 +683,8 @@ func (l *Listener) syncEntities(viewer *bedrockSession, entities []*corentity.En
 			previous.usingItem != entity.UsingItem ||
 			previous.pufferState != entity.PufferState ||
 			previous.cloudRadius != entity.CloudRadius ||
+			previous.woolColor != entity.WoolColor || previous.sheared != entity.Sheared ||
+			previous.collarColor != entity.CollarColor || previous.hasPumpkin != entity.HasPumpkin ||
 			entity.Type == corentity.TypeVillager &&
 				(previous.villagerVariant != entity.VillagerVariant || previous.villagerProfession != entity.VillagerProfession ||
 					previous.villagerLevel != entity.VillagerLevel) {
@@ -856,6 +866,19 @@ func (l *Listener) bedrockEntityMetadata(viewer *bedrockSession, entity *corenti
 		metadata[protocol.EntityDataKeyDataDuration] = int32(math.MaxInt32)
 		metadata[protocol.EntityDataKeyDataChangeOnPickup] = float32(math.SmallestNonzeroFloat32)
 		metadata[protocol.EntityDataKeyDataChangeRate] = float32(math.SmallestNonzeroFloat32)
+	}
+	if entity.Type == corentity.TypeSheep {
+		metadata[protocol.EntityDataKeyColorIndex] = byte(handler.SheepColorID(entity.WoolColor))
+		if entity.Sheared {
+			metadata.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagSheared)
+		}
+	}
+	if entity.Tamed && entity.CollarColor != "" &&
+		(entity.Type == corentity.TypeWolf || entity.Type == corentity.TypeCat) {
+		metadata[protocol.EntityDataKeyColorIndex] = byte(handler.DyeColorID(entity.CollarColor))
+	}
+	if entity.Type == corentity.TypeSnowGolem && !entity.HasPumpkin {
+		metadata.SetFlag(protocol.EntityDataKeyFlags, protocol.EntityDataFlagSheared)
 	}
 	return metadata
 }

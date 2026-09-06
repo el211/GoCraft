@@ -269,8 +269,11 @@ func buildMobEquipment(e *corentity.Entity) *protocol.Packet {
 	return b.Build()
 }
 
-// dyeColorID maps a dye colour name to the Java DyeColor ordinal (0-15).
+// DyeColorID maps a dye colour name to the Java DyeColor ordinal (0-15).
 // Unknown or empty values default to red (14), the vanilla collar default.
+// Exported for Bedrock collar color metadata.
+func DyeColorID(color string) int { return dyeColorID(color) }
+
 func dyeColorID(color string) int {
 	id := sheepColorID(color)
 	if color == "" {
@@ -278,6 +281,11 @@ func dyeColorID(color string) int {
 	}
 	return id
 }
+
+// SheepColorID maps a canonical dye color name to the Java DyeColor ordinal
+// (0-15). Unknown or empty values default to white (0).
+// Exported for Bedrock sheep color metadata.
+func SheepColorID(color string) int { return sheepColorID(color) }
 
 // sheepColorID maps a canonical dye color name to the Java DyeColor ordinal
 // (0-15). Unknown or empty values default to white (0).
