@@ -1822,10 +1822,19 @@ func (s *Server) applyBedrockBlockInteract(i intent.BlockInteractIntent) {
 			s.refreshBedrockWireConnections(x, y, z)
 		}
 		if p.GameMode != player.GameModeCreative {
-			for _, item := range containerItems {
-				stack := item.Stack()
-				if dropped := s.newDroppedItemForPlayer(p, stack, center, item.Slot+1); dropped != nil {
-					handler.BroadcastSpawnMobInDimension(dropped, s.sessions, p.Dimension)
+			if coreworld.IsShulkerBox(block.ResourceLocation()) {
+				// Pack contents into the dropped shulker box item.
+				for i2, drop := range drops {
+					if drop.ItemID != "" {
+						drops[i2] = coreworld.ShulkerBoxDropItem(drop.ItemID, containerItems)
+					}
+				}
+			} else {
+				for _, item := range containerItems {
+					stack := item.Stack()
+					if dropped := s.newDroppedItemForPlayer(p, stack, center, item.Slot+1); dropped != nil {
+						handler.BroadcastSpawnMobInDimension(dropped, s.sessions, p.Dimension)
+					}
 				}
 			}
 			for index, drop := range drops {

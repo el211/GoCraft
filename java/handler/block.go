@@ -205,7 +205,14 @@ func handlePlayerActionWithContext(pkt *protocol.Packet, p *player.Player, w *co
 		if p.GameMode != player.GameModeCreative && p.GameMode != player.GameModeSpectator {
 			dropPosition := spatial.Vec3{X: float64(bx) + 0.5, Y: float64(by) + 0.5, Z: float64(bz) + 0.5}
 			ordinal := 0
-			if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) {
+			if coreworld.IsShulkerBox(broken.ResourceLocation()) {
+				// Replace the generic drop with one that carries the contents.
+				for i2, drop := range drops {
+					if drop.ItemID != "" {
+						drops[i2] = coreworld.ShulkerBoxDropItem(drop.ItemID, containerItems)
+					}
+				}
+			} else if isJavaStorageContainer(broken.ResourceLocation()) || broken.ResourceLocation() == "minecraft:decorated_pot" || IsFurnaceContainer(broken.ResourceLocation()) {
 				for _, item := range containerItems {
 					if item.ItemID != "" && item.Count > 0 {
 						spawnBlockDrop(w, nextEntityID, dropPosition, item.Stack(), ordinal, mgr, p.Dimension)
