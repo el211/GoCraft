@@ -32,19 +32,20 @@ type binding struct {
 	// JavaDecode reads it out of the positional payload. %d is the index.
 	JavaDecode string
 
-	// JavaBlank is one value of this shape carrying nothing, as a Java
-	// expression. It is what the generated warm() walks at load, so the first
-	// real event of a type does not decode it cold while the tick waits.
+	// GoBlank is one value of this shape carrying nothing, as a Go expression.
 	//
-	// Shape and never content. It has to match what JavaDecode expects — a
-	// PlayerRef is sixteen bytes and two strings — because a decoder handed the
-	// wrong kind takes its fallback branch and leaves the real one interpreted,
-	// which warms nothing.
+	// It is what the host sends in a warm dispatch, so the first real event of a
+	// type meets no cold code on either side of the socket: the marshal here,
+	// the protobuf parse over there, and the conversion back into a payload a
+	// handler could read. Measured, that path costs about 2 ms once per process
+	// and lands on whichever event carries values first — which is why the blank
+	// starts here rather than being built by the runtime that receives it.
 	//
-	// Fully qualified: the generated class imports only the vocabulary types its
-	// accessors return, and adding Value to that list for the warm-up alone
-	// would put an import in every event whether it needs one or not.
-	JavaBlank string
+	// Shape and never content: an empty name, a zero, a player who is nobody.
+	// The shape has to be right, though — every decoder on the far side refuses
+	// a kind it does not expect and falls back, so a blank of the wrong shape
+	// warms the refusal and leaves the real branch cold.
+	GoBlank string
 
 	// SDKType is what the plugin-side Go struct holds, e.g. BlockPos.
 	SDKType string
@@ -67,7 +68,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "playerReference(%s)",
 		JavaType:   "PlayerRef",
 		JavaDecode: "PlayerRef.of(field(%d), sink())",
-		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Bytes(new byte[16]), new fr.gocraft.api.Value.Text(\"\"), new fr.gocraft.api.Value.Text(\"\")))",
+		GoBlank:    `abi.List(abi.Bytes(make([]byte, 16)), abi.String(""), abi.String(""))`,
 	},
 	"BlockPos": {
 		SDKType:    "BlockPos",
@@ -77,7 +78,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "positionValue(%s)",
 		JavaType:   "BlockPos",
 		JavaDecode: "BlockPos.of(field(%d))",
-		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Int(0), new fr.gocraft.api.Value.Int(0), new fr.gocraft.api.Value.Int(0)))",
+		GoBlank:    `abi.List(abi.Int64(0), abi.Int64(0), abi.Int64(0))`,
 	},
 	"Block": {
 		SDKType:    "Block",
@@ -87,7 +88,7 @@ var vocabulary = map[string]binding{
 		GoEncode:   "blockValue(%s)",
 		JavaType:   "Block",
 		JavaDecode: "Block.of(field(%d))",
-		JavaBlank:  "new fr.gocraft.api.Value.List(java.util.List.of(new fr.gocraft.api.Value.Text(\"\"), new fr.gocraft.api.Value.List(java.util.List.of())))",
+		GoBlank:    `abi.List(abi.String(""), abi.List())`,
 	},
 	"string": {
 		SDKType:    "string",
@@ -96,35 +97,35 @@ var vocabulary = map[string]binding{
 		GoEncode:   "abi.String(%s)",
 		JavaType:   "String",
 		JavaDecode: "text(%d)",
-		JavaBlank:  "new fr.gocraft.api.Value.Text(\"\")",
+		GoBlank:    `abi.String("")`,
 	},
 	"bool": {
 		GoType:     "bool",
 		GoEncode:   "abi.Bool(%s)",
 		JavaType:   "boolean",
 		JavaDecode: "flag(%d)",
-		JavaBlank:  "new fr.gocraft.api.Value.Bool(false)",
+		GoBlank:    `abi.Bool(false)`,
 	},
 	"int64": {
 		GoType:     "int64",
 		GoEncode:   "abi.Int64(%s)",
 		JavaType:   "long",
 		JavaDecode: "number(%d)",
-		JavaBlank:  "new fr.gocraft.api.Value.Int(0)",
+		GoBlank:    `abi.Int64(0)`,
 	},
 	"double": {
 		GoType:     "float64",
 		GoEncode:   "abi.Double(%s)",
 		JavaType:   "double",
 		JavaDecode: "decimal(%d)",
-		JavaBlank:  "new fr.gocraft.api.Value.Decimal(0)",
+		GoBlank:    `abi.Double(0)`,
 	},
 	"bytes": {
 		GoType:     "[]byte",
 		GoEncode:   "abi.Bytes(%s)",
 		JavaType:   "byte[]",
 		JavaDecode: "bytes(%d)",
-		JavaBlank:  "new fr.gocraft.api.Value.Bytes(new byte[0])",
+		GoBlank:    `abi.Bytes(nil)`,
 	},
 }
 
@@ -134,15 +135,13 @@ var vocabulary = map[string]binding{
 // if the answer had to be fetched while the tick waits.
 const permissionKind = "map<string,bool>"
 
-// permissionsBlank is that map's placeholder for the generated warm-up. One
-// pair rather than none, so the loop that reads them runs a round instead of
-// being skipped.
+// permissionsBlank is that map's placeholder for a warm dispatch. One pair
+// rather than none, so the loop that reads them runs a round instead of being
+// skipped.
 //
 // It has no vocabulary row because the map has no row: it is never a parameter
 // and never an accessor, so there is nothing else about it for a row to say.
-const permissionsBlank = `new fr.gocraft.api.Value.List(java.util.List.of(` +
-	`new fr.gocraft.api.Value.List(java.util.List.of(` +
-	`new fr.gocraft.api.Value.Text(""), new fr.gocraft.api.Value.Bool(false)))))`
+const permissionsBlank = `abi.List(abi.List(abi.String(""), abi.Bool(false)))`
 
 func bindingFor(kind string) (binding, error) {
 	if kind == permissionKind {

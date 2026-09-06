@@ -76,9 +76,6 @@ type javaEvent struct {
 	Cancellable bool
 	Since       uint32
 	Accessors   []javaAccessor
-	// Blank is one placeholder value per payload slot, in index order,
-	// injected fields included. It is what warm() decodes at load.
-	Blank       []string
 	Permissions bool
 	// PermissionsIndex is where the injected map sits in the payload. Emitted
 	// rather than searched for at runtime: the generator knows it, and a
@@ -95,19 +92,16 @@ func javaModel(declared event) (javaEvent, error) {
 		Cancellable: declared.Cancellable,
 		Since:       declared.Since,
 	}
-	model.Blank = make([]string, len(declared.Fields))
 	for _, f := range declared.Fields {
 		if f.Injected {
 			model.Permissions = true
 			model.PermissionsIndex = f.Index
-			model.Blank[f.Index] = permissionsBlank
 			continue
 		}
 		bound, err := bindingFor(f.Kind)
 		if err != nil {
 			return javaEvent{}, fmt.Errorf("%s.%s: %w", declared.Type, f.Name, err)
 		}
-		model.Blank[f.Index] = bound.JavaBlank
 		model.Accessors = append(model.Accessors, javaAccessor{
 			Type:      bound.JavaType,
 			Name:      f.JavaName(),
@@ -183,31 +177,6 @@ public final class {{ .Class }} extends fr.gocraft.api.Event {
         return permission(node);
     }
 {{ end }}
-    /// Runs this event's own decode once, on a payload of its shape carrying
-    /// nothing.
-    ///
-    /// The first dispatch of a type into a cold runtime costs tens of times a
-    /// warm one — the class loaded, the call sites linked, one interpreted pass
-    /// — and the §06 budget it spends belongs to the event rather than to the
-    /// subscriber that happened to be first. Paid here instead, on the load
-    /// path, which the host waits for without a budget.
-    ///
-    /// The payload is shaped and empty: every reader below refuses a kind it
-    /// does not expect and falls back, so a payload of the wrong shape would
-    /// warm the fallback and leave the branch that matters cold.
-    ///
-    /// Nothing an author wrote runs here. This is the generated decode and
-    /// nothing past it.
-    public static void warm(fr.gocraft.api.EffectSink sink) {
-        {{ .Class }} warming = new {{ .Class }}(java.util.List.of({{ range $index, $blank := .Blank }}{{ if $index }},{{ end }}
-                {{ $blank }}{{ end }}), sink);
-{{- range .Accessors }}
-        warming.{{ .Name }}();
-{{- end }}
-{{- if .Permissions }}
-        warming.can("");
-{{- end }}
-    }
 }
 `))
 
@@ -243,19 +212,6 @@ public final class GeneratedEvents {
 {{- end }}
             );
 
-    /// The same table, for the decode path rather than the dispatch.
-    ///
-    /// A runtime warms only the types some plugin subscribed to, so this is
-    /// looked up by name like BY_TYPE rather than walked whole: a server with
-    /// one listener must not pay for every event in the ABI.
-    private static final Map<String, java.util.function.Consumer<EffectSink>> WARM =
-            Map.ofEntries(
-{{- range $index, $event := .Events }}
-{{- if $index }},{{ end }}
-                    Map.entry({{ $event.JavaClass }}.TYPE, {{ $event.JavaClass }}::warm)
-{{- end }}
-            );
-
     private static final Map<Class<? extends Event>, String> BY_CLASS = Map.ofEntries(
 {{- range $index, $event := .Events }}
 {{- if $index }},{{ end }}
@@ -281,18 +237,6 @@ public final class GeneratedEvents {
 
     public static boolean knows(String type) {
         return BY_TYPE.containsKey(type);
-    }
-
-    /// Runs one event's decode path once, before any tick waits on it.
-    ///
-    /// Silent for a type this runtime does not have: a plugin subscribing to
-    /// something newer than the ABI it was loaded into is refused at preflight,
-    /// and a warm-up is the wrong place to say so a second time.
-    public static void warm(String type, EffectSink sink) {
-        java.util.function.Consumer<EffectSink> warming = WARM.get(type);
-        if (warming != null) {
-            warming.accept(sink);
-        }
     }
 
     /// Whether a subscriber may refuse this event.

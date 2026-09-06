@@ -45,6 +45,9 @@ func generateGo(plugin *protogen.Plugin, events []event) error {
 	file.P()
 
 	nativeEventPredicate(file, events)
+	if err := blankPayloads(file, events); err != nil {
+		return err
+	}
 
 	for _, declared := range events {
 		if err := emitter(file, declared); err != nil {
@@ -52,6 +55,59 @@ func generateGo(plugin *protogen.Plugin, events []event) error {
 		}
 	}
 
+	return nil
+}
+
+// blankPayloads emits a payload of each native event's own shape, carrying
+// nothing.
+//
+// It is what a warm dispatch sends. The first event to carry values costs about
+// two milliseconds once per process — the marshal here, the protobuf parse in
+// the runtime, the conversion back into something a handler could read — and
+// that lands on whichever real event happens to be first, out of a budget
+// shared by every subscriber. Sent from here instead, before READY, where the
+// host is waiting anyway and no budget is running.
+//
+// Built on this side rather than by the runtime receiving it, and that is the
+// whole point: a blank the runtime made for itself never crosses the socket, so
+// the path that carries values stays exactly as cold as it was. The first
+// attempt at this did precisely that and moved nothing.
+//
+// Generated, because the shape is the schema's. A list written by hand beside
+// the vocabulary would drift the day a field is added, and a blank of the wrong
+// shape is worse than none: every decoder on the far side refuses a kind it
+// does not expect and falls back, so it would warm the refusal.
+func blankPayloads(file *protogen.GeneratedFile, events []event) error {
+	file.P("// BlankEvent is a payload of one native event's shape, carrying nothing.")
+	file.P("//")
+	file.P("// Shape and never content — an empty name, a zero, a player who is nobody")
+	file.P("// — because nothing built from this is meant to be read as data. It is")
+	file.P("// sent in a warm dispatch and reaches no handler.")
+	file.P("//")
+	file.P("// Nil for a type this host does not emit, which is the honest answer for a")
+	file.P("// plugin-defined event: its shape is in the manifest that declared it.")
+	file.P("func BlankEvent(eventType string) []abi.Value {")
+	file.P("	switch eventType {")
+	for _, declared := range events {
+		file.P(fmt.Sprintf("	case %s:", declared.ConstName()))
+		file.P("		return []abi.Value{")
+		for _, f := range declared.Fields {
+			if f.Injected {
+				file.P("			" + permissionsBlank + ",")
+				continue
+			}
+			bound, err := bindingFor(f.Kind)
+			if err != nil {
+				return fmt.Errorf("%s.%s: %w", declared.Type, f.Name, err)
+			}
+			file.P("			" + bound.GoBlank + ",")
+		}
+		file.P("		}")
+	}
+	file.P("	}")
+	file.P("	return nil")
+	file.P("}")
+	file.P()
 	return nil
 }
 
