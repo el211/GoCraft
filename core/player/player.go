@@ -120,7 +120,8 @@ type Player struct {
 	DrowningTicks         int32
 	LastVibrationPosition spatial.Vec3
 	HasVibrationPosition  bool
-	LastWindChargeUse     time.Time
+	LastWindChargeUse time.Time
+	LastGoatHornUse   time.Time
 	// LastAttackerEntityID is the entity ID of the last mob that dealt damage to
 	// this player. Used by tamed wolves to select a retaliation target.
 	// Reset to 0 when the player respawns or the wolf loses the target.

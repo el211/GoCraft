@@ -139,6 +139,36 @@ func handleCreativeModeSetItem(pkt *protocol.Packet, p *player.Player) error {
 // handleUseItem equips armour from the selected hotbar slot when the player
 // right-clicks it. This prevents the client-only predicted equip from being
 // rolled back and keeps the armour attribute authoritative.
+// goatHornSounds maps vanilla instrument index 0..7 to the canonical sound event.
+var goatHornSounds = [8]string{
+	"minecraft:item.goat_horn.sound.0", // ponder
+	"minecraft:item.goat_horn.sound.1", // sing
+	"minecraft:item.goat_horn.sound.2", // seek
+	"minecraft:item.goat_horn.sound.3", // feel
+	"minecraft:item.goat_horn.sound.4", // admire
+	"minecraft:item.goat_horn.sound.5", // call
+	"minecraft:item.goat_horn.sound.6", // yearn
+	"minecraft:item.goat_horn.sound.7", // dream
+}
+
+// goatHornSound returns the sound event for the held goat horn. The instrument
+// index is read from the minecraft:instrument component; unknown values fall
+// back to index 0 (ponder).
+func goatHornSound(stack player.ItemStack) string {
+	var instrument struct {
+		Type string `json:"type"`
+	}
+	if stack.Component("minecraft:instrument", &instrument) {
+		for i, s := range goatHornSounds {
+			suffix := fmt.Sprintf("minecraft:item.goat_horn.sound.%d", i)
+			if instrument.Type == suffix || s == instrument.Type {
+				return s
+			}
+		}
+	}
+	return goatHornSounds[0]
+}
+
 func handleUseItem(pkt *protocol.Packet, p *player.Player, conn *network.ClientConn, w *coreworld.World, mgr *session.Manager, nextEntityID func() int32) error {
 	r := pkt.Reader()
 	hand, err := protocol.ReadVarInt(r)
@@ -228,6 +258,20 @@ func handleUseItem(pkt *protocol.Packet, p *player.Player, conn *network.ClientC
 		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 	case "minecraft:ender_eye":
 		UseEnderEye(p, w, mgr, nextEntityID)
+		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
+	case "minecraft:goat_horn":
+		const goatHornCooldown = 7 * time.Second
+		if !p.LastGoatHornUse.IsZero() && time.Since(p.LastGoatHornUse) < goatHornCooldown {
+			return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
+		}
+		p.LastGoatHornUse = time.Now()
+		sound := goatHornSound(p.Inventory[heldSlot])
+		broadcastSoundAt(mgr, sound, soundCategoryNeutral,
+			p.Position.X, p.Position.Y+1.62, p.Position.Z, 64, 1)
+		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
+	case "minecraft:spyglass":
+		p.UsingItemID = "minecraft:spyglass"
+		p.UsingItemSince = time.Now()
 		return conn.WritePacket(buildAcknowledgeBlockChange(sequence))
 	}
 	armorSlot := armorInventorySlot(p.Inventory[heldSlot].ItemID)
