@@ -46,6 +46,22 @@ type Instance interface {
 	Unload(ctx context.Context) error
 }
 
+// Warmer is an Instance whose runtime pays a cold-start cost worth removing
+// before the first real event reaches it.
+//
+// Optional, because it is not a universal property. A Go plugin is a compiled
+// binary with nothing to load, link or interpret; a JVM measures 7.9 ms on the
+// first event of a type against a shared budget of 2 ms, from class loading,
+// protobuf coders built on first use and bytecode nobody has compiled yet.
+//
+// The registry calls this once per declared subscription, after the plugin is
+// loaded and before the runtimes are told READY — a window the host already
+// waits through without a budget. What the runtime does with it is its own
+// business, except for the one thing it must not do: run a handler.
+type Warmer interface {
+	Warm(ctx context.Context, event string) error
+}
+
 // CommandInstance is implemented by runtimes that loaded a command tree.
 //
 // It answers with a result rather than an error for the same reason Dispatch

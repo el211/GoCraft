@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -81,8 +82,41 @@ func (r *Registry) LoadAll(ctx context.Context, bundles []Bundle) error {
 		r.loadOrder = append(r.loadOrder, instance)
 		r.mu.Unlock()
 	}
+	r.warmInstances(ctx, ordered)
 	if err := r.readyRuntimes(ctx, ordered); err != nil {
 		return rollback(err, nil)
 	}
 	return nil
+}
+
+// warmInstances runs each subscription's dispatch path before any of them can
+// fire for real.
+//
+// After every plugin is loaded rather than after each one, so a runtime hosting
+// several warms with all of them present — and before READY, which is the last
+// moment the host is still waiting on the runtimes without a budget.
+//
+// Nothing here can fail the boot. A runtime that will not warm is a runtime
+// whose first event is slow, which is what every runtime was before this
+// existed; refusing to start a server over it would be trading a warning for an
+// outage.
+func (r *Registry) warmInstances(ctx context.Context, bundles []Bundle) {
+	for _, bundle := range bundles {
+		r.mu.RLock()
+		instance := r.instances[bundle.Manifest.ID]
+		r.mu.RUnlock()
+		warmer, ok := instance.(Warmer)
+		if !ok {
+			continue
+		}
+		for _, subscription := range bundle.Manifest.Subscriptions {
+			if err := ctx.Err(); err != nil {
+				return
+			}
+			if err := warmer.Warm(ctx, subscription.Event); err != nil {
+				slog.Warn("plugin event warm-up failed", "plugin", bundle.Manifest.ID,
+					"event", subscription.Event, "err", err)
+			}
+		}
+	}
 }
