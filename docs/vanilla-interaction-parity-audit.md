@@ -93,7 +93,14 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Bone meal on grass block.** `ApplyBoneMeal` now handles `minecraft:grass_block`: 128 scatter attempts over a ±4 x/z area place random single-block vegetation (short_grass, fern, dandelion, poppy, azure_bluet, blue_orchid, oxeye_daisy, cornflower, lily_of_the_valley) on top of any grass block with air above it. The old Bedrock-only `short_grass` hardcode is replaced by this shared path. Always returns `used=true` on a grass block.
 - **Respawn anchor Nether spawn assignment.** Right-clicking a charged respawn anchor while in the Nether dimension sets the player's personal spawn to that position (`SpawnIsAnchor=true`). On death, `ResolveAnchorRespawn` validates the anchor still has charges, finds a safe adjacent position, decrements the charge, and respawns the player in the Nether. A depleted or missing anchor clears the spawn point and falls back to world spawn. `SpawnIsAnchor` persists through save/load. Both Java and Bedrock handle anchor right-click.
 
-## Still left to do (as of batch 8)
+## Completed in batch 9 (2026-09-06)
+
+- **Sign waxing with honeycomb.** Right-clicking a sign or hanging sign with honeycomb sets `SignWaxed=true` in the block entity and consumes one honeycomb. A waxed sign rejects the `Update Sign` packet (Java) and ignores glow/dye edits, preserving existing text. Bedrock `IsWaxed` NBT tag reflects the stored value. Glow-ink and dye interactions now propagate the waxed flag through `SignState`. Both Java and Bedrock.
+- **Anvil XP level cost.** `anvilOperation` now computes `levelCost`: 1 level for rename-only and material repair; 1 + number of newly-merged enchantments for book-transfer or same-item merge. When the player takes the output, the cost is encoded into `PendingWorkstationXP` (negative) and deducted by the container-click flush in the Java handler. A `SetContainerData` packet sends the cost to the client (property 0 = repair cost) so the UI shows the correct orange level number. `AnvilLevelCost` is exported for external use.
+- **Bone meal on mycelium.** `ApplyBoneMeal` now handles `minecraft:mycelium`: 128 scatter attempts over a ±4 x/z area place random brown or red mushrooms above any mycelium block with air above it. Both Java and Bedrock via shared `ApplyBoneMeal`.
+- **Bone meal on moss block.** `ApplyBoneMeal` now handles `minecraft:moss_block`: converts nearby dirt/stone/grass surface blocks to moss and places moss carpet, grass, or azalea above them in the same 128-attempt scatter. Both Java and Bedrock via shared `ApplyBoneMeal`.
+
+## Still left to do (as of batch 9)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -105,10 +112,10 @@ implementation order; the largest remaining structural gaps first.
 2. **Remaining stateful block entities.** Banner patterns, item/glow item frames.
 3. **Entity interactions.** Leads & leash knots, horse/llama equipment UI, chest
    boats & storage minecarts, armour stands.
-4. **Remaining random-tick / neighbour behaviour.** Full fluid flow vectors / finite levels, fire flammability nuances. Bone meal on moss, mangrove, fungi/nylium.
+4. **Remaining random-tick / neighbour behaviour.** Full fluid flow vectors / finite levels, fire flammability nuances. Bone meal on mangrove, fungi/nylium.
 5. **Workstation operations.** Beacon effects, enchanting offers,
    smithing trims, loom patterns, cartography scaling — screens open but the defining
-   operation is absent. (Grindstone disenchant and XP refund now done — batch 7.)
+   operation is absent. (Grindstone disenchant and XP refund now done — batch 7; anvil level cost now done — batch 9.)
 6. **Combat & survival depth.** Tipped/spectral arrows, and the remaining
    exhaustion/hazard sources.
 7. **Items still missing outright.** Fishing rod, brush, writable/written book editing,
@@ -225,7 +232,7 @@ inventory move, save, cross-edition sync, or restart.
 | Shovels | Partial | Partial | Dirt paths and campfire extinguishing work. Full flattenable set, sound parity, and durability/enchantment rules need verification. |
 | Flint and steel / fire charge | Partial | Partial | Both adapters create fire, light candles/campfires, and ignite portals. Bedrock directly primes TNT; Java has no TNT target branch. Projectile/dispenser and feedback rules remain incomplete. |
 | Honeycomb | Implemented (new) | Implemented (new) | Copper waxing now runs through a shared canonical operation on both editions. |
-| Bone meal | Partial | Partial | Supported crops, saplings, bamboo/kelp/vine tips, sea pickles (batch 7), and grass-area scatter (batch 8) work. Moss, azalea, mangrove, underwater plants/coral, fungi/nylium, and particles are still incomplete. |
+| Bone meal | Partial | Partial | Supported crops, saplings, bamboo/kelp/vine tips, sea pickles (batch 7), grass-area scatter (batch 8), mycelium mushroom scatter, and moss block spread/conversion (batch 9) work. Mangrove, azalea, underwater plants/coral, fungi/nylium, and particles are still incomplete. |
 | Ender eye | Implemented | Implemented | Stronghold launch and portal-frame insertion are present. Structure search and feedback still deserve runtime tests. |
 
 ## Block interaction audit
@@ -261,12 +268,12 @@ operations before adding Java calls — was followed for all nine.
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
 | Dragon egg | Implemented (new) | Right-click or dig-start teleports egg to random replaceable position (±7 x/z, ±1 y). Creative exception applied. Both Java and Bedrock. |
 | Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument is derived from the block-below on every tune/placement and stored in block state. A canonical note sound (`block.note_block.{instrument}`) is broadcast on every redstone rising edge via `playNoteBlock`. Particles remain absent. |
-| Signs and hanging signs | Partial | Partial | Placement, text editing, dye colour, and glow ink sac / ink sac now work on both editions (batch 6). SignState (lines + glowing + color) preserved across edits. Wax, click events, and Bedrock text editing remain. |
+| Signs and hanging signs | Partial | Partial | Placement, text editing, dye colour, glow ink sac / ink sac, and honeycomb waxing now work on both editions (batches 6, 9). SignState (lines + glowing + color + waxed) preserved. Click events and Bedrock text editing remain. |
 | Banners | Partial | Placement works. Pattern layers, loom output, shields carrying patterns, map markers, block-entity persistence, and wash-off in cauldrons are absent. |
 | Beacon | Partial | Both adapters can open a one-slot screen. Pyramid level, beam obstruction/colour, payment validation, selected effects, periodic area application, and persistence are absent. |
 | Enchanting table | Partial | The screen accepts item/lapis slots, but offers, bookshelf power, seed, XP/lapis cost, selection packet, and enchant application are absent. |
 | Brewing stand | Partial | Persistent slots and generic hopper movement exist, but blaze fuel, brew timer, ingredient transformations, potion payloads, bottle properties, and slot-aware automation are absent. |
-| Anvil | Partial | Basic material/same-item repair exists. Rename, enchant merging, prior-work penalty, XP cost, too-expensive rules, anvil damage, and output feedback are absent. |
+| Anvil | Partial | Basic material/same-item repair exists. Rename (batch 8), enchant merging (batch 8), and level cost deduction/display (batch 9) now work. Prior-work penalty, too-expensive cap (39 levels), anvil damage, and complete per-enchantment cost weights remain. |
 | Grindstone | Partial | Basic combining/output exists. Non-curse enchantments are now stripped from both input items and the output, curses (binding, vanishing) are preserved, and XP is awarded to the player (≈ 8 XP per enchantment level). Sounds remain absent. |
 | Smithing table | Partial | Upgrade item-ID transforms exist. Armour trims and trim material/pattern components cannot be produced or preserved. |
 | Loom | Partial | It consumes a banner and dye but returns an unchanged banner because pattern data has no canonical representation. Selection, six-layer limit, and full pattern rules are absent. |
