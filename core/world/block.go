@@ -56,6 +56,17 @@ func (b Block) ResourceLocation() string {
 	return b.Namespace + ":" + b.Name
 }
 
+// BlockFromResourceLocation parses a "namespace:name" identifier into a
+// canonical default-state block. A bare name is assumed to be in "minecraft".
+// Properties are not encoded in a resource location, so the result is always
+// the default state for that block type.
+func BlockFromResourceLocation(resourceLocation string) Block {
+	if namespace, name, found := strings.Cut(resourceLocation, ":"); found {
+		return Block{Namespace: namespace, Name: name}
+	}
+	return Block{Namespace: "minecraft", Name: resourceLocation}
+}
+
 // DoublePlantPartnerY returns the vertical partner coordinate and expected
 // half for vanilla two-block plants. It is shared by edition adapters so a
 // break from either Java or Bedrock cannot leave a floating half behind.
