@@ -152,6 +152,21 @@ type PluginsConfig struct {
 	// all of its subscribers before the host stops waiting for verdicts.
 	EventBudgetMillis int `yaml:"event_budget_ms"`
 
+	// ColdEventGraceMillis is added to that budget the first time a subscriber
+	// sees an event type.
+	//
+	// The first dispatch into a runtime that has never run a plugin's handler
+	// costs milliseconds where every one after it costs microseconds: classes
+	// are initialised and code runs interpreted before anything compiles it. The
+	// host warms what it owns before opening its listeners; what is left is the
+	// author's code, which a warm-up must not run against values nobody sent.
+	//
+	// Without this the healthiest server logs one deadline exceeded per restart,
+	// and a fail_closed event refuses the first action after every boot. Spent
+	// once per subscriber per event type, so it cannot become a way to hold the
+	// tick. Zero turns it off.
+	ColdEventGraceMillis int `yaml:"cold_event_grace_ms"`
+
 	// Runtimes configures the language backends. Nothing here is consulted
 	// unless an installed plugin declares that runtime: a server with no Java
 	// plugin never looks for java and never provisions anything.
@@ -331,9 +346,10 @@ func defaults() *Config {
 			BytebinURL: "https://bytebin.lucko.me",
 		},
 		Plugins: PluginsConfig{
-			Enabled:           true,
-			Directory:         "plugins",
-			EventBudgetMillis: 2,
+			Enabled:              true,
+			Directory:            "plugins",
+			EventBudgetMillis:    2,
+			ColdEventGraceMillis: 20,
 			Runtimes: RuntimesConfig{
 				JVM: JVMRuntimeConfig{PreferSystem: true},
 			},
@@ -495,6 +511,10 @@ func (c *Config) validate() error {
 		}
 		if c.Plugins.EventBudgetMillis < 1 || c.Plugins.EventBudgetMillis > 1000 {
 			return fmt.Errorf("plugins.event_budget_ms %d must be between 1 and 1000", c.Plugins.EventBudgetMillis)
+		}
+		if c.Plugins.ColdEventGraceMillis < 0 || c.Plugins.ColdEventGraceMillis > 1000 {
+			return fmt.Errorf("plugins.cold_event_grace_ms %d must be between 0 and 1000",
+				c.Plugins.ColdEventGraceMillis)
 		}
 	}
 	return nil

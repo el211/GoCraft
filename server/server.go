@@ -387,6 +387,10 @@ func New(cfg *config.Config) (*Server, error) {
 	// tick has to drain it and only something holding it can.
 	pluginEffects := coreplugin.NewMutationQueue()
 	pluginRegistry := coreplugin.NewRegistry(context.Background(), eventBudget, pluginEffects, nil)
+	// What a subscriber's very first dispatch of a type is allowed on top of the
+	// shared budget. See core/plugin/coldstart.go for what it pays for.
+	pluginRegistry.Bus().SetColdGrace(
+		time.Duration(cfg.Plugins.ColdEventGraceMillis) * time.Millisecond)
 	plugins := pluginRegistry.Bus()
 	plugins.SetPermissionResolver(func(p *player.Player, node string) bool {
 		return p != nil && permissionManager.Allowed(p.Username, node, p.Operator, false)
