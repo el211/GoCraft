@@ -59,7 +59,8 @@
     "minecraft:update_attributes": 124,
     "minecraft:update_recipes": 126,
     "minecraft:set_passengers": 101,
-    "minecraft:update_health": 98
+    "minecraft:update_health": 98,
+    "minecraft:open_book": 22
   },
   "serverbound": {
     "minecraft:accept_teleportation": 0,

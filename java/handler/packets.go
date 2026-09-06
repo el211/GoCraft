@@ -115,6 +115,7 @@ var (
 	packetIDUpdateAttributes       = protocoldata.MustCB("play", "minecraft:update_attributes")
 	packetIDUpdateRecipes          = protocoldata.MustCB("play", "minecraft:update_recipes")
 	packetIDSetPassengers          = protocoldata.MustCB("play", "minecraft:set_passengers")
+	packetIDOpenBook               = protocoldata.MustCB("play", "minecraft:open_book")
 )
 
 // ── Play state — serverbound (C→S) ───────────────────────────────────────────
