@@ -339,6 +339,10 @@ func (re *RedstoneEngine) analogOutputAt(x, y, z int) int {
 	case "minecraft:chiseled_bookshelf":
 		be := re.world.GetBlockEntity(x, y, z)
 		return int(be.LastBookshelfSlot) // 0 = no interaction, 1-6 = last slot
+	case "minecraft:water_cauldron", "minecraft:powder_snow_cauldron":
+		return atoi(block.Properties["level"]) // 0–3
+	case "minecraft:lava_cauldron":
+		return 3
 	}
 	slots := redstoneContainerSlots(block.ResourceLocation())
 	if slots == 0 {

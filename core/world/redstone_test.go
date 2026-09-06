@@ -268,6 +268,38 @@ func TestCopperBulbTogglesOnlyOnRisingEdge(t *testing.T) {
 	}
 }
 
+func TestCauldronComparatorSignal(t *testing.T) {
+	tests := []struct {
+		name  string
+		props map[string]string
+		want  int
+	}{
+		{"empty cauldron", nil, 0},
+		{"water level 1", map[string]string{"level": "1"}, 1},
+		{"water level 2", map[string]string{"level": "2"}, 2},
+		{"water level 3", map[string]string{"level": "3"}, 3},
+		{"lava cauldron", nil, 3},
+		{"powder snow level 1", map[string]string{"level": "1"}, 1},
+	}
+	blockNames := []string{
+		"cauldron", "water_cauldron", "water_cauldron", "water_cauldron",
+		"lava_cauldron", "powder_snow_cauldron",
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			w := New(&FlatGenerator{}, nil, false)
+			defer w.Close()
+			w.SetBlock(0, 64, -1, Block{Namespace: "minecraft", Name: blockNames[i], Properties: tc.props})
+			w.SetBlock(0, 64, 0, Block{Namespace: "minecraft", Name: "comparator",
+				Properties: map[string]string{"facing": "north", "mode": "compare", "powered": "false"}})
+			w.Redstone.FlushUpdates()
+			if got := w.Redstone.PowerAt(0, 64, 0); got != tc.want {
+				t.Fatalf("%s comparator = %d, want %d", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestChiseledBookshelfComparatorSignal(t *testing.T) {
 	w := New(&FlatGenerator{}, nil, false)
 	defer w.Close()
