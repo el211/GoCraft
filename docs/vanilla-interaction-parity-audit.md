@@ -61,7 +61,15 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Spyglass (Bedrock).** applyBedrockStartUseItem sets UsingItemID/UsingItemSince, matching the Java use-state path.
 - **Ordinary vine spread.** minecraft:vine participates in the random-tick crop scan. 25% gate; 50% chance to spread downward (copies face set); horizontal spread picks a random face direction and places a new vine with supported faces. Tests: downward spread, horizontal spread.
 
-## Still left to do (as of batch 4)
+## Completed in batch 5 (2026-09-06)
+
+- **Shulker box content preservation.** Breaking a shulker box in survival packs its container items into the `minecraft:container` component of the dropped item (both Java and Bedrock). Contents no longer spill; the box can be re-placed with its inventory intact.
+- **Mooshroom bowl/stew.** Right-clicking an adult mooshroom with an empty bowl gives mushroom stew, consuming the bowl. Shared via interactAnimal (both editions).
+- **Sheep wool regrowth.** Shearing sets WoolRegrowTicks=300; the lifecycle tick decrements it and broadcasts metadata when it reaches zero, restoring the Sheared=false state (approx. 15 s).
+- **Lectern book insert/remove.** Right-clicking a lectern with a written_book or writable_book places it (has_book=true, powered=true). Right-clicking without a book ejects it into the inventory. Book stored in block entity slot 0; contents drop on break. Both Java and Bedrock.
+- **Chiseled bookshelf.** Six-slot book storage with cursor-position targeting (3×2 grid based on facing direction). Insert: holding book + empty slot. Eject: clicking occupied slot. slot_X_occupied block state updated. Books drop on break. Both Java and Bedrock.
+
+## Still left to do (as of batch 5)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -70,11 +78,8 @@ implementation order; the largest remaining structural gaps first.
    charged-crossbow stack, gliding flag + glide physics. Then Bedrock
    bow/crossbow/trident/shield use paths (all currently Java-only or missing) and
    Elytra rocket boost.
-2. **Stateful block entities (order 5).** Jukebox, lectern, chiseled bookshelf,
-   sign text editing, banner patterns, item/glow item frames, and keeping shulker
-   contents inside the dropped item.
-3. **Entity interactions (order 6).** Name tags, sheep shearing/dyeing,
-   cow/mooshroom milking, fish/axolotl/tadpole bucket capture, leads & leash
+2. **Remaining stateful block entities.** Banner patterns, item/glow item frames.
+3. **Entity interactions.** Sheep dyeing, fish/axolotl/tadpole bucket capture, leads & leash
    knots, horse/llama equipment UI, chest boats & storage minecarts, armour
    stands.
 4. **Remaining random-tick / neighbour behaviour (order 7).** Bamboo growth,
