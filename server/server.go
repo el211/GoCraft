@@ -2086,6 +2086,15 @@ func (s *Server) applyEntityInteract(i intent.EntityInteractIntent) {
 		damage += float32(math.Floor(attacker.FallDistance)) * 3
 	}
 
+	// Critical hit: falling (not on ground, not flying) with any weapon except mace.
+	// Vanilla applies a 1.5x damage multiplier. Sprinting also disqualifies in 1.9+,
+	// but GoCraft doesn't track sprint-start precisely, so we skip that check.
+	isCrit := !isMaceSmash && !attacker.OnGround && !attacker.Flying &&
+		attacker.FallDistance > 0
+	if isCrit {
+		damage = float32(math.Floor(float64(damage) * 1.5))
+	}
+
 	var targetPlayer *player.Player
 	s.game.OnlinePlayers(func(candidate *player.Player) {
 		if candidate.EntityID == i.TargetID && candidate.Dimension == attacker.Dimension {
