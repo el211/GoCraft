@@ -448,6 +448,10 @@ func (s *Supervisor) watch(ctx context.Context, child *Child) {
 // which does not heal on its own — the first one is kept and the rest ignored,
 // because the cause is more useful than the count.
 //
+// "Anything else" excludes a reply the caller gave up waiting for: Conn drops
+// those before they reach here, so a runtime answering a dispatch that outran
+// its budget is late rather than broken.
+//
 // EMIT is the one exception, and it is narrow: a plugin publishing a
 // plugin-defined event is the only exchange a runtime starts. It is handed to a
 // goroutine rather than answered here, because dispatching it reaches

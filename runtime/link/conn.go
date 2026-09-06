@@ -64,7 +64,8 @@ func NewConn(codec *ipc.Codec, handler func(*wire.Envelope)) *Conn {
 // ctx is what bounds the wait — for an event that is the shared budget of §06.
 // When it expires the caller gives up, but the runtime may still answer later;
 // the pending entry is dropped so that reply is discarded rather than delivered
-// to whoever reuses the channel next.
+// to whoever reuses the channel next. Discarded, and not held against the
+// runtime — see abandoned.
 func (c *Conn) Request(ctx context.Context, envelope *wire.Envelope) (*wire.Envelope, error) {
 	if envelope == nil {
 		return nil, fmt.Errorf("ipc: missing envelope")
@@ -148,19 +149,20 @@ func (c *Conn) read() {
 			c.shutdown(err)
 			return
 		}
+		seq := envelope.GetSeq()
 		// Only an odd sequence number can answer this side's request, so an
 		// even one skips the pending table entirely rather than relying on a
 		// miss. A runtime that echoed a host seq back on an unrelated message
 		// would otherwise be one collision away from waking the wrong caller.
 		c.mu.Lock()
-		replies, waiting := c.pending[envelope.GetSeq()]
-		if envelope.GetSeq()%2 == 0 {
+		replies, waiting := c.pending[seq]
+		if seq%2 == 0 {
 			replies, waiting = nil, false
 		}
 		if waiting {
 			// Removed on delivery, so a runtime that answers the same request
 			// twice cannot have its second reply mistaken for another one.
-			delete(c.pending, envelope.GetSeq())
+			delete(c.pending, seq)
 		}
 		c.mu.Unlock()
 
@@ -170,10 +172,36 @@ func (c *Conn) read() {
 			replies <- envelope
 			continue
 		}
+		if c.abandoned(seq) {
+			continue
+		}
 		if c.handler != nil {
 			c.handler(envelope)
 		}
 	}
+}
+
+// abandoned reports an envelope that answers a request this side did issue and
+// is no longer waiting for.
+//
+// It is dropped rather than handed to the handler, and that is the difference
+// between a slow runtime and a broken one. A dispatch that outruns the §06
+// budget is abandoned by the caller while the plugin is still working; the
+// verdict then arrives with nobody left to take it, and treating it as
+// unsolicited would make every budget overrun a protocol violation — the host
+// killing the runtime for answering the question it was asked, a little late.
+//
+// The test is the sequence counter rather than a set of abandoned numbers: this
+// side numbers its requests odd and never reuses one, so an odd seq below the
+// counter is one it issued and an odd seq at or above it is one it never did.
+// That second case is still a violation, and still reaches the handler.
+//
+// A duplicate reply to a request that was answered lands here too, and is
+// dropped for the same reason it is harmless: nothing is waiting on it. Telling
+// it apart from a late one would mean remembering every seq ever delivered, for
+// the whole life of a process, to catch a fault that costs nothing.
+func (c *Conn) abandoned(seq uint64) bool {
+	return seq%2 == 1 && seq < c.seq.Load()
 }
 
 func (c *Conn) expect(seq uint64) (chan *wire.Envelope, error) {
