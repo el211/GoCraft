@@ -977,6 +977,12 @@ func playLoop(conn *network.ClientConn, p *player.Player, spawnTeleportID int32,
 			}
 		}
 
+		if pkt.ID == packetIDSignUpdate {
+			if err := handleSignUpdate(pkt, p, w, mgr); err != nil {
+				slog.Warn("sign update error", "player", p.Username, "err", err)
+			}
+		}
+
 		// ── Chunk streaming on boundary crossing ─────────────────────────────
 		newChunkX := posToChunk(p.Position.X)
 		newChunkZ := posToChunk(p.Position.Z)

@@ -87,6 +87,7 @@
 	"minecraft:move_vehicle": 32,
 	"minecraft:paddle_boat": 33,
 	"minecraft:player_input": 41,
-	"minecraft:player_command": 40
+	"minecraft:player_command": 40,
+		"minecraft:sign_update": 52
   }
 }
