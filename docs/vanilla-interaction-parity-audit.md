@@ -1,7 +1,7 @@
 # Dragonfly gameplay and interaction parity audit
 
 Audit date: 2026-09-02. GoCraft baseline: `missing-items` at `00685b7`.
-Progress update: 2026-09-06 (batch 3: bamboo, cave vines, jukebox, name tags, goat horn, spyglass, sign text; batch 4: sheep shearing, cow milking, Bedrock jukebox/name tags/goat horn/spyglass, ordinary vine spread).
+Progress update: 2026-09-06 (batch 3: bamboo, cave vines, jukebox, name tags, goat horn, spyglass, sign text; batch 4: sheep shearing, cow milking, Bedrock jukebox/name tags/goat horn/spyglass, ordinary vine spread; batch 5: shulker box, mooshroom stew, sheep regrowth, lectern, chiseled bookshelf; batch 6: glow ink sac/dye on signs, tripwire disarm, snow golem shearing, Bedrock collar/wool/sheared metadata).
 Reference implementation: Dragonfly v0.11.0 from the resolved Go module source.
 Protocol targets: Java Edition 1.21.4 and Bedrock Edition 1.26.45.
 
@@ -69,7 +69,15 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Lectern book insert/remove.** Right-clicking a lectern with a written_book or writable_book places it (has_book=true, powered=true). Right-clicking without a book ejects it into the inventory. Book stored in block entity slot 0; contents drop on break. Both Java and Bedrock.
 - **Chiseled bookshelf.** Six-slot book storage with cursor-position targeting (3×2 grid based on facing direction). Insert: holding book + empty slot. Eject: clicking occupied slot. slot_X_occupied block state updated. Books drop on break. Both Java and Bedrock.
 
-## Still left to do (as of batch 5)
+## Completed in batch 6 (2026-09-06)
+
+- **Glow ink sac and dye on signs.** Right-clicking a sign with a glow ink sac makes the front-face text glow (`has_glowing_text=1` in sign NBT). Right-clicking with a dye sets the text colour (`color` TAG_String). Ink sac removes glow. All 16 vanilla dye colours mapped to vanilla sign colour names. State preserved across sign-text edits via `SignState` (lines + glowing + color per face) stored on `BlockEntity`. Both Java and Bedrock.
+- **Tripwire disarm.** Right-clicking `minecraft:tripwire` with shears while `disarmed=false` sets `disarmed=true`, drops one string when not powered, and damages the shears. Both Java and Bedrock.
+- **Snow golem pumpkin removal.** Right-clicking a snow golem with shears when `HasPumpkin=true` removes the pumpkin face, drops a carved_pumpkin, damages shears, and broadcasts metadata (Java index 17 flags bit 0x10; Bedrock `EntityDataFlagSheared`). Snow golems now initialise with `HasPumpkin=true`.
+- **Bedrock sheep wool color and sheared metadata.** `bedrockEntityMetadata` now encodes `EntityDataKeyColorIndex` from `WoolColor` and sets `EntityDataFlagSheared` from `Sheared`. Change detection added to the entity-view diff.
+- **Bedrock collar color for wolf/cat.** `EntityDataKeyColorIndex` is set from `CollarColor` when the entity is tamed and the color is non-empty. Change detection added.
+
+## Still left to do (as of batch 6)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -79,22 +87,17 @@ implementation order; the largest remaining structural gaps first.
    bow/crossbow/trident/shield use paths (all currently Java-only or missing) and
    Elytra rocket boost.
 2. **Remaining stateful block entities.** Banner patterns, item/glow item frames.
-3. **Entity interactions.** Sheep dyeing, fish/axolotl/tadpole bucket capture, leads & leash
-   knots, horse/llama equipment UI, chest boats & storage minecarts, armour
-   stands.
-4. **Remaining random-tick / neighbour behaviour (order 7).** Bamboo growth,
-   cocoa jungle-log survival + bone meal, ordinary/cave vine spread and berries,
-   full fluid flow vectors / finite levels, and fire flammability nuances.
-5. **Workstation operations.** Beacon effects, enchanting offers, brewing timer &
-   transformations, anvil rename/enchant-merge/XP, grindstone disenchant, smithing
-   trims, loom patterns, cartography scaling — screens open but the defining
+3. **Entity interactions.** Leads & leash knots, horse/llama equipment UI, chest
+   boats & storage minecarts, armour stands.
+4. **Remaining random-tick / neighbour behaviour (order 7).** Cocoa jungle-log
+   survival + bone meal, full fluid flow vectors / finite levels, fire flammability nuances.
+5. **Workstation operations.** Beacon effects, enchanting offers, grindstone disenchant,
+   smithing trims, loom patterns, cartography scaling — screens open but the defining
    operation is absent.
-6. **Combat & survival depth (order 8).** Critical/sweep attacks, weapon &
-   armour enchantment families, tipped/spectral arrows, and the remaining
+6. **Combat & survival depth (order 8).** Tipped/spectral arrows, and the remaining
    exhaustion/hazard sources.
-7. **Ranged/utility items still missing outright.** Goat horn, spyglass, fishing
-   rod, brush, carrot/warped-fungus on a stick, writable/written books, music
-   discs, dyes on entities/signs, bundles, and maps.
+7. **Items still missing outright.** Fishing rod, brush, writable/written book editing,
+   bundles, and maps.
 
 Findings 3–5 (unified use dispatch, richer hand/use state, mining-time
 validation) remain only partially addressed.
@@ -188,8 +191,8 @@ inventory move, save, cross-edition sync, or restart.
 | Empty map / filled map | Partial | Partial | Empty map converts to a filled-map item and cartography accepts it, but map allocation, scale, lock, dimension, colours, decorations, exploration-map target, and live map packets are absent. |
 | Writable and written books | Missing | Missing | Pages, title, author, generation, editing/signing packets, validation, copying, and open-book interaction are absent. |
 | Music discs | Missing | Missing | Items exist, but insertion/ejection and playback require the missing jukebox behaviour. |
-| Dyes, ink sacs, glow ink sacs | Missing | Missing | No sheep dye, sign text colour, glowing sign text, collar colour, or other entity/block dye interaction. The loom accepts dye but cannot preserve a pattern result. |
-| Shears | Partial | Partial | Carving pumpkins (both editions), harvesting beehives (both editions), and sheep shearing (both editions, batch 4) now work. Mooshroom conversion, snow-golem carving, tripwire disarm, and complete sounds/durability are still absent. |
+| Dyes, ink sacs, glow ink sacs | Partial | Partial | Sheep dyeing, sign text colour, glowing sign text (glow ink sac), and collar colour (wolf/cat) now work (batch 6). Loom pattern preservation, cauldron leather/banner washing, and banner pattern application are still absent. |
+| Shears | Partial | Partial | Carving pumpkins, harvesting beehives, sheep shearing (batch 4), mooshroom conversion, snow-golem pumpkin removal, and tripwire disarm (batch 6) now work on both editions. Complete sounds/durability rules still need verification. |
 | Glass bottle | Partial | Partial | Bedrock fills from a full beehive. Java does not. Water-source and water-cauldron filling, dragon-breath collection, incremental cauldron levels, and complete remainders are missing. |
 | Water/lava/powder-snow buckets | Partial | Partial | Basic source and full-cauldron transfer works. Fish, axolotl, tadpole, and entity capture/release; waterlogging/unwaterlogging; ultrawarm evaporation; and full dispenser/cauldron cases are incomplete. |
 | Spawn eggs | Partial | Partial | A dispenser can spawn a generic entity. Player block/entity use, baby spawning, mob-specific NBT/state, placement validation, and unsupported-entity rejection are absent. |
@@ -243,7 +246,7 @@ operations before adding Java calls — was followed for all nine.
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
 | Dragon egg | Partial | Gravity is registered, but activate/punch teleport, particles, and creative exception are absent. |
 | Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument-from-block-below and canonical note sound/particle on rising edge still need coverage. |
-| Signs and hanging signs | Partial | Placement, empty block entities, and text editing (front/back, 4 lines, 15-char cap, JSON component NBT, broadcast) now work on Java. Wax, dye/glow, click events, and Bedrock text editing remain. |
+| Signs and hanging signs | Partial | Partial | Placement, text editing, dye colour, and glow ink sac / ink sac now work on both editions (batch 6). SignState (lines + glowing + color) preserved across edits. Wax, click events, and Bedrock text editing remain. |
 | Banners | Partial | Placement works. Pattern layers, loom output, shields carrying patterns, map markers, block-entity persistence, and wash-off in cauldrons are absent. |
 | Beacon | Partial | Both adapters can open a one-slot screen. Pyramid level, beam obstruction/colour, payment validation, selected effects, periodic area application, and persistence are absent. |
 | Enchanting table | Partial | The screen accepts item/lapis slots, but offers, bookshelf power, seed, XP/lapis cost, selection packet, and enchant application are absent. |
@@ -292,7 +295,7 @@ adapters unless noted:
 
 | Interaction | Status | Gap |
 | --- | --- | --- |
-| Sheep shearing and dyeing | Implemented (new) | Shearing drops 1–3 wool, marks Sheared=true, damages shears, broadcasts metadata on both editions. Regrowth (Sheared reset), dyeing, mooshroom conversion, and snow-golem carving remain. |
+| Sheep shearing and dyeing | Implemented (new) | Shearing, dyeing, wool regrowth, mooshroom conversion, snow-golem pumpkin removal, and Bedrock wool-color/sheared metadata all implemented. |
 | Cow/mooshroom milking | Implemented (new) | Bucket → milk bucket via shared interactAnimal path on both editions. Mooshroom mushroom-stew bowl, suspicious stew, and mooshroom→cow conversion remain. |
 | Fish/axolotl/tadpole bucket capture | Missing | No capture/release data, bucket replacement, variant preservation, or water placement. |
 | Leads and leash knots | Missing | No leash ownership, fence knot entity, distance physics, drop, or detach interaction. |
