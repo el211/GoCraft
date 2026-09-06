@@ -3,6 +3,36 @@ package world
 // Jukebox canonical operations: inserting a music disc sets the has_record
 // block property and stores the disc in the block entity; ejecting removes it.
 
+// musicDiscSignal maps each music disc to its vanilla comparator output (1–15).
+// Signal 0 means no disc; empty jukebox outputs 0.
+var musicDiscSignal = map[string]int{
+	"minecraft:music_disc_13":               1,
+	"minecraft:music_disc_cat":              2,
+	"minecraft:music_disc_blocks":           3,
+	"minecraft:music_disc_chirp":            4,
+	"minecraft:music_disc_far":              5,
+	"minecraft:music_disc_mall":             6,
+	"minecraft:music_disc_mellohi":          7,
+	"minecraft:music_disc_stal":             8,
+	"minecraft:music_disc_strad":            9,
+	"minecraft:music_disc_ward":             10,
+	"minecraft:music_disc_11":               11,
+	"minecraft:music_disc_wait":             12,
+	"minecraft:music_disc_otherside":        14,
+	"minecraft:music_disc_relic":            14,
+	"minecraft:music_disc_5":               15,
+	"minecraft:music_disc_pigstep":         13,
+	"minecraft:music_disc_precipice":       13,
+	"minecraft:music_disc_creator":         13,
+	"minecraft:music_disc_creator_music_box": 11,
+}
+
+// JukeboxComparatorSignal returns the comparator output for a jukebox: the
+// disc-specific signal strength (1–15) when playing, or 0 when empty.
+func JukeboxComparatorSignal(discItemID string) int {
+	return musicDiscSignal[discItemID]
+}
+
 // musicDiscItems is the set of valid music disc item IDs an enderman can place
 // into a jukebox. The map value is the sound event to play.
 var musicDiscItems = map[string]string{

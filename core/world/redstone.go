@@ -330,6 +330,12 @@ func (re *RedstoneEngine) analogOutputAt(x, y, z int) int {
 			return charges*4 - 1
 		}
 		return 0
+	case "minecraft:jukebox":
+		if block.Properties["has_record"] == "true" {
+			be := re.world.GetBlockEntity(x, y, z)
+			return JukeboxComparatorSignal(JukeboxRecordItem(be))
+		}
+		return 0
 	}
 	slots := redstoneContainerSlots(block.ResourceLocation())
 	if slots == 0 {

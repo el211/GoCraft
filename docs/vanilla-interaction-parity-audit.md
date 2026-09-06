@@ -84,6 +84,7 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Cauldron entity fire extinguish.** A burning mob standing inside a `minecraft:water_cauldron` block now has its `FireTicks` cleared and the cauldron's water level decremented (level 1 → empty cauldron). Checked every entity tick for any entity with `FireTicks > 0`.
 - **Bone meal on bamboo, kelp, cave vines, nether vines, and sea pickles.** `ApplyBoneMeal` now handles `minecraft:bamboo_sapling` (converts to segment), `minecraft:bamboo` tip (grows one block up), `minecraft:kelp` tip (grows one block up), `minecraft:cave_vines` tip (grows one block down), `minecraft:twisting_vines`/`minecraft:weeping_vines` tip (grows one block in direction), and `minecraft:sea_pickle` (increments pickles 1→4 when waterlogged). Both Java and Bedrock via shared `w.ApplyBoneMeal`.
 - **Grindstone enchantment removal and XP refund.** Non-curse enchantments are stripped from all grindstone output items. Curse enchantments (binding, vanishing) are preserved. XP is awarded to the Java player when they take the output (≈ 8 XP per enchantment level). Bedrock inventory action path also strips enchantments via shared `grindstoneOperation`.
+- **Jukebox comparator signal.** `analogOutputAt` now returns the disc-specific signal strength (1–15) from `JukeboxComparatorSignal` when a disc is playing; 0 when empty.
 
 ## Still left to do (as of batch 7)
 
@@ -248,12 +249,12 @@ operations before adding Java calls — was followed for all nine.
 
 | Block or family | Status | Missing or incomplete behaviour |
 | --- | --- | --- |
-| Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on both Java and Bedrock. All 19 vanilla disc sound events mapped. Comparator output remains. |
-| Lectern | Missing | Book insert/remove, pages, current page, UI, page-turn events, comparator output, redstone pulse, and persistence. It currently exists only as a generated village workstation/redstone name. |
-| Chiseled bookshelf | Missing | Six-slot inventory, targeted slot selection, book insertion/removal, block state, comparator signal, vibration, and persistence. |
+| Jukebox | Implemented (new) | Record insert (has_record state, slot 0 block entity, disc sound), eject (return disc, stop sound) wired on both Java and Bedrock. All 19 vanilla disc sound events mapped. Comparator now outputs the disc-specific signal strength (1–15) via `JukeboxComparatorSignal`. |
+| Lectern | Implemented (new) | Book insert/remove, `has_book` block state, slot 0 persistence, and book drop on break all work on both Java and Bedrock (batch 5). Pages, current page, UI, page-turn events, comparator output, and redstone pulse remain absent. |
+| Chiseled bookshelf | Implemented (new) | Six-slot book storage with cursor-targeted slot selection (3×2 grid), insert/eject, `slot_X_occupied` block state, and book drop on break all work on both Java and Bedrock (batch 5). Comparator signal and vibration remain absent. |
 | Item/glow item frame | Missing | See item table; Dragonfly implements this as a stateful block. |
 | Dragon egg | Implemented (new) | Right-click or dig-start teleports egg to random replaceable position (±7 x/z, ±1 y). Creative exception applied. Both Java and Bedrock. |
-| Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument-from-block-below and canonical note sound/particle on rising edge still need coverage. |
+| Note block | Implemented (new) | Tuning now runs through a shared canonical operation on both editions. Instrument is derived from the block-below on every tune/placement and stored in block state. A canonical note sound (`block.note_block.{instrument}`) is broadcast on every redstone rising edge via `playNoteBlock`. Particles remain absent. |
 | Signs and hanging signs | Partial | Partial | Placement, text editing, dye colour, and glow ink sac / ink sac now work on both editions (batch 6). SignState (lines + glowing + color) preserved across edits. Wax, click events, and Bedrock text editing remain. |
 | Banners | Partial | Placement works. Pattern layers, loom output, shields carrying patterns, map markers, block-entity persistence, and wash-off in cauldrons are absent. |
 | Beacon | Partial | Both adapters can open a one-slot screen. Pyramid level, beam obstruction/colour, payment validation, selected effects, periodic area application, and persistence are absent. |
