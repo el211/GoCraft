@@ -125,6 +125,20 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 	held := p.HeldItem()
 	item := held.ItemID
 
+	// Apply a name tag: sets the entity's custom name and consumes the tag.
+	if item == "minecraft:name_tag" {
+		name := held.DisplayName()
+		if name != "" {
+			if !s.consumeAnimalItem(p, "") {
+				return false
+			}
+			e.DisplayName = name
+			e.CustomNameVisible = true
+			s.broadcastAnimalState(e)
+			return true
+		}
+	}
+
 	// Shear a sheep: drops 1-3 wool and marks the sheep as sheared.
 	if item == "minecraft:shears" && e.Type == corentity.TypeSheep && !e.Sheared && !e.IsBaby {
 		woolColor := e.WoolColor
