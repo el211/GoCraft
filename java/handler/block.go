@@ -1194,6 +1194,7 @@ func handleUseItemOnWithIntents(pkt *protocol.Packet, p *player.Player, w *corew
 			pitch := float32(math.Pow(2, (float64(note)-12)/12))
 			broadcastSoundAt(mgr, "minecraft:block.note_block."+instrument, soundCategoryBlocks,
 				float64(bx)+0.5, float64(by)+0.5, float64(bz)+0.5, 3, pitch)
+			broadcastNoteBlockAction(int(bx), int(by), int(bz), note, tuned, mgr, p.Dimension)
 			sendAcknowledgeBlockChange(mgr, p, seq)
 			return nil
 		}

@@ -45,6 +45,7 @@ func (s *Server) playNoteBlock(x, y, z int, block coreworld.Block) {
 	handler.BroadcastSoundAtDimension(s.sessions, s.simulationDimension,
 		"minecraft:block.note_block."+instrument, 1, // category: blocks
 		float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 3, pitch)
+	handler.BroadcastNoteBlockAction(x, y, z, note, block, s.sessions, s.simulationDimension)
 }
 
 func (s *Server) ringBell(world *coreworld.World, dimension int32, position spatial.BlockPos, direction string) {

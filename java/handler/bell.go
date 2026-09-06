@@ -2,6 +2,7 @@ package handler
 
 import (
 	"GoCraft/core/spatial"
+	coreworld "GoCraft/core/world"
 	"GoCraft/java/protocol"
 	"GoCraft/java/session"
 	javaworld "GoCraft/java/world"
@@ -37,6 +38,38 @@ func javaBellDirection(direction string) byte {
 	default:
 		return 2
 	}
+}
+
+// broadcastNoteBlockAction sends the block_action packet that makes the Java
+// client render the floating note particle above the note block. The note value
+// (0–24) selects the particle colour. Both the block-position encoding and the
+// block-type ID (VarInt) are required by the protocol.
+func broadcastNoteBlockAction(x, y, z, note int, block coreworld.Block, mgr *session.Manager, dimension int32) {
+	if mgr == nil {
+		return
+	}
+	noteBlockID, ok := javaworld.BlockTypeID(block.ResourceLocation())
+	if !ok {
+		return
+	}
+	pos := spatial.BlockPos{X: int32(x), Y: int32(y), Z: int32(z)}
+	pkt := protocol.NewBuilder(packetIDBlockAction).
+		Long(pos.Encode()).
+		Byte(0).            // action type 0 = play note
+		Byte(byte(note)).   // note value 0–24
+		VarInt(noteBlockID).
+		Build()
+	for _, cur := range mgr.SnapshotAll() {
+		if cur.Player == nil || cur.Player.Dimension != dimension {
+			continue
+		}
+		_ = cur.Conn.WritePacket(pkt)
+	}
+}
+
+// BroadcastNoteBlockAction is the exported version for use from server/bell.go.
+func BroadcastNoteBlockAction(x, y, z, note int, block coreworld.Block, mgr *session.Manager, dimension int32) {
+	broadcastNoteBlockAction(x, y, z, note, block, mgr, dimension)
 }
 
 // BroadcastBellRing sends the transient bell animation and sound to Java
