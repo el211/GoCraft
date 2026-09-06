@@ -288,6 +288,11 @@ func handleContainerClick(pkt *protocol.Packet, p *player.Player, conn *network.
 	}
 	if windowID == workstationContainerID && p.OpenContainerID == windowID && IsWorkstation(p.OpenContainerKind) {
 		handleWorkstationClick(p, int(slot), button, mode)
+		if xp := p.PendingWorkstationXP; xp > 0 {
+			p.PendingWorkstationXP = 0
+			p.AddExperience(xp)
+			_ = sendExperience(conn, p)
+		}
 		return sendChestContainerContent(conn, p)
 	}
 	if windowID != craftingTableContainerID || p.OpenContainerID != windowID || p.OpenContainerKind != "minecraft:crafting_table" {

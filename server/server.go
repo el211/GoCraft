@@ -2440,7 +2440,7 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 				}
 				craftingResult = handler.FindBedrockCraftingTableResult(craftingGrid)
 			} else if workstationOutput {
-				result, ok := handler.TakeWorkstationResult(p.OpenContainerKind, containerSlots, p.WorkstationSelection)
+				result, _, ok := handler.TakeWorkstationResult(p.OpenContainerKind, containerSlots, p.WorkstationSelection)
 				if !ok || !result.SameItem(source) || result.Count != action.Count {
 					return
 				}
@@ -2471,7 +2471,7 @@ func (s *Server) applyBedrockInventory(i intent.InventoryIntent) {
 				if action.Count != source.Count {
 					return
 				}
-				result, ok := handler.TakeWorkstationResult(p.OpenContainerKind, containerSlots, p.WorkstationSelection)
+				result, _, ok := handler.TakeWorkstationResult(p.OpenContainerKind, containerSlots, p.WorkstationSelection)
 				if !ok || !result.SameItem(source) || result.Count != action.Count {
 					return
 				}

@@ -105,10 +105,11 @@ func takeWorkstationOutputToCursor(p *player.Player) {
 			p.CarriedItem.Count+preview.Count > player.MaxStackSize(preview.ItemID))) {
 		return
 	}
-	result, ok := TakeWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
+	result, xp, ok := TakeWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
 	if !ok {
 		return
 	}
+	p.PendingWorkstationXP += xp
 	if p.CarriedItem.IsEmpty() {
 		p.CarriedItem = result
 	} else {
@@ -126,9 +127,11 @@ func shiftWorkstationOutput(p *player.Player) {
 		if !addStackToInventory(&inventory, p.ContainerSlots[output]) {
 			return
 		}
-		if _, ok := TakeWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection); !ok {
+		_, xp, ok := TakeWorkstationResult(p.OpenContainerKind, p.ContainerSlots, p.WorkstationSelection)
+		if !ok {
 			return
 		}
+		p.PendingWorkstationXP += xp
 		p.Inventory = inventory
 	}
 }
@@ -451,6 +454,7 @@ func SyncBrewingContainer(conn *network.ClientConn, p *player.Player, brewTime, 
 type workstationOperation struct {
 	result  player.ItemStack
 	consume []int
+	xp      int32 // XP to award the player on output take (grindstone disenchant)
 }
 
 // UpdateWorkstationResult recomputes the server-authoritative preview. Client
@@ -464,12 +468,13 @@ func UpdateWorkstationResult(kind string, slots []player.ItemStack, selection in
 }
 
 // TakeWorkstationResult consumes the exact inputs for the current preview and
-// returns one indivisible result stack. It is the only supported way to remove
-// a non-empty workstation output.
-func TakeWorkstationResult(kind string, slots []player.ItemStack, selection int) (player.ItemStack, bool) {
+// returns one indivisible result stack and any XP to award the player (e.g.
+// from grindstone disenchanting). It is the only supported way to remove a
+// non-empty workstation output.
+func TakeWorkstationResult(kind string, slots []player.ItemStack, selection int) (player.ItemStack, int32, bool) {
 	operation := workstationOperationFor(kind, slots, selection)
 	if operation.result.IsEmpty() {
-		return player.ItemStack{}, false
+		return player.ItemStack{}, 0, false
 	}
 	for index, count := range operation.consume {
 		if count <= 0 || index < 0 || index >= len(slots) || slots[index].Count < count {
@@ -479,7 +484,7 @@ func TakeWorkstationResult(kind string, slots []player.ItemStack, selection int)
 		normalizeStack(&slots[index])
 	}
 	UpdateWorkstationResult(kind, slots, selection)
-	return operation.result, true
+	return operation.result, operation.xp, true
 }
 
 func workstationOperationFor(kind string, slots []player.ItemStack, selection int) workstationOperation {
@@ -551,19 +556,80 @@ func grindstoneOperation(slots []player.ItemStack) workstationOperation {
 		return workstationOperation{}
 	}
 	if first.IsEmpty() || second.IsEmpty() {
-		result, index := first, 0
-		if result.IsEmpty() {
-			result, index = second, 1
+		single, index := first, 0
+		if single.IsEmpty() {
+			single, index = second, 1
 		}
-		result.Count = 1
+		stripped, xp := grindstoneStrip(single)
+		stripped.Count = 1
 		consume := make([]int, 2)
 		consume[index] = 1
-		return workstationOperation{result: result, consume: consume}
+		return workstationOperation{result: stripped, consume: consume, xp: xp}
 	}
 	if first.ItemID != second.ItemID || player.MaxDurability(first.ItemID) == 0 {
 		return workstationOperation{}
 	}
-	return workstationOperation{result: repairedStack(first, second, 5), consume: []int{1, 1}}
+	repaired := repairedStack(first, second, 5)
+	xp := grindstoneXP(first) + grindstoneXP(second)
+	repaired.Enchantments = grindstoneKeepCurses(first, second)
+	return workstationOperation{result: repaired, consume: []int{1, 1}, xp: xp}
+}
+
+// grindstoneStrip removes all non-curse enchantments from a stack, returning
+// the stripped stack and the XP value of the removed enchantments.
+func grindstoneStrip(s player.ItemStack) (player.ItemStack, int32) {
+	xp := grindstoneXP(s)
+	curses := grindstoneKeepCurses(s)
+	result := s
+	result.Enchantments = curses
+	return result, xp
+}
+
+// grindstoneXP returns the XP refund for stripping enchantments from a stack.
+// Each enchantment level contributes ~8 XP (a rough vanilla approximation).
+func grindstoneXP(s player.ItemStack) int32 {
+	var total int32
+	for _, e := range s.EnchantmentLevels() {
+		if e.ID == "minecraft:binding_curse" || e.ID == "minecraft:vanishing_curse" {
+			continue
+		}
+		total += int32(e.Level) * 8
+	}
+	if total < 0 {
+		total = 0
+	}
+	return total
+}
+
+// grindstoneKeepCurses encodes only the curse enchantments from one or two
+// stacks for the grindstone output.
+func grindstoneKeepCurses(stacks ...player.ItemStack) string {
+	curses := []player.EnchantmentLevel{}
+	for _, s := range stacks {
+		for _, e := range s.EnchantmentLevels() {
+			if e.ID != "minecraft:binding_curse" && e.ID != "minecraft:vanishing_curse" {
+				continue
+			}
+			found := false
+			for i, c := range curses {
+				if c.ID == e.ID {
+					if e.Level > c.Level {
+						curses[i].Level = e.Level
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				curses = append(curses, e)
+			}
+		}
+	}
+	if len(curses) == 0 {
+		return ""
+	}
+	encoded, _ := player.EncodeEnchantments(curses)
+	return encoded
 }
 
 func repairedStack(first, second player.ItemStack, bonusPercent int) player.ItemStack {

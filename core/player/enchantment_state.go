@@ -28,6 +28,13 @@ func DecodeEnchantments(encoded string) ([]EnchantmentLevel, error) {
 	return values, nil
 }
 
+// EncodeEnchantments serialises a list of enchantment levels into the compact
+// "id=level;…" string used by ItemStack.Enchantments. The second return value
+// is always nil and exists only so callers can use the multi-return form.
+func EncodeEnchantments(values []EnchantmentLevel) (string, error) {
+	return encodeEnchantments(values), nil
+}
+
 func encodeEnchantments(values []EnchantmentLevel) string {
 	sort.Slice(values, func(i, j int) bool { return values[i].ID < values[j].ID })
 	parts := make([]string, len(values))

@@ -40,7 +40,7 @@ func TestSmithingOutputConsumesOnlyMatchingProfessionSlots(t *testing.T) {
 	if got := slots[3]; got.ItemID != "minecraft:netherite_pickaxe" || got.Count != 1 || got.Damage != 125 {
 		t.Fatalf("smithing preview = %+v", got)
 	}
-	result, ok := TakeWorkstationResult("minecraft:smithing_table", slots, 0)
+	result, _, ok := TakeWorkstationResult("minecraft:smithing_table", slots, 0)
 	if !ok || result.ItemID != "minecraft:netherite_pickaxe" {
 		t.Fatalf("smithing take = %+v, %v", result, ok)
 	}
@@ -87,7 +87,40 @@ func TestStonecutterUsesPublishedVanillaRecipeSelection(t *testing.T) {
 	if slots[1].IsEmpty() || slots[1].ItemID == "minecraft:cobblestone" {
 		t.Fatalf("stonecutter preview = %+v", slots[1])
 	}
-	if _, ok := TakeWorkstationResult("minecraft:stonecutter", slots, 0); !ok || slots[0].Count != 1 {
+	if _, _, ok := TakeWorkstationResult("minecraft:stonecutter", slots, 0); !ok || slots[0].Count != 1 {
 		t.Fatalf("stonecutter did not consume one input: %+v", slots)
+	}
+}
+
+func TestGrindstoneStripsEnchantmentsAndReturnsXP(t *testing.T) {
+	enchanted := player.ItemStack{ItemID: "minecraft:diamond_sword", Count: 1}
+	enchanted.Enchant("minecraft:sharpness", 3)
+	enchanted.Enchant("minecraft:vanishing_curse", 1)
+
+	slots := []player.ItemStack{enchanted, {}, {}}
+	UpdateWorkstationResult("minecraft:grindstone", slots, 0)
+	preview := slots[2]
+	if preview.IsEmpty() || preview.ItemID != "minecraft:diamond_sword" {
+		t.Fatalf("grindstone preview = %+v", preview)
+	}
+	if preview.EnchantmentLevel("minecraft:sharpness") != 0 {
+		t.Fatalf("grindstone preview still has sharpness: %s", preview.Enchantments)
+	}
+	if preview.EnchantmentLevel("minecraft:vanishing_curse") == 0 {
+		t.Fatalf("grindstone preview dropped vanishing_curse: %s", preview.Enchantments)
+	}
+
+	result, xp, ok := TakeWorkstationResult("minecraft:grindstone", slots, 0)
+	if !ok || result.ItemID != "minecraft:diamond_sword" {
+		t.Fatalf("grindstone take = %+v, ok=%v", result, ok)
+	}
+	if xp <= 0 {
+		t.Fatalf("grindstone returned no XP for sharpness 3: xp=%d", xp)
+	}
+	if result.EnchantmentLevel("minecraft:sharpness") != 0 {
+		t.Fatalf("grindstone result still has sharpness: %s", result.Enchantments)
+	}
+	if result.EnchantmentLevel("minecraft:vanishing_curse") == 0 {
+		t.Fatalf("grindstone result dropped vanishing_curse: %s", result.Enchantments)
 	}
 }

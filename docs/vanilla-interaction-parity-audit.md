@@ -76,12 +76,16 @@ Batch 2 (random-tick block growth, `core/world`, all deterministically tested):
 - **Snow golem pumpkin removal.** Right-clicking a snow golem with shears when `HasPumpkin=true` removes the pumpkin face, drops a carved_pumpkin, damages shears, and broadcasts metadata (Java index 17 flags bit 0x10; Bedrock `EntityDataFlagSheared`). Snow golems now initialise with `HasPumpkin=true`.
 - **Bedrock sheep wool color and sheared metadata.** `bedrockEntityMetadata` now encodes `EntityDataKeyColorIndex` from `WoolColor` and sets `EntityDataFlagSheared` from `Sheared`. Change detection added to the entity-view diff.
 - **Bedrock collar color for wolf/cat.** `EntityDataKeyColorIndex` is set from `CollarColor` when the entity is tamed and the color is non-empty. Change detection added.
+
+## Completed in batch 7 (2026-09-06)
+
 - **Dragon egg teleport.** Right-clicking or beginning to punch the dragon egg in non-creative mode now teleports it to a random replaceable position (±7 x/z, ±1 y, up to 1 000 attempts). Creative players can break it normally. Both Java and Bedrock.
 - **Sponge nether instant drying.** Wet sponge placed in the Nether (ultrawarm world) instantly converts to a dry sponge. `World.SetUltrawarm(true)` enables the flag; the nether world sets it on startup.
 - **Cauldron entity fire extinguish.** A burning mob standing inside a `minecraft:water_cauldron` block now has its `FireTicks` cleared and the cauldron's water level decremented (level 1 → empty cauldron). Checked every entity tick for any entity with `FireTicks > 0`.
 - **Bone meal on bamboo, kelp, cave vines, nether vines, and sea pickles.** `ApplyBoneMeal` now handles `minecraft:bamboo_sapling` (converts to segment), `minecraft:bamboo` tip (grows one block up), `minecraft:kelp` tip (grows one block up), `minecraft:cave_vines` tip (grows one block down), `minecraft:twisting_vines`/`minecraft:weeping_vines` tip (grows one block in direction), and `minecraft:sea_pickle` (increments pickles 1→4 when waterlogged). Both Java and Bedrock via shared `w.ApplyBoneMeal`.
+- **Grindstone enchantment removal and XP refund.** Non-curse enchantments are stripped from all grindstone output items. Curse enchantments (binding, vanishing) are preserved. XP is awarded to the Java player when they take the output (≈ 8 XP per enchantment level). Bedrock inventory action path also strips enchantments via shared `grindstoneOperation`.
 
-## Still left to do (as of batch 6)
+## Still left to do (as of batch 7)
 
 Nothing below is claimed complete. Ordered roughly by the original
 implementation order; the largest remaining structural gaps first.
@@ -256,7 +260,7 @@ operations before adding Java calls — was followed for all nine.
 | Enchanting table | Partial | The screen accepts item/lapis slots, but offers, bookshelf power, seed, XP/lapis cost, selection packet, and enchant application are absent. |
 | Brewing stand | Partial | Persistent slots and generic hopper movement exist, but blaze fuel, brew timer, ingredient transformations, potion payloads, bottle properties, and slot-aware automation are absent. |
 | Anvil | Partial | Basic material/same-item repair exists. Rename, enchant merging, prior-work penalty, XP cost, too-expensive rules, anvil damage, and output feedback are absent. |
-| Grindstone | Partial | Basic combining/output exists. Enchantment removal rules, curses, XP refund, costs, and sounds are absent. |
+| Grindstone | Partial | Basic combining/output exists. Non-curse enchantments are now stripped from both input items and the output, curses (binding, vanishing) are preserved, and XP is awarded to the player (≈ 8 XP per enchantment level). Sounds remain absent. |
 | Smithing table | Partial | Upgrade item-ID transforms exist. Armour trims and trim material/pattern components cannot be produced or preserved. |
 | Loom | Partial | It consumes a banner and dye but returns an unchanged banner because pattern data has no canonical representation. Selection, six-layer limit, and full pattern rules are absent. |
 | Stonecutter | Partial | Recipe selection/output exists. Adapter selection parity and complete feedback/validation require tests. |

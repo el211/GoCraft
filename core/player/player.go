@@ -94,6 +94,9 @@ type Player struct {
 	ExperienceTotal      int32
 	ExperienceProgress   float32
 	experiencePickupTick int64
+	// PendingWorkstationXP accumulates XP from grindstone disenchanting that
+	// has not yet been broadcast; crafting.go drains and syncs it.
+	PendingWorkstationXP int32
 	tags                 map[string]struct{}
 	Dead                 bool
 	LastDamageCause      string
