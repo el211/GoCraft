@@ -323,24 +323,31 @@ func (s *Supervisor) Dispatch(ctx context.Context, pluginID string, event *abi.E
 // still be cold when the tick was waiting on it. This is the path, so there is
 // nothing to forget.
 //
-// The event carries no payload. The runtime has to know the layout to decode a
-// real one, so it supplies its own blank rather than being sent a shape it
-// already has.
+// The event carries a payload of its own shape, and that is not a detail. The
+// first version of this sent an empty one and let the runtime build its own,
+// which left the whole path that *carries values* untouched — the marshal here,
+// the protobuf parse there, the conversion back — and moved the first dispatch
+// by nothing at all. Encoded through ipc.EncodeEvent like any other event, for
+// the same reason.
 //
 // A failure is returned and not fatal to the caller: a runtime that cannot warm
 // itself is slow on its first event, which is what it was before this existed.
-func (s *Supervisor) Warm(ctx context.Context, pluginID, event string) error {
+func (s *Supervisor) Warm(ctx context.Context, pluginID string, event *abi.Event) error {
+	encoded, err := ipc.EncodeEvent(event)
+	if err != nil {
+		return err
+	}
 	conn, err := s.conn()
 	if err != nil {
 		return err
 	}
 	reply, err := conn.Request(ctx, &wire.Envelope{Body: &wire.Envelope_Dispatch{Dispatch: &wire.Dispatch{
 		PluginId: pluginID,
-		Event:    &wire.Event{Type: event},
+		Event:    encoded,
 		Warm:     true,
 	}}})
 	if err != nil {
-		return fmt.Errorf("ipc: %s: warm %s for %s: %w", s.config.Runtime, event, pluginID, err)
+		return fmt.Errorf("ipc: %s: warm %s for %s: %w", s.config.Runtime, event.Type, pluginID, err)
 	}
 	if reply.GetVerdict() == nil {
 		return fmt.Errorf("ipc: %s: %w: answered a warm DISPATCH with %T",
