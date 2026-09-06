@@ -590,6 +590,86 @@ func (w *World) grassBoneMeal(x, y, z int, seed uint64) []BlockChange {
 	return changes
 }
 
+// myceliumBoneMeal performs the 128-attempt mushroom scatter when bone meal is
+// applied to a mycelium block. Brown and red mushrooms are placed above any
+// mycelium block with air above it within a ±4 x/z area.
+func (w *World) myceliumBoneMeal(x, y, z int, seed uint64) []BlockChange {
+	mushrooms := [...]string{"minecraft:brown_mushroom", "minecraft:red_mushroom"}
+	changes := make([]BlockChange, 0, 4)
+	rng := seed ^ uint64(x)*cropGateSalt ^ uint64(y)*cropBoneMealSalt ^ uint64(z)*cropDirectionSalt
+	for range 128 {
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dx := int(rng>>1%9) - 4
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dz := int(rng>>1%9) - 4
+		tx, tz := x+dx, z+dz
+		below := w.GetBlock(tx, y, tz)
+		if below.ResourceLocation() != "minecraft:mycelium" {
+			continue
+		}
+		above, loaded := w.blockIfLoaded(tx, y+1, tz)
+		if !loaded || !above.IsAir() {
+			continue
+		}
+		rng = rng*6364136223846793005 + 1442695040888963407
+		mush := mushrooms[rng>>1%2]
+		block := Block{Namespace: "minecraft", Name: mush[len("minecraft:"):]}
+		w.SetBlock(tx, y+1, tz, block)
+		changes = append(changes, BlockChange{X: tx, Y: y + 1, Z: tz, Block: block})
+	}
+	return changes
+}
+
+// mossBoneMealSurface lists blocks that bone meal on moss can convert or place on.
+var mossBoneMealSurface = map[string]bool{
+	"minecraft:moss_block": true, "minecraft:stone": true, "minecraft:cobblestone": true,
+	"minecraft:dirt": true, "minecraft:grass_block": true, "minecraft:gravel": true,
+}
+
+// mossBoneMeal performs the spread when bone meal is applied to a moss block.
+// In a 5×5 area it converts eligible surface blocks to moss and places moss
+// carpet or small plants above them, within the same budget of 128 attempts.
+func (w *World) mossBoneMeal(x, y, z int, seed uint64) []BlockChange {
+	changes := make([]BlockChange, 0, 8)
+	rng := seed ^ uint64(x)*cropGateSalt ^ uint64(y)*cropBoneMealSalt ^ uint64(z)*cropLegacyTickSalt
+	for range 128 {
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dx := int(rng>>1%9) - 4
+		rng = rng*6364136223846793005 + 1442695040888963407
+		dz := int(rng>>1%9) - 4
+		tx, tz := x+dx, z+dz
+		surface := w.GetBlock(tx, y, tz)
+		surfName := surface.ResourceLocation()
+		if !mossBoneMealSurface[surfName] {
+			continue
+		}
+		above, loaded := w.blockIfLoaded(tx, y+1, tz)
+		if !loaded || !above.IsAir() {
+			continue
+		}
+		// Convert the surface to moss if it is not already.
+		if surfName != "minecraft:moss_block" {
+			mossBlock := Block{Namespace: "minecraft", Name: "moss_block"}
+			w.SetBlock(tx, y, tz, mossBlock)
+			changes = append(changes, BlockChange{X: tx, Y: y, Z: tz, Block: mossBlock})
+		}
+		// Place moss carpet or a small plant above.
+		rng = rng*6364136223846793005 + 1442695040888963407
+		var top Block
+		switch rng >> 1 % 3 {
+		case 0:
+			top = Block{Namespace: "minecraft", Name: "moss_carpet"}
+		case 1:
+			top = Block{Namespace: "minecraft", Name: "short_grass"}
+		default:
+			top = Block{Namespace: "minecraft", Name: "azalea"}
+		}
+		w.SetBlock(tx, y+1, tz, top)
+		changes = append(changes, BlockChange{X: tx, Y: y + 1, Z: tz, Block: top})
+	}
+	return changes
+}
+
 // ApplyBoneMeal applies one crop bonemeal interaction. used reports whether
 // the target accepted bonemeal, even when beetroot's integer-divided roll adds
 // zero stages. Nether wart deliberately never accepts bonemeal.
@@ -600,6 +680,18 @@ func (w *World) ApplyBoneMeal(x, y, z int, seed uint64) (changes []BlockChange, 
 	// Grass block: scatter vegetation over a 9×9 area above.
 	if name == "minecraft:grass_block" {
 		changes = w.grassBoneMeal(x, y, z, seed)
+		return changes, true
+	}
+
+	// Mycelium: scatter mushrooms in a ±4 area (same 128-attempt pattern as grass).
+	if name == "minecraft:mycelium" {
+		changes = w.myceliumBoneMeal(x, y, z, seed)
+		return changes, true
+	}
+
+	// Moss block: spread moss carpet and a few plants on top.
+	if name == "minecraft:moss_block" {
+		changes = w.mossBoneMeal(x, y, z, seed)
 		return changes, true
 	}
 
