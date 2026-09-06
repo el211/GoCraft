@@ -1054,6 +1054,64 @@ func (w *World) SetBlockEntity(x, y, z int, blockEntityType string, data []byte)
 	w.notifyBlockEntityObserver(snapshot)
 }
 
+// SignState bundles all sign-specific state that must survive text edits and
+// item interactions (glow ink sac, dye).
+type SignState struct {
+	FrontLines   [4]string
+	BackLines    [4]string
+	FrontGlowing bool
+	BackGlowing  bool
+	FrontColor   string // "" = default ("black")
+	BackColor    string // "" = default ("black")
+}
+
+// SetBlockEntitySign stores or replaces a sign block entity, persisting the
+// sign state (lines, glowing, color) alongside the raw NBT data.
+func (w *World) SetBlockEntitySign(x, y, z int, data []byte, state SignState) {
+	cx := int32(math.Floor(float64(x) / SectionSize))
+	cz := int32(math.Floor(float64(z) / SectionSize))
+	c := w.Chunk(cx, cz)
+
+	w.containerMu.Lock()
+	updated := false
+	var snapshot BlockEntity
+	for index := range c.BlockEntities {
+		entity := &c.BlockEntities[index]
+		if entity.X == x && entity.Y == y && entity.Z == z {
+			entity.Type = "minecraft:sign"
+			entity.Data = append([]byte(nil), data...)
+			entity.SignFrontLines = state.FrontLines
+			entity.SignBackLines = state.BackLines
+			entity.SignFrontGlowing = state.FrontGlowing
+			entity.SignBackGlowing = state.BackGlowing
+			entity.SignFrontColor = state.FrontColor
+			entity.SignBackColor = state.BackColor
+			snapshot = *entity
+			updated = true
+			break
+		}
+	}
+	if !updated {
+		snapshot = BlockEntity{
+			X: x, Y: y, Z: z, Type: "minecraft:sign",
+			Data:             append([]byte(nil), data...),
+			SignFrontLines:   state.FrontLines, SignBackLines: state.BackLines,
+			SignFrontGlowing: state.FrontGlowing, SignBackGlowing: state.BackGlowing,
+			SignFrontColor:   state.FrontColor, SignBackColor: state.BackColor,
+		}
+		c.BlockEntities = append(c.BlockEntities, snapshot)
+	}
+	w.containerMu.Unlock()
+
+	w.mu.Lock()
+	key := [2]int32{cx, cz}
+	w.chunks[key] = c
+	w.touchChunkLocked(key)
+	w.dirty[key] = struct{}{}
+	w.mu.Unlock()
+	w.notifyBlockEntityObserver(snapshot)
+}
+
 // SetBlock places block at absolute world coordinates (x, y, z).
 // The chunk is loaded or generated on demand.
 // Out-of-bounds Y is silently ignored.

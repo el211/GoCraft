@@ -189,6 +189,40 @@ func (s *Server) applyBedrockItemAction(p *player.Player, i intent.BlockInteract
 		}
 	}
 
+	if handler.IsSignBlock(name) {
+		if item == "minecraft:glow_ink_sac" || item == "minecraft:ink_sac" {
+			entity := s.bedrockWorld().GetBlockEntity(x, y, z)
+			glowing := item == "minecraft:glow_ink_sac"
+			if entity.SignFrontGlowing == glowing {
+				return true
+			}
+			state := coreworld.SignState{
+				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
+				FrontGlowing: glowing, BackGlowing: entity.SignBackGlowing,
+				FrontColor: entity.SignFrontColor, BackColor: entity.SignBackColor,
+			}
+			data := handler.BuildSignNBTFromState(state)
+			s.bedrockWorld().SetBlockEntitySign(x, y, z, data, state)
+			s.consumeBedrockHeldItem(p, 1)
+			return true
+		}
+		if color := handler.SignDyeColor(item); color != "" {
+			entity := s.bedrockWorld().GetBlockEntity(x, y, z)
+			if entity.SignFrontColor == color {
+				return true
+			}
+			state := coreworld.SignState{
+				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
+				FrontGlowing: entity.SignFrontGlowing, BackGlowing: entity.SignBackGlowing,
+				FrontColor: color, BackColor: entity.SignBackColor,
+			}
+			data := handler.BuildSignNBTFromState(state)
+			s.bedrockWorld().SetBlockEntitySign(x, y, z, data, state)
+			s.consumeBedrockHeldItem(p, 1)
+			return true
+		}
+	}
+
 	if item == "minecraft:glass_bottle" {
 		var waterBottle player.ItemStack
 		waterBottle.ItemID = "minecraft:potion"

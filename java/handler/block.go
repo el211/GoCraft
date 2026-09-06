@@ -1948,6 +1948,58 @@ func useToolOrPlant(x, y, z int, face int32, target coreworld.Block, p *player.P
 		return false
 	}
 
+	if isSignBlock(target.ResourceLocation()) {
+		if held.ItemID == "minecraft:glow_ink_sac" || held.ItemID == "minecraft:ink_sac" {
+			entity := w.GetBlockEntity(x, y, z)
+			glowing := held.ItemID == "minecraft:glow_ink_sac"
+			// Only change if this actually toggles something.
+			if entity.SignFrontGlowing == glowing {
+				return true
+			}
+			state := coreworld.SignState{
+				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
+				FrontGlowing: glowing, BackGlowing: entity.SignBackGlowing,
+				FrontColor: entity.SignFrontColor, BackColor: entity.SignBackColor,
+			}
+			data := buildSignNBTFromState(state)
+			w.SetBlockEntitySign(x, y, z, data, state)
+			BroadcastBlockEntityDataInDimension(w.GetBlockEntity(x, y, z), mgr, p.Dimension)
+			if p.GameMode != player.GameModeCreative {
+				slot := player.HotbarStart + p.HeldSlot
+				p.Inventory[slot].Count--
+				normalizeStack(&p.Inventory[slot])
+			}
+			sound := "minecraft:item.glow_ink_sac.use"
+			if !glowing {
+				sound = "minecraft:item.ink_sac.use"
+			}
+			broadcastSoundAt(mgr, sound, soundCategoryPlayers, float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+			return true
+		}
+		if color := signDyeColor(held.ItemID); color != "" {
+			entity := w.GetBlockEntity(x, y, z)
+			if entity.SignFrontColor == color {
+				return true
+			}
+			state := coreworld.SignState{
+				FrontLines: entity.SignFrontLines, BackLines: entity.SignBackLines,
+				FrontGlowing: entity.SignFrontGlowing, BackGlowing: entity.SignBackGlowing,
+				FrontColor: color, BackColor: entity.SignBackColor,
+			}
+			data := buildSignNBTFromState(state)
+			w.SetBlockEntitySign(x, y, z, data, state)
+			BroadcastBlockEntityDataInDimension(w.GetBlockEntity(x, y, z), mgr, p.Dimension)
+			if p.GameMode != player.GameModeCreative {
+				slot := player.HotbarStart + p.HeldSlot
+				p.Inventory[slot].Count--
+				normalizeStack(&p.Inventory[slot])
+			}
+			broadcastSoundAt(mgr, "minecraft:item.dye.use", soundCategoryPlayers,
+				float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, 1, 1)
+			return true
+		}
+	}
+
 	if held.ItemID == "minecraft:flint_and_steel" || held.ItemID == "minecraft:fire_charge" {
 		if target.ResourceLocation() == "minecraft:tnt" &&
 			primeJavaTNT(x, y, z, w, mgr, nextEntityID, p.Dimension) {

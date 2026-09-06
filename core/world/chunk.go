@@ -47,6 +47,15 @@ type BlockEntity struct {
 	Data           []byte
 	Items          []ContainerItem
 	PotDecorations [4]string
+
+	// Sign-specific state. Lines are kept so that glowing/color edits can
+	// rebuild the NBT without re-parsing the raw bytes.
+	SignFrontLines   [4]string
+	SignBackLines    [4]string
+	SignFrontGlowing bool
+	SignBackGlowing  bool
+	SignFrontColor   string // "" means default ("black")
+	SignBackColor    string // "" means default ("black")
 }
 
 // ContainerItem is an edition-independent item stored in a block container.

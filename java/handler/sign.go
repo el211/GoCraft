@@ -52,18 +52,36 @@ func handleSignUpdate(pkt *protocol.Packet, p *player.Player, w *coreworld.World
 		return nil
 	}
 
-	data := buildSignNBT(lines, isFront)
-	w.SetBlockEntity(bx, by, bz, "minecraft:sign", data)
+	// Preserve existing glowing/color state across text edits.
+	existing := w.GetBlockEntity(bx, by, bz)
+	state := coreworld.SignState{
+		FrontGlowing: existing.SignFrontGlowing,
+		BackGlowing:  existing.SignBackGlowing,
+		FrontColor:   existing.SignFrontColor,
+		BackColor:    existing.SignBackColor,
+	}
+	if isFront {
+		state.FrontLines = lines
+		state.BackLines = existing.SignBackLines
+	} else {
+		state.FrontLines = existing.SignFrontLines
+		state.BackLines = lines
+	}
+	data := buildSignNBTFull(lines, isFront, state.FrontGlowing, state.BackGlowing, state.FrontColor, state.BackColor)
+	w.SetBlockEntitySign(bx, by, bz, data, state)
 	entity := w.GetBlockEntity(bx, by, bz)
 	BroadcastBlockEntityDataInDimension(entity, mgr, p.Dimension)
 	return nil
 }
 
-// isSignBlock returns true for any standing or wall sign block.
-func isSignBlock(name string) bool {
+// IsSignBlock returns true for any standing or wall sign block.
+func IsSignBlock(name string) bool {
 	return strings.HasSuffix(name, "_sign") || strings.HasSuffix(name, "_wall_sign") ||
 		strings.HasSuffix(name, "_hanging_sign") || strings.HasSuffix(name, "_wall_hanging_sign")
 }
+
+// isSignBlock is the package-local alias.
+func isSignBlock(name string) bool { return IsSignBlock(name) }
 
 // decodeBlockPos unpacks a 64-bit packed block position into x, y, z.
 func decodeBlockPos(pos int64) (x, y, z int) {
@@ -73,24 +91,29 @@ func decodeBlockPos(pos int64) (x, y, z int) {
 	return
 }
 
-// buildSignNBT encodes the four sign lines into a minimal network-NBT compound
-// matching the Java 1.21.4 sign block entity format. Text is stored as plain
-// JSON text components in the messages list of the front or back text object.
-func buildSignNBT(lines [4]string, isFront bool) []byte {
+// buildSignNBTFull encodes sign lines into a minimal network-NBT compound
+// matching the Java 1.21.4 sign block entity format, preserving glowing and
+// color state for both faces.
+func buildSignNBTFull(lines [4]string, isFront bool, frontGlowing, backGlowing bool, frontColor, backColor string) []byte {
 	var buf bytes.Buffer
 	buf.WriteByte(0x0A) // root TAG_Compound (no name in network NBT)
 	if isFront {
-		writeSignTextNBT(&buf, "front_text", lines)
-		writeSignEmptyNBT(&buf, "back_text")
+		writeSignTextNBT(&buf, "front_text", lines, frontGlowing, frontColor)
+		writeSignEmptyNBT(&buf, "back_text", backGlowing, backColor)
 	} else {
-		writeSignEmptyNBT(&buf, "front_text")
-		writeSignTextNBT(&buf, "back_text", lines)
+		writeSignEmptyNBT(&buf, "front_text", frontGlowing, frontColor)
+		writeSignTextNBT(&buf, "back_text", lines, backGlowing, backColor)
 	}
 	buf.WriteByte(0x00) // TAG_End
 	return buf.Bytes()
 }
 
-func writeSignTextNBT(buf *bytes.Buffer, key string, lines [4]string) {
+// buildSignNBT is a convenience wrapper that builds sign NBT with no color or glowing.
+func buildSignNBT(lines [4]string, isFront bool) []byte {
+	return buildSignNBTFull(lines, isFront, false, false, "", "")
+}
+
+func writeSignTextNBT(buf *bytes.Buffer, key string, lines [4]string, glowing bool, color string) {
 	// Write a compound entry named key.
 	buf.WriteByte(0x0A) // TAG_Compound
 	writeNBTKey(buf, key)
@@ -106,15 +129,27 @@ func writeSignTextNBT(buf *bytes.Buffer, key string, lines [4]string) {
 		buf.WriteString(component)
 	}
 
-	// "has_glowing_text" TAG_Byte = 0
+	// "has_glowing_text" TAG_Byte
 	buf.WriteByte(0x01) // TAG_Byte
 	writeNBTKey(buf, "has_glowing_text")
-	buf.WriteByte(0x00)
+	if glowing {
+		buf.WriteByte(0x01)
+	} else {
+		buf.WriteByte(0x00)
+	}
+
+	// "color" TAG_String (only written when non-default)
+	if color != "" {
+		buf.WriteByte(0x08) // TAG_String
+		writeNBTKey(buf, "color")
+		binary.Write(buf, binary.BigEndian, uint16(len(color))) //nolint:errcheck
+		buf.WriteString(color)
+	}
 
 	buf.WriteByte(0x00) // TAG_End closes the compound
 }
 
-func writeSignEmptyNBT(buf *bytes.Buffer, key string) {
+func writeSignEmptyNBT(buf *bytes.Buffer, key string, glowing bool, color string) {
 	buf.WriteByte(0x0A) // TAG_Compound
 	writeNBTKey(buf, key)
 
@@ -131,7 +166,18 @@ func writeSignEmptyNBT(buf *bytes.Buffer, key string) {
 
 	buf.WriteByte(0x01)
 	writeNBTKey(buf, "has_glowing_text")
-	buf.WriteByte(0x00)
+	if glowing {
+		buf.WriteByte(0x01)
+	} else {
+		buf.WriteByte(0x00)
+	}
+
+	if color != "" {
+		buf.WriteByte(0x08)
+		writeNBTKey(buf, "color")
+		binary.Write(buf, binary.BigEndian, uint16(len(color))) //nolint:errcheck
+		buf.WriteString(color)
+	}
 
 	buf.WriteByte(0x00)
 }
@@ -139,6 +185,64 @@ func writeSignEmptyNBT(buf *bytes.Buffer, key string) {
 func writeNBTKey(buf *bytes.Buffer, key string) {
 	binary.Write(buf, binary.BigEndian, uint16(len(key))) //nolint:errcheck
 	buf.WriteString(key)
+}
+
+// BuildSignNBTFromState builds the full sign NBT from a SignState (both faces).
+// Exported for use by Bedrock sign interactions.
+func BuildSignNBTFromState(state coreworld.SignState) []byte {
+	return buildSignNBTFromState(state)
+}
+
+func buildSignNBTFromState(state coreworld.SignState) []byte {
+	var buf bytes.Buffer
+	buf.WriteByte(0x0A) // root TAG_Compound
+	writeSignTextNBT(&buf, "front_text", state.FrontLines, state.FrontGlowing, state.FrontColor)
+	writeSignTextNBT(&buf, "back_text", state.BackLines, state.BackGlowing, state.BackColor)
+	buf.WriteByte(0x00) // TAG_End
+	return buf.Bytes()
+}
+
+// SignDyeColor maps a dye item ID to the vanilla sign color name.
+// Returns "" when the item is not a dye.
+func SignDyeColor(itemID string) string { return signDyeColor(itemID) }
+
+func signDyeColor(itemID string) string {
+	switch itemID {
+	case "minecraft:black_dye":
+		return "black"
+	case "minecraft:red_dye":
+		return "dark_red"
+	case "minecraft:green_dye":
+		return "dark_green"
+	case "minecraft:brown_dye":
+		return "dark_gray"
+	case "minecraft:blue_dye":
+		return "dark_blue"
+	case "minecraft:purple_dye":
+		return "dark_purple"
+	case "minecraft:cyan_dye":
+		return "dark_aqua"
+	case "minecraft:light_gray_dye":
+		return "gray"
+	case "minecraft:gray_dye":
+		return "dark_gray"
+	case "minecraft:pink_dye":
+		return "light_purple"
+	case "minecraft:lime_dye":
+		return "green"
+	case "minecraft:yellow_dye":
+		return "yellow"
+	case "minecraft:light_blue_dye":
+		return "aqua"
+	case "minecraft:magenta_dye":
+		return "light_purple"
+	case "minecraft:orange_dye":
+		return "gold"
+	case "minecraft:white_dye":
+		return "white"
+	default:
+		return ""
+	}
 }
 
 // escapeJSONString escapes special characters for embedding in a JSON string.
