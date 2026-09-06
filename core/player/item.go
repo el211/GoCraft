@@ -1,6 +1,10 @@
 package player
 
-import "GoCraft/core/itemregistry"
+import (
+	"encoding/json"
+
+	"GoCraft/core/itemregistry"
+)
 
 // InventorySize is the total number of slots in a Java Edition player inventory.
 //
@@ -159,6 +163,29 @@ func MaxStackSize(itemID string) int {
 }
 
 // RemainingDurability returns remaining uses, or zero for non-damageable items.
+// DisplayName returns the plain-text custom name stored in the
+// minecraft:custom_name component, or "" when the stack has no custom name.
+// It handles both raw strings and JSON text-component objects.
+func (s ItemStack) DisplayName() string {
+	var raw json.RawMessage
+	if !s.Component("minecraft:custom_name", &raw) {
+		return ""
+	}
+	// Try plain string first.
+	var str string
+	if json.Unmarshal(raw, &str) == nil {
+		return str
+	}
+	// Try {"text":"..."} text component.
+	var obj struct {
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(raw, &obj) == nil {
+		return obj.Text
+	}
+	return ""
+}
+
 func (s ItemStack) RemainingDurability() int {
 	max := MaxDurability(s.ItemID)
 	if max == 0 {

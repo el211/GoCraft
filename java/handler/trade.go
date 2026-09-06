@@ -192,6 +192,28 @@ func handleInteractPacket(pkt *protocol.Packet, p *player.Player, w *coreworld.W
 	if !ok {
 		return nil
 	}
+	// Name tag: applying a name tag to any entity sets its custom name.
+	if mainHand && p.HeldItem().ItemID == "minecraft:name_tag" &&
+		p.GameMode != player.GameModeSpectator {
+		nameTag := p.HeldItem()
+		name := nameTag.DisplayName()
+		if name != "" {
+			entity.DisplayName = name
+			entity.CustomNameVisible = true
+			BroadcastMobMetadata(entity, mgr)
+			if p.GameMode != player.GameModeCreative {
+				slot := player.HotbarStart + p.HeldSlot
+				p.Inventory[slot].Count--
+				normalizeStack(&p.Inventory[slot])
+				if conn != nil {
+					_ = SyncPlayerInventory(conn, p)
+				} else {
+					p.ContainerStateID++
+				}
+			}
+			return nil
+		}
+	}
 	if (corentity.IsAgeableAnimal(entity.Type) || corentity.IsTameableAnimal(entity.Type) || corentity.IsAnimalVehicle(entity.Type)) && len(buses) > 0 && buses[0] != nil {
 		buses[0].PostEntityInteract(intent.EntityInteractIntent{
 			PlayerUUID: p.UUID,

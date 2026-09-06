@@ -237,6 +237,11 @@ type Entity struct {
 	FallingBlockStateID int32
 	FallingBlockName    string
 
+	// DisplayName is the custom name set by a name tag. "" means no custom name.
+	// CustomNameVisible controls whether the name floats above the entity.
+	DisplayName       string
+	CustomNameVisible bool
+
 	// Enderman fields - only used when type == TypeEnderman
 	// EndermanCarriedBlock is the canonical resource location of the block
 	// an enderman is holding, or "" when empty. Adapters resolve their own IDs.

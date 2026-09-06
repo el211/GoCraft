@@ -125,6 +125,18 @@ func buildMobMetadata(e *corentity.Entity) *protocol.Packet {
 	}
 	b := protocol.NewBuilder(packetIDSetEntityData).VarInt(e.EntityID)
 	hasMetadata := false
+	if e.DisplayName != "" {
+		// Index 2: CUSTOM_NAME — Optional Text Component (type 5).
+		// Encoded as: present=true (0x01) + JSON string.
+		nameJSON := `{"text":"` + e.DisplayName + `"}`
+		b = b.Byte(2).VarInt(5).Bool(true).String(nameJSON)
+		hasMetadata = true
+	}
+	if e.CustomNameVisible {
+		// Index 3: CUSTOM_NAME_VISIBLE — Boolean (type 8).
+		b = b.Byte(3).VarInt(8).Bool(true)
+		hasMetadata = true
+	}
 	if e.FireTicks > 0 {
 		b = b.Byte(0).VarInt(0).Byte(0x01)
 		hasMetadata = true
