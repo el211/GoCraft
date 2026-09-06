@@ -62,6 +62,19 @@ func buildSpawnPlayer(p *player.Player) *protocol.Packet {
 		Build()
 }
 
+// buildPlayerSharedFlagsPkt builds a Set Entity Data packet that sets the
+// shared flags byte (index 0) for a player entity. flags bits: 0x01=on fire,
+// 0x40=glowing outline.
+func buildPlayerSharedFlagsPkt(entityID int32, flags byte) *protocol.Packet {
+	return protocol.NewBuilder(packetIDSetEntityData).
+		VarInt(entityID).
+		Byte(0).
+		VarInt(0).
+		Byte(flags).
+		Byte(0xff).
+		Build()
+}
+
 // buildRemoveEntities builds a Remove Entities packet for a single entity ID.
 func buildRemoveEntities(entityID int32) *protocol.Packet {
 	return protocol.NewBuilder(packetIDRemoveEntities).
@@ -135,6 +148,10 @@ func spawnExistingPlayersFor(conn *network.ClientConn, mgr *session.Manager, joi
 	for _, s := range mgr.Snapshot(joinerUUID) {
 		_ = conn.WritePacket(buildPlayerInfoUpdatePkt(s.Player))
 		_ = conn.WritePacket(buildSpawnPlayer(s.Player))
+		if flags := PlayerSharedFlags(s.Player); flags != 0 {
+			pkt := buildPlayerSharedFlagsPkt(s.Player.EntityID, flags)
+			_ = conn.WritePacket(pkt)
+		}
 	}
 }
 
@@ -155,9 +172,16 @@ func onPlayerJoin(mgr *session.Manager, joining *session.Session, mobs []*corent
 	// Step 3 — tell everyone else about the joining player.
 	infoUpdate := buildPlayerInfoUpdatePkt(joining.Player)
 	spawnPkt := buildSpawnPlayer(joining.Player)
+	var flagsPkt *protocol.Packet
+	if flags := PlayerSharedFlags(joining.Player); flags != 0 {
+		flagsPkt = buildPlayerSharedFlagsPkt(joining.Player.EntityID, flags)
+	}
 	for _, existing := range mgr.Snapshot(joining.Player.UUID) {
 		_ = existing.Conn.WritePacket(infoUpdate)
 		_ = existing.Conn.WritePacket(spawnPkt)
+		if flagsPkt != nil {
+			_ = existing.Conn.WritePacket(flagsPkt)
+		}
 	}
 }
 

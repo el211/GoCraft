@@ -247,7 +247,7 @@ func (w *World) discoverLoadedVillagePopulation(chunk *Chunk) {
 		villager.VillageBed = resident.bed
 		villager.VillageWorkstation = resident.workstation
 		villager.HasVillageWorkstation = resident.profession != entity.VillagerProfessionNone && resident.workstation != (spatial.BlockPos{})
-		villager.OnGround = true
+		villager.OnGround = false
 		// Spawn 1 baby for every 4 adults — gives the village a lived-in feel.
 		if i%4 == 3 {
 			villager.IsBaby = true
@@ -269,7 +269,7 @@ func (w *World) discoverLoadedVillagePopulation(chunk *Chunk) {
 		golem.HasVillageHome = true
 		golem.VillageHome = center
 		golem.VillageCenter = center
-		golem.OnGround = true
+		golem.OnGround = false
 		w.addGeneratedVillageEntity(golem)
 		debuglog.Info(debuglog.MobSpawning, "village guard discovered and spawned", "id", id, "x", spawn.X, "y", spawn.Y, "z", spawn.Z)
 	}

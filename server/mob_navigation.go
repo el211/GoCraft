@@ -127,7 +127,7 @@ func (s *Server) tickPassiveIdleGoals(e *corentity.Entity, ai *mobAI) {
 	ai.wanderTick--
 	if ai.wanderTick <= 0 {
 		ai.wanderTick = 2
-		if ai.rng.Intn(600) == 0 {
+		if ai.rng.Intn(60) == 0 {
 			ai.wanderTarget = spatial.Vec3{
 				X: e.Position.X + ai.rng.Float64()*20 - 10,
 				Y: e.Position.Y + ai.rng.Float64()*14 - 7,
@@ -231,7 +231,7 @@ func (s *Server) tickHostileIdleGoals(e *corentity.Entity, ai *mobAI) {
 	ai.wanderTick--
 	if ai.wanderTick <= 0 {
 		ai.wanderTick = 2
-		if ai.rng.Intn(600) == 0 {
+		if ai.rng.Intn(60) == 0 {
 			ai.wanderTarget = spatial.Vec3{
 				X: e.Position.X + ai.rng.Float64()*20 - 10,
 				Y: e.Position.Y + ai.rng.Float64()*14 - 7,

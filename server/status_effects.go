@@ -37,12 +37,19 @@ func (s *Server) tickPlayerStatusEffects() {
 			_ = handler.SyncPlayerHealth(target.Conn, p)
 		}
 
+		glowingExpired := false
 		for _, expired := range tick.Expired {
 			if p.Edition == player.ClientEditionJava {
 				handler.RemoveMobEffect(target.Conn, p, expired.ID)
 			} else if s.bedrockListener != nil {
 				s.bedrockListener.RemovePlayerMobEffect(p, bedrockEffectType(expired.ID))
 			}
+			if expired.ID == "minecraft:glowing" {
+				glowingExpired = true
+			}
+		}
+		if glowingExpired && p.Edition == player.ClientEditionJava && s.sessions != nil {
+			handler.BroadcastPlayerSharedFlags(p.EntityID, handler.PlayerSharedFlags(p), s.sessions)
 		}
 	})
 }

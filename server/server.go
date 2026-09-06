@@ -2590,11 +2590,21 @@ func (s *Server) applyBedrockConsumableEffects(p *player.Player, stack player.It
 		}
 		effects = append(effects, potion.Effects...)
 	}
+	glowingApplied := false
 	for _, effect := range effects {
 		stored, changed := p.AddStatusEffect(effect)
-		if effectType := bedrockEffectType(stored.ID); changed && effectType != 0 && s.bedrockListener != nil {
+		if !changed {
+			continue
+		}
+		if effectType := bedrockEffectType(stored.ID); effectType != 0 && s.bedrockListener != nil {
 			s.bedrockListener.SendPlayerMobEffect(p, effectType, stored.Amplifier, stored.Duration)
 		}
+		if stored.ID == "minecraft:glowing" && p.Edition == player.ClientEditionJava {
+			glowingApplied = true
+		}
+	}
+	if glowingApplied && s.sessions != nil {
+		handler.BroadcastPlayerSharedFlags(p.EntityID, handler.PlayerSharedFlags(p), s.sessions)
 	}
 }
 

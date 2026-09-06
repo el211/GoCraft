@@ -43,6 +43,7 @@ func (s *Server) applyPotionOutcome(target *session.Session, outcome player.Poti
 	if outcome.Damage > 0 {
 		handler.DamagePlayerMagic(target, outcome.Damage*float32(potencyScale), "was killed by magic", s.sessions)
 	}
+	glowingChanged := false
 	for _, effect := range outcome.Effects {
 		effect.Duration = int32(float64(effect.Duration) * durationScale)
 		if effect.Duration < 20 {
@@ -54,9 +55,15 @@ func (s *Server) applyPotionOutcome(target *session.Session, outcome player.Poti
 		}
 		if p.Edition == player.ClientEditionJava {
 			handler.SendMobEffect(target.Conn, p, stored.ID, stored.Amplifier, stored.Duration)
+			if stored.ID == "minecraft:glowing" {
+				glowingChanged = true
+			}
 		} else if effectType := bedrockEffectType(stored.ID); effectType != 0 && s.bedrockListener != nil {
 			s.bedrockListener.SendPlayerMobEffect(p, effectType, stored.Amplifier, stored.Duration)
 		}
+	}
+	if glowingChanged && s.sessions != nil {
+		handler.BroadcastPlayerSharedFlags(p.EntityID, handler.PlayerSharedFlags(p), s.sessions)
 	}
 	if healthChanged && p.Edition == player.ClientEditionJava {
 		_ = handler.SyncPlayerHealth(target.Conn, p)

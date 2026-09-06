@@ -387,6 +387,35 @@ func BroadcastMobMetadataInDimension(e *corentity.Entity, mgr *session.Manager, 
 	}()
 }
 
+// PlayerSharedFlags computes the shared entity flags byte for a player.
+// Bit 0x40 = Glowing effect active (visible outline through walls).
+func PlayerSharedFlags(p *player.Player) byte {
+	flags := byte(0)
+	if _, ok := p.StatusEffect("minecraft:glowing"); ok {
+		flags |= 0x40
+	}
+	return flags
+}
+
+// BroadcastPlayerSharedFlags sends the shared entity flags byte (metadata
+// index 0) for a player entity to all connected sessions. Call whenever fire
+// or Glowing effect state changes so other players see the updated outline.
+func BroadcastPlayerSharedFlags(entityID int32, flags byte, mgr *session.Manager) {
+	if mgr == nil {
+		return
+	}
+	pkt := protocol.NewBuilder(packetIDSetEntityData).
+		VarInt(entityID).
+		Byte(0).
+		VarInt(0).
+		Byte(flags).
+		Byte(0xff).
+		Build()
+	for _, s := range mgr.SnapshotAll() {
+		_ = s.Conn.WritePacket(pkt)
+	}
+}
+
 // BroadcastMobFireState updates the shared entity flags even when fire was
 // extinguished. buildMobMetadata intentionally omits default metadata for most
 // hostiles, so the explicit zero flag is required to clear the flame renderer.
