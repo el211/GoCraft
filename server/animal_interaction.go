@@ -144,6 +144,34 @@ func (s *Server) interactAnimal(p *player.Player, e *corentity.Entity) bool {
 		return true
 	}
 
+	// Shear a mooshroom: drops 5 mushrooms and converts to a plain cow.
+	if item == "minecraft:shears" && e.Type == corentity.TypeMooshroom && !e.IsBaby {
+		mushroom := "minecraft:red_mushroom"
+		if e.WoolColor == "brown" {
+			mushroom = "minecraft:brown_mushroom"
+		}
+		drop := player.ItemStack{ItemID: mushroom, Count: 5}
+		if !p.GiveItem(drop) {
+			s.newDroppedItemForPlayer(p, drop, e.Position, 0)
+		}
+		// Convert mooshroom to a plain cow.
+		world := s.worldForPlayer(p)
+		world.Entities.Remove(e.EntityID)
+		handler.BroadcastRemoveEntity(e.EntityID, s.sessions)
+		if s.game != nil {
+			cow := corentity.New(s.game.NextEntityID(), newRandomUUID(), corentity.TypeCow,
+				e.Position.X, e.Position.Y, e.Position.Z)
+			cow.Health = e.Health
+			cow.MaxHealth = e.MaxHealth
+			cow.IsBaby = e.IsBaby
+			cow.OnGround = e.OnGround
+			world.Entities.Add(cow)
+			handler.BroadcastSpawnMob(cow, s.sessions)
+		}
+		s.damageBedrockHeldItem(p, 1)
+		return true
+	}
+
 	// Dye a sheep: applies the dye colour and consumes one dye.
 	if e.Type == corentity.TypeSheep {
 		if color := sheepDyeColor(item); color != "" {
